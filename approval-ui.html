@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="承認パネル" />
+    <title>エージェント承認パネル</title>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: #f2f2f7;
+        min-height: 100vh;
+      }
+      .wrap {
+        max-width: 480px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+      .page-title {
+        font-size: 20px;
+        font-weight: 700;
+        color: #1c1c1e;
+        margin-bottom: 4px;
+        padding-top: 8px;
+      }
+      .page-sub {
+        font-size: 13px;
+        color: #8e8e93;
+        margin-bottom: 20px;
+      }
+
+      /* 接続設定 */
+      .card {
+        background: #fff;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 14px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      }
+      .card-title {
+        font-size: 14px;
+        font-weight: 600;
+        color: #1c1c1e;
+        margin-bottom: 14px;
+      }
+      label {
+        font-size: 13px;
+        color: #8e8e93;
+        display: block;
+        margin-bottom: 4px;
+      }
+      input[type='text'],
+      input[type='password'] {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid #d1d1d6;
+        font-size: 14px;
+        margin-bottom: 10px;
+        background: #fff;
+        color: #1c1c1e;
+        outline: none;
+      }
+      input:focus {
+        border-color: #007aff;
+      }
+      .btn-primary {
+        width: 100%;
+        padding: 12px;
+        border-radius: 10px;
+        background: #007aff;
+        color: #fff;
+        border: none;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn-primary:active {
+        background: #0062cc;
+      }
+
+      /* ヘッダー行 */
+      .top-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      .badge-online {
+        display: inline-block;
+        background: #d1f0d8;
+        color: #1a7f37;
+        border-radius: 20px;
+        padding: 3px 10px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .btn-disconnect {
+        background: none;
+        border: none;
+        color: #ff3b30;
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      /* 一括承認ボタン */
+      .btn-bulk {
+        width: 100%;
+        padding: 14px;
+        border-radius: 10px;
+        background: #34c759;
+        color: #fff;
+        border: none;
+        font-size: 17px;
+        font-weight: 700;
+        cursor: pointer;
+        margin-bottom: 8px;
+      }
+      .btn-bulk:active {
+        background: #28a745;
+      }
+      .btn-bulk:disabled {
+        background: #8e8e93;
+        cursor: default;
+      }
+
+      /* 取得ボタン */
+      .btn-fetch {
+        width: 100%;
+        padding: 12px;
+        border-radius: 10px;
+        background: #007aff;
+        color: #fff;
+        border: none;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        margin-bottom: 16px;
+      }
+      .btn-fetch:active {
+        background: #0062cc;
+      }
+      .btn-fetch:disabled {
+        background: #8e8e93;
+      }
+      .last-fetch {
+        font-size: 12px;
+        color: #8e8e93;
+        text-align: center;
+        margin-bottom: 12px;
+      }
+      .err {
+        color: #ff3b30;
+        font-size: 13px;
+        margin-top: 8px;
+      }
+
+      /* セクションラベル */
+      .section-label {
+        font-size: 15px;
+        font-weight: 600;
+        color: #1c1c1e;
+        margin-bottom: 10px;
+      }
+      .badge-cnt {
+        display: inline-block;
+        background: #ff3b30;
+        color: #fff;
+        border-radius: 20px;
+        padding: 1px 8px;
+        font-size: 12px;
+        margin-left: 6px;
+      }
+
+      /* 依頼カード */
+      .req-card {
+        background: #fff;
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+        border-left: 4px solid #ff9f0a;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        cursor: pointer;
+        user-select: none;
+        transition: box-shadow 0.15s;
+      }
+      .req-card.selected {
+        border-left-color: #007aff;
+        box-shadow: 0 2px 8px rgba(0, 122, 255, 0.18);
+      }
+      .req-card:active {
+        opacity: 0.85;
+      }
+      .req-time {
+        font-size: 12px;
+        color: #8e8e93;
+        margin-bottom: 4px;
+      }
+      .req-desc {
+        font-size: 15px;
+        font-weight: 600;
+        color: #1c1c1e;
+        line-height: 1.5;
+        word-break: break-all;
+      }
+      .req-desc-short {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* アクションボタンエリア（選択時に展開） */
+      .btn-area {
+        margin-top: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .btn-option {
+        width: 100%;
+        padding: 12px;
+        border-radius: 10px;
+        border: none;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .btn-option:active {
+        opacity: 0.7;
+      }
+      .btn-option:disabled {
+        opacity: 0.4;
+      }
+      .btn-yes {
+        background: #34c759;
+        color: #fff;
+      }
+      .btn-no {
+        background: #ff3b30;
+        color: #fff;
+      }
+      .btn-other {
+        background: #007aff;
+        color: #fff;
+      }
+
+      /* 空状態 */
+      .empty {
+        text-align: center;
+        color: #8e8e93;
+        font-size: 14px;
+        padding: 2rem 0;
+        line-height: 1.8;
+      }
+
+      /* 履歴 */
+      .hist-card {
+        background: #fff;
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin-bottom: 8px;
+        opacity: 0.75;
+      }
+      .hist-label {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .hist-desc {
+        font-size: 13px;
+        color: #8e8e93;
+        margin-top: 2px;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <p class="page-title">🤖 承認パネル</p>
+      <p class="page-sub">PCエージェントからの操作を承認・拒否します</p>
+
+      <!-- 接続設定 -->
+      <div id="setup-view">
+        <div class="card">
+          <p class="card-title">サーバー接続設定</p>
+          <label>ngrok URL</label>
+          <input
+            type="text"
+            id="inp-url"
+            placeholder="https://xxxx.ngrok-free.app"
+            autocapitalize="none"
+            autocorrect="off"
+          />
+          <label>SECRET_TOKEN</label>
+          <input type="password" id="inp-token" placeholder="APPROVAL_TOKEN の値" />
+          <button class="btn-primary" id="btn-connect">接続する</button>
+          <p class="err" id="setup-err"></p>
+        </div>
+      </div>
+
+      <!-- メイン画面 -->
+      <div id="main-view" style="display: none">
+        <div class="top-row">
+          <span class="badge-online">● 接続済み</span>
+          <button class="btn-disconnect" id="btn-disconnect">切断</button>
+        </div>
+
+        <!-- 一括承認ボタン -->
+        <button class="btn-bulk" id="btn-bulk-approve" disabled>すべて承認</button>
+
+        <!-- 取得ボタン -->
+        <button class="btn-fetch" id="btn-fetch">📥 承認依頼を取得</button>
+        <p class="last-fetch" id="last-fetch"></p>
+        <p class="err" id="main-err"></p>
+
+        <!-- 承認待ち一覧 -->
+        <p class="section-label">
+          承認待ち
+          <span id="cnt-badge" class="badge-cnt" style="display: none"></span>
+        </p>
+        <div id="queue-list"></div>
+
+        <!-- 処理履歴 -->
+        <div id="hist-section" style="display: none; margin-top: 1.5rem">
+          <p class="section-label">処理履歴</p>
+          <div id="hist-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let serverUrl = ''
+      let token = ''
+      let history = []
+      let selectedId = null // 選択中の依頼ID
+
+      // 設定の保存・読み込み
+      function saveSettings() {
+        localStorage.setItem('approval_url', serverUrl)
+        localStorage.setItem('approval_token', token)
+      }
+      function loadSettings() {
+        const url = localStorage.getItem('approval_url') || ''
+        const tok = localStorage.getItem('approval_token') || ''
+        if (url) document.getElementById('inp-url').value = url
+        if (tok) document.getElementById('inp-token').value = tok
+      }
+      loadSettings()
+
+      function fmt(iso) {
+        return new Date(iso).toLocaleTimeString('ja-JP', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      }
+
+      async function apiFetch(path, options = {}) {
+        const headers = {
+          'x-secret-token': token,
+          'ngrok-skip-browser-warning': '1',
+          ...(options.headers || {}),
+        }
+        const res = await fetch(serverUrl + path, { ...options, headers })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json()
+      }
+
+      // 接続
+      document.getElementById('btn-connect').addEventListener('click', async () => {
+        const url = document.getElementById('inp-url').value.trim().replace(/\/$/, '')
+        const tok = document.getElementById('inp-token').value.trim()
+        const errEl = document.getElementById('setup-err')
+        errEl.textContent = ''
+        if (!url || !tok) {
+          errEl.textContent = 'URLとトークンを両方入力してください'
+          return
+        }
+        serverUrl = url
+        token = tok
+        try {
+          await apiFetch('/queue')
+          saveSettings()
+          document.getElementById('setup-view').style.display = 'none'
+          document.getElementById('main-view').style.display = 'block'
+          document.getElementById('queue-list').innerHTML =
+            '<p class="empty">「承認依頼を取得」を押してください</p>'
+        } catch (e) {
+          serverUrl = ''
+          token = ''
+          errEl.textContent = `接続失敗: ${e.message}`
+        }
+      })
+
+      // 切断
+      document.getElementById('btn-disconnect').addEventListener('click', () => {
+        serverUrl = ''
+        token = ''
+        selectedId = null
+        document.getElementById('main-view').style.display = 'none'
+        document.getElementById('setup-view').style.display = 'block'
+      })
+
+      // 取得ボタン
+      document.getElementById('btn-fetch').addEventListener('click', async () => {
+        const btn = document.getElementById('btn-fetch')
+        btn.disabled = true
+        btn.textContent = '取得中…'
+        await fetchQueue()
+        btn.disabled = false
+        btn.textContent = '📥 承認依頼を取得'
+      })
+
+      async function fetchQueue() {
+        try {
+          const data = await apiFetch('/queue')
+          renderQueue(data)
+          document.getElementById('main-err').textContent = ''
+          document.getElementById('last-fetch').textContent =
+            `最終取得: ${fmt(new Date().toISOString())}`
+        } catch (e) {
+          document.getElementById('main-err').textContent = `通信エラー: ${e.message}`
+        }
+      }
+
+      // ボタンのCSSクラスを決定
+      function btnClass(opt, allOptions) {
+        const o = opt.toLowerCase()
+        if (o === 'no' || o === 'rejected' || o === 'deny' || o === 'cancel')
+          return 'btn-option btn-no'
+        if (o === 'yes' || o === 'approved' || o === 'allow') return 'btn-option btn-yes'
+        // 最後の選択肢はNO扱い
+        if (allOptions.indexOf(opt) === allOptions.length - 1) return 'btn-option btn-no'
+        return 'btn-option btn-other'
+      }
+
+      // キュー描画
+      function renderQueue(items) {
+        const el = document.getElementById('queue-list')
+        const badge = document.getElementById('cnt-badge')
+        const bulkBtn = document.getElementById('btn-bulk-approve')
+
+        if (items.length === 0) {
+          el.innerHTML = '<p class="empty">承認待ちの依頼はありません</p>'
+          badge.style.display = 'none'
+          bulkBtn.disabled = true
+          bulkBtn.textContent = 'すべて承認'
+          selectedId = null
+          return
+        }
+
+        badge.textContent = items.length
+        badge.style.display = 'inline-block'
+        bulkBtn.disabled = false
+        bulkBtn.textContent = `すべて承認（${items.length}件）`
+
+        // 選択中IDが一覧にない場合はリセット
+        if (selectedId && !items.find((i) => i.id === selectedId)) selectedId = null
+
+        el.innerHTML = ''
+        items.forEach((item) => {
+          const div = document.createElement('div')
+          const isSelected = item.id === selectedId
+          div.className = 'req-card' + (isSelected ? ' selected' : '')
+          div.dataset.id = item.id
+
+          const btnHtml = isSelected
+            ? `<div class="btn-area">${item.options
+                .map(
+                  (opt) =>
+                    `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-answer="${opt}">${opt}</button>`
+                )
+                .join('')}</div>`
+            : ''
+
+          div.innerHTML = `
+      <p class="req-time">${fmt(item.createdAt)}</p>
+      <p class="req-desc${isSelected ? '' : ' req-desc-short'}">${escHtml(item.description)}</p>
+      ${btnHtml}`
+
+          el.appendChild(div)
+        })
+      }
+
+      function escHtml(str) {
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      }
+
+      // カードのタップ → 選択・選択解除
+      document.getElementById('queue-list').addEventListener('click', async (e) => {
+        // アクションボタンのタップ
+        const btn = e.target.closest('button[data-id]')
+        if (btn) {
+          await resolveItem(btn.dataset.id, btn.dataset.answer, btn.closest('.btn-area'))
+          return
+        }
+        // カードのタップ（選択トグル）
+        const card = e.target.closest('.req-card')
+        if (card) {
+          selectedId = selectedId === card.dataset.id ? null : card.dataset.id
+          // 再描画のためキューを再取得
+          await fetchQueue()
+        }
+      })
+
+      // 一括承認
+      document.getElementById('btn-bulk-approve').addEventListener('click', async () => {
+        const btn = document.getElementById('btn-bulk-approve')
+        btn.disabled = true
+        btn.textContent = '処理中…'
+        try {
+          const items = await apiFetch('/queue')
+          for (const item of items) {
+            await resolveItem(item.id, 'Yes', null, true)
+          }
+        } catch (e) {
+          document.getElementById('main-err').textContent = `一括承認エラー: ${e.message}`
+        }
+        await fetchQueue()
+      })
+
+      // 個別解決
+      async function resolveItem(id, answer, btnArea, isBulk = false) {
+        if (btnArea) btnArea.querySelectorAll('button').forEach((b) => (b.disabled = true))
+        try {
+          await apiFetch(`/resolve/${id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ answer }),
+          })
+          history.unshift({
+            description: getDescription(id),
+            answer,
+            resolvedAt: new Date().toISOString(),
+          })
+          if (history.length > 20) history.pop()
+          renderHistory()
+          if (!isBulk) {
+            selectedId = null
+            await fetchQueue()
+          }
+        } catch (e) {
+          document.getElementById('main-err').textContent = `操作失敗: ${e.message}`
+          if (btnArea) btnArea.querySelectorAll('button').forEach((b) => (b.disabled = false))
+        }
+      }
+
+      function getDescription(id) {
+        const card = document.querySelector(`.req-card[data-id="${id}"]`)
+        return card ? card.querySelector('.req-desc').textContent : id
+      }
+
+      // 履歴描画
+      function renderHistory() {
+        const sec = document.getElementById('hist-section')
+        const el = document.getElementById('hist-list')
+        if (history.length === 0) {
+          sec.style.display = 'none'
+          return
+        }
+        sec.style.display = 'block'
+        el.innerHTML = ''
+        history.forEach((item) => {
+          const div = document.createElement('div')
+          div.className = 'hist-card'
+          const a = item.answer.toLowerCase()
+          const isNo = a === 'no' || a === 'rejected' || a === 'deny' || a === 'cancel'
+          const color = isNo ? '#cc2a22' : '#1a7f37'
+          div.innerHTML = `
+      <p class="hist-label" style="color:${color}">${escHtml(item.answer)} <span style="color:#8e8e93;font-weight:400;font-size:12px;">${fmt(item.resolvedAt)}</span></p>
+      <p class="hist-desc">${escHtml(item.description)}</p>`
+          el.appendChild(div)
+        })
+      }
+    </script>
+  </body>
+</html>
