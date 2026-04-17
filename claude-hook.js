@@ -90,8 +90,11 @@ process.stdin.on('end', async () => {
     process.exit(0)
   }
 
+  // プロジェクト名（cwdの末尾フォルダ名）を取得
+  const projectName = path.basename(process.cwd())
+
   // 説明文を作成
-  let description = `[${toolName}]`
+  let description = `[${projectName}][${toolName}]`
   if (toolInput.command) {
     description += ` ${toolInput.command}`
   } else if (toolInput.file_path) {
