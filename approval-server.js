@@ -10,6 +10,7 @@
  *   # 別ターミナルで: ngrok http 3000
  */
 
+const http = require('http')
 const express = require('express')
 const cors = require('cors')
 const crypto = require('crypto')
@@ -122,7 +123,20 @@ app.post('/resolve/:id', authenticate, (req, res) => {
 // -------------------------------------------------------
 // サーバー起動
 // -------------------------------------------------------
-app.listen(PORT, () => {
+const server = http.createServer(app)
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n❌ ポート ${PORT} は既に使用中です。`)
+    console.error(`   他のターミナルで approval-server.js が起動済みでないか確認してください。`)
+    console.error(`   または: APPROVAL_PORT=3001 node approval-server.js\n`)
+  } else {
+    console.error(`\n❌ サーバー起動エラー: ${err.message}\n`)
+  }
+  process.exit(1)
+})
+
+server.listen(PORT, () => {
   console.log(`\n✅ Approval server running on http://localhost:${PORT}`)
   console.log(`\n🔑 SECRET_TOKEN: ${SECRET_TOKEN}`)
   console.log(`   (スマホUIとエージェントコードにこのトークンを設定してください)\n`)
