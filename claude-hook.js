@@ -110,9 +110,11 @@ process.stdin.on('end', async () => {
     log('sending request: ' + description + ' token:' + SECRET_TOKEN.slice(0, 8))
     requestId = await postRequest('/request', body)
   } catch (e) {
-    process.stderr.write(`approval-server接続失敗: ${e.message}\n`)
+    process.stderr.write(`approval-server接続失敗（スルー）: ${e.message}\n`)
     process.exit(0)
   }
+
+  process.stderr.write(`\n[承認依頼] ${description}\n→ PC: http://localhost:3000 またはスマホから承認してください\n\n`)
 
   // スマホで承認されるまでポーリング
   const startTime = Date.now()

@@ -62,8 +62,9 @@ app.post('/request', authenticate, (req, res) => {
     id: crypto.randomUUID(),
     description,
     options: options || ['Yes', 'No'],
-    status: 'pending', // pending | approved | rejected
+    status: 'pending', // pending | resolved
     answer: null,
+    resolvedBy: null, // 'pc' | 'smartphone'
     createdAt: new Date().toISOString(),
     resolvedAt: null,
   }
@@ -101,7 +102,7 @@ app.get('/queue', authenticate, (req, res) => {
  * Body: { action: "approved" | "rejected" }
  */
 app.post('/resolve/:id', authenticate, (req, res) => {
-  const { answer } = req.body
+  const { answer, resolvedBy } = req.body
   if (!answer) return res.status(400).json({ error: 'answer is required' })
 
   const item = queue.find((q) => q.id === req.params.id)
@@ -112,8 +113,9 @@ app.post('/resolve/:id', authenticate, (req, res) => {
 
   item.status = 'resolved'
   item.answer = answer
+  item.resolvedBy = resolvedBy || null
   item.resolvedAt = new Date().toISOString()
-  console.log(`[RESOLVED] ${item.id}: ${item.answer}`)
+  console.log(`[RESOLVED] ${item.id}: ${item.answer} (by ${item.resolvedBy || 'unknown'})`)
   res.json({ id: item.id, status: item.status })
 })
 

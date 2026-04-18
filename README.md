@@ -77,6 +77,9 @@ Forwarding  https://xxxx.ngrok-free.app -> http://localhost:3000
 
 ```json
 {
+  "permissions": {
+    "allow": ["*"]
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -93,16 +96,30 @@ Forwarding  https://xxxx.ngrok-free.app -> http://localhost:3000
 }
 ```
 
+**`"allow": ["*"]` について**: Claude Code 自身のターミナル承認ダイアログを無効化し、このツールを唯一の承認ゲートキーパーにします。承認はすべて Web UI（PC ブラウザまたはスマホ）を通じて行われます。承認サーバーが落ちている場合はすべてスルー（承認済み扱い）になります。
+
 `claude-hook.js` は環境変数 `APPROVAL_TOKEN` を読み取ります。
 シェルのプロファイルか Claude Code の `env` 設定でセットしてください。
 
-### 4. スマートフォンで開く
+### 4. PC ブラウザまたはスマートフォンで開く
 
-スマートフォンのブラウザで ngrok URL（例: `https://xxxx.ngrok-free.app`）を開きます。
-サーバーが `approval-ui.html` を配信するので、インストール不要です。
+承認は **PC ブラウザ** と **スマートフォン** のどちらからでも行えます。先に承認した側が有効になります。
 
-画面の指示に従い URL と `APPROVAL_TOKEN` を入力して接続します。
-設定は `localStorage` に保存されるため、次回以降は自動入力されます。
+| 端末 | URL |
+|------|-----|
+| PC ブラウザ | `http://localhost:3000` |
+| スマートフォン | `https://xxxx.ngrok-free.app`（ngrok が表示した URL） |
+
+両方とも同じ画面です。URL と `APPROVAL_TOKEN` を入力して接続します。設定は `localStorage` に保存されるため、次回以降は自動入力されます。
+
+承認依頼が届くと Claude Code のターミナルに以下のように表示されます。
+
+```
+[承認依頼] [my-project][Bash] git push origin main
+→ PC: http://localhost:3000 またはスマホから承認してください
+```
+
+承認・拒否すると履歴に「PC で承認」「スマホで承認」のいずれかが記録されます。
 
 ## 毎回の起動・停止手順
 
@@ -272,6 +289,9 @@ Adjust the path to match where you cloned the repo.
 
 ```json
 {
+  "permissions": {
+    "allow": ["*"]
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -288,15 +308,30 @@ Adjust the path to match where you cloned the repo.
 }
 ```
 
+**About `"allow": ["*"]`**: This disables Claude Code's own terminal approval dialogs and makes this tool the sole approval gatekeeper. All approvals go through the Web UI (PC browser or smartphone). If the approval server is down, all requests pass through automatically.
+
 `claude-hook.js` reads the `APPROVAL_TOKEN` environment variable.
 Set it in your shell profile or via Claude Code's `env` configuration.
 
-### 4. Open on Smartphone
+### 4. Open on PC Browser or Smartphone
 
-Open the ngrok URL (e.g. `https://xxxx.ngrok-free.app`) in your smartphone browser.
-The server serves `approval-ui.html` directly — no installation needed.
+You can approve from either your **PC browser** or **smartphone** — whichever approves first wins.
 
-Enter the URL and `APPROVAL_TOKEN` as prompted. Settings are saved to `localStorage` and auto-filled on subsequent visits.
+| Device | URL |
+|--------|-----|
+| PC browser | `http://localhost:3000` |
+| Smartphone | `https://xxxx.ngrok-free.app` (the URL shown by ngrok) |
+
+Both devices use the same UI. Enter the URL and `APPROVAL_TOKEN` to connect. Settings are saved to `localStorage` and auto-filled on subsequent visits.
+
+When an approval request arrives, the Claude Code terminal shows:
+
+```
+[承認依頼] [my-project][Bash] git push origin main
+→ PC: http://localhost:3000 またはスマホから承認してください
+```
+
+After approval, the history records whether it was "Approved by PC" or "Approved by smartphone".
 
 ## Startup and Shutdown Order
 

@@ -464,6 +464,10 @@
           emptyQueue: '承認待ちの依頼はありません',
           pending: '承認待ち',
           history: '処理履歴',
+          resolvedByPc: 'PC で承認',
+          resolvedBySmartphone: 'スマホで承認',
+          resolvedByPcDenied: 'PC で拒否',
+          resolvedBySmartphoneDenied: 'スマホで拒否',
           langToggle: 'EN',
           locale: 'ja-JP',
         },
@@ -492,6 +496,10 @@
           emptyQueue: 'No pending requests',
           pending: 'Pending',
           history: 'History',
+          resolvedByPc: 'Approved by PC',
+          resolvedBySmartphone: 'Approved by smartphone',
+          resolvedByPcDenied: 'Denied by PC',
+          resolvedBySmartphoneDenied: 'Denied by smartphone',
           langToggle: '日本語',
           locale: 'en-US',
         },
@@ -739,17 +747,21 @@
         await fetchQueue()
       })
 
+      const resolvedBy =
+        location.hostname === 'localhost' || location.hostname === '127.0.0.1' ? 'pc' : 'smartphone'
+
       async function resolveItem(id, answer, btnArea, isBulk = false) {
         if (btnArea) btnArea.querySelectorAll('button').forEach((b) => (b.disabled = true))
         try {
           await apiFetch(`/resolve/${id}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ answer }),
+            body: JSON.stringify({ answer, resolvedBy }),
           })
           history.unshift({
             description: getDescription(id),
             answer,
+            resolvedBy,
             resolvedAt: new Date().toISOString(),
           })
           if (history.length > 20) history.pop()
@@ -784,8 +796,13 @@
           const a = item.answer.toLowerCase()
           const isNo = a === 'no' || a === 'rejected' || a === 'deny' || a === 'cancel'
           const color = isNo ? '#cc2a22' : '#1a7f37'
+          const byLabel = (() => {
+            if (!item.resolvedBy) return escHtml(item.answer)
+            if (item.resolvedBy === 'pc') return t(isNo ? 'resolvedByPcDenied' : 'resolvedByPc')
+            return t(isNo ? 'resolvedBySmartphoneDenied' : 'resolvedBySmartphone')
+          })()
           div.innerHTML = `
-      <p class="hist-label" style="color:${color}">${escHtml(item.answer)} <span style="color:var(--text-secondary);font-weight:400;font-size:12px;">${fmt(item.resolvedAt)}</span></p>
+      <p class="hist-label" style="color:${color}">${byLabel} <span style="color:var(--text-secondary);font-weight:400;font-size:12px;">${fmt(item.resolvedAt)}</span></p>
       <p class="hist-desc">${escHtml(item.description)}</p>`
           el.appendChild(div)
         })
