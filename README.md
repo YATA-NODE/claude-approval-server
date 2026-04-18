@@ -128,11 +128,14 @@ ngrok http 3000
 - 日本語 / 英語 切替
 - ダーク / ライト テーマ切替
 
-## 動作確認済み環境
+## 対応プラットフォーム
 
-- Windows 11 + Node.js 22
-- Claude Code（CLI）
-- iOS Safari / Android Chrome
+| 項目 | 確認済み | 未確認 |
+|------|----------|--------|
+| OS | Windows 11 | macOS、Linux（未確認） |
+| Node.js | v22 | v18〜v21（未確認） |
+| Claude Code | CLI | — |
+| スマホブラウザ | iOS Safari、Android Chrome | その他ブラウザ（未確認） |
 
 ## ライセンス
 
@@ -273,11 +276,14 @@ The project name is automatically derived from the folder name where Claude Code
 - Japanese / English language toggle
 - Dark / Light theme toggle
 
-## Tested Environments
+## Supported Platforms
 
-- Windows 11 + Node.js 22
-- Claude Code (CLI)
-- iOS Safari / Android Chrome
+| Item | Verified | Unverified |
+|------|----------|------------|
+| OS | Windows 11 | macOS, Linux (unverified) |
+| Node.js | v22 | v18–v21 (unverified) |
+| Claude Code | CLI | — |
+| Mobile browser | iOS Safari, Android Chrome | Other browsers (unverified) |
 
 ## License
 
