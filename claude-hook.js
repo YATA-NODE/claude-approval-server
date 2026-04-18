@@ -34,7 +34,7 @@ const log = (msg) =>
   )
 
 const SECRET_TOKEN = process.env.APPROVAL_TOKEN || ''
-const SERVER_URL = 'http://localhost:3000'
+const SERVER_URL = `http://localhost:${process.env.APPROVAL_PORT || 3000}`
 const POLL_INTERVAL = 3000
 const TIMEOUT = 3600000
 

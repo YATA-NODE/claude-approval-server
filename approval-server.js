@@ -16,7 +16,7 @@ const cors = require('cors')
 const crypto = require('crypto')
 
 const app = express()
-const PORT = 3000
+const PORT = parseInt(process.env.APPROVAL_PORT) || 3000
 
 // ★ セキュリティ用トークン
 // 環境変数 APPROVAL_TOKEN を設定して固定運用推奨（未設定時は起動ごとにランダム生成）
@@ -127,9 +127,13 @@ const server = http.createServer(app)
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
+    const alt = PORT + 1
     console.error(`\n❌ ポート ${PORT} は既に使用中です。`)
     console.error(`   他のターミナルで approval-server.js が起動済みでないか確認してください。`)
-    console.error(`   または: APPROVAL_PORT=3001 node approval-server.js\n`)
+    console.error(`   別のポートで起動する場合:`)
+    console.error(`     PowerShell: $env:APPROVAL_PORT=${alt}; node approval-server.js`)
+    console.error(`     CMD:        set APPROVAL_PORT=${alt} && node approval-server.js`)
+    console.error(`     bash:       APPROVAL_PORT=${alt} node approval-server.js\n`)
   } else {
     console.error(`\n❌ サーバー起動エラー: ${err.message}\n`)
   }
