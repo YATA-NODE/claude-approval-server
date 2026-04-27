@@ -1,0 +1,5 @@
+node_modules/
+approval-config.json
+.claude/
+e2e-*.log
+inspect-*.js

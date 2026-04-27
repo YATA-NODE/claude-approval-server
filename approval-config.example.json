@@ -1,0 +1,7 @@
+{
+  "port": 3000,
+  "token": "change-me-to-a-random-string-at-least-32-bytes",
+  "dialogDetection": {
+    "triggers": ["Do you want to"]
+  }
+}
