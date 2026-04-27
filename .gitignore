@@ -1,5 +1,5 @@
 node_modules/
 approval-config.json
-.claude/
+.claude/settings.local.json
 e2e-*.log
 inspect-*.js
