@@ -47,12 +47,12 @@ approval-config.json            ポートとトークンを保存する設定フ
 
 ## 必要なもの
 
-- Node.js 18 以上
-- [ngrok](https://ngrok.com/) アカウント（無料枠で動作）
+- Node.js 18 以上（インストール例: [nvm](https://github.com/nvm-sh/nvm)）
+- [ngrok](https://ngrok.com/) アカウント（無料枠で動作。インストールと authtoken 登録の手順はセットアップのステップ 4 で説明）
 - `node-pty` をネイティブビルドできる環境
   - **Windows**: Python 3 と Visual Studio Build Tools（Desktop development with C++）
   - **macOS**: `xcode-select --install`
-  - **Linux**: `build-essential` と `python3`
+  - **Linux**（WSL2 Ubuntu 含む）: `build-essential`（`make` / `g++` / `gcc` を含むメタパッケージ）と `python3`
 
 Node.js 22 など主要バージョンでは事前ビルド済みバイナリが使われる場合もあり、その場合はビルドツールは不要です。
 
@@ -103,7 +103,20 @@ node approval-server.js
 
 サーバーは `127.0.0.1` のみにバインドされ、LAN 上の他端末からは直接アクセスできません。外部アクセスは必ず ngrok トンネル経由になります。
 
-### 4. ngrok トンネルを開く
+### 4. ngrok をセットアップしてトンネルを開く
+
+#### 4-1. 初回のみ: インストールと authtoken 登録
+
+1. [ngrok 公式](https://ngrok.com/download) の手順に従って ngrok をインストール（macOS は `brew install ngrok`、WSL2 / Linux と Windows は公式ページに表示されるコマンドをそのまま実行）
+2. [https://dashboard.ngrok.com/signup](https://dashboard.ngrok.com/signup) でアカウントを作成
+3. [Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken) ページで authtoken をコピー
+4. ローカルに登録（一度実行すれば永続化されます）
+
+```bash
+ngrok config add-authtoken <YOUR_AUTHTOKEN>
+```
+
+#### 4-2. 毎回: トンネルを開く
 
 別のターミナルで実行します。
 
@@ -121,6 +134,8 @@ ngrok http 3000
 | スマートフォン | `https://xxxx.ngrok-free.app`（ngrok が表示した URL） |
 
 URL と `SECRET_TOKEN` を入力して接続します。設定は `localStorage` に保存されるので次回以降は自動入力されます。
+
+> WSL2 で承認サーバーを起動した場合も、Windows 側のブラウザから `http://localhost:3000` でそのままアクセスできます（WSL2 の localhost forwarding により）。
 
 ### 6. Claude Code をラッパー経由で起動
 
@@ -229,7 +244,7 @@ OS ごとのビルド環境を確認してください。
 
 - **Windows**: Python 3 と Visual Studio Build Tools（Desktop development with C++）をインストール
 - **macOS**: `xcode-select --install` を実行
-- **Linux**: `sudo apt install build-essential python3`
+- **Linux**（WSL2 Ubuntu 含む）: `sudo apt install build-essential python3`（`build-essential` は `make` / `g++` / `gcc` を含むメタパッケージ）
 
 ### スマホに承認依頼が届かない
 
@@ -253,8 +268,8 @@ v1.3.0 以前で提供していた `PreToolUse` フック方式（`claude-hook.j
 
 | 項目 | 確認済み | 未確認 |
 |------|----------|--------|
-| OS | Windows 11 | macOS、Linux |
-| Node.js | v22 | v18〜v21 |
+| OS | Windows 11、Linux（WSL2 Ubuntu） | macOS、ネイティブ Linux |
+| Node.js | v20.20.2、v22 | その他のバージョン |
 | Claude Code | CLI | — |
 | スマホブラウザ | iOS Safari、Android Chrome | その他 |
 
@@ -318,12 +333,12 @@ approval-config.json            Your local config (port + token); gitignored
 
 ## Requirements
 
-- Node.js 18+
-- [ngrok](https://ngrok.com/) account (free tier is fine)
+- Node.js 18+ (install example: [nvm](https://github.com/nvm-sh/nvm))
+- [ngrok](https://ngrok.com/) account (free tier is fine; install + authtoken steps are covered in setup step 4 below)
 - A toolchain that can build `node-pty`
   - **Windows**: Python 3 and Visual Studio Build Tools (Desktop development with C++)
   - **macOS**: `xcode-select --install`
-  - **Linux**: `build-essential` and `python3`
+  - **Linux** (incl. WSL2 Ubuntu): `build-essential` (a metapackage that bundles `make` / `g++` / `gcc`) and `python3`
 
 Prebuilt binaries exist for common Node versions (e.g. 22), so in practice you often do not need to build.
 
@@ -373,7 +388,20 @@ The console prints `SECRET_TOKEN` at startup — you will enter this value in th
 
 The server binds to `127.0.0.1` only; other devices on the LAN cannot reach it directly. External access must go through ngrok.
 
-### 4. Open an ngrok tunnel
+### 4. Set up ngrok and open the tunnel
+
+#### 4-1. First time only: install and register the authtoken
+
+1. Install ngrok via [the official download page](https://ngrok.com/download) (`brew install ngrok` on macOS; WSL2 / Linux and Windows have copy-paste commands on that page).
+2. Sign up at [https://dashboard.ngrok.com/signup](https://dashboard.ngrok.com/signup).
+3. Copy your authtoken from [Your Authtoken](https://dashboard.ngrok.com/get-started/your-authtoken).
+4. Register it locally (run once; the token is persisted):
+
+```bash
+ngrok config add-authtoken <YOUR_AUTHTOKEN>
+```
+
+#### 4-2. Each time: open the tunnel
 
 In another terminal:
 
@@ -391,6 +419,8 @@ Note the `https://xxxx.ngrok-free.app` URL — you'll enter it in the smartphone
 | Smartphone | `https://xxxx.ngrok-free.app` |
 
 Enter the URL and `SECRET_TOKEN` to connect. Values are stored in `localStorage` and auto-filled on subsequent visits.
+
+> If you run the approval server inside WSL2, the Windows-side browser can still open `http://localhost:3000` directly thanks to WSL2's localhost forwarding.
 
 ### 6. Launch Claude Code through the wrapper
 
@@ -499,7 +529,7 @@ Install the native build prerequisites for your OS:
 
 - **Windows**: Python 3 + Visual Studio Build Tools (Desktop development with C++)
 - **macOS**: `xcode-select --install`
-- **Linux**: `sudo apt install build-essential python3`
+- **Linux** (incl. WSL2 Ubuntu): `sudo apt install build-essential python3` (`build-essential` is a metapackage that bundles `make` / `g++` / `gcc`)
 
 ### The smartphone never sees an approval request
 
@@ -523,8 +553,8 @@ Versions v1.3.0 and earlier shipped a `PreToolUse` hook (`claude-hook.js`). That
 
 | Item | Verified | Unverified |
 |------|----------|------------|
-| OS | Windows 11 | macOS, Linux |
-| Node.js | v22 | v18–v21 |
+| OS | Windows 11, Linux (WSL2 Ubuntu) | macOS, native Linux |
+| Node.js | v20.20.2, v22 | other versions |
 | Claude Code | CLI | — |
 | Mobile browser | iOS Safari, Android Chrome | others |
 
