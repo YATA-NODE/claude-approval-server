@@ -49,7 +49,7 @@ app.use(express.static(__dirname))
 
 // ルートアクセスで approval-ui.html を返す
 app.get('/', (req, res) => {
-  res.sendFile(__dirname + '/approval-ui.html')
+  res.sendFile(path.join(__dirname, 'approval-ui.html'))
 })
 
 // 承認待ちキュー: { id, description, status, createdAt, resolvedAt }

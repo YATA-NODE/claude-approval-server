@@ -56,8 +56,15 @@ const SECRET_TOKEN = config.token || process.env.APPROVAL_TOKEN || ''
 // ルート直下などで basename が空になった場合は 'unknown' を充てる。
 const PROJECT_NAME = path.basename(process.cwd()) || 'unknown'
 
-// ダイアログ検出トリガー語（英語ロケール用）。必要なら config で上書き可能。
-const TRIGGERS = (config.dialogDetection && config.dialogDetection.triggers) || ['Do you want to']
+// ダイアログ検出: 終端マーカー (Esc to cancel) を主アンカーに使う。
+// 旧 v1.7.3 までは "Do you want to" を主トリガーにしていたが、Claude Code v2.1.x の
+// Write/Edit 系ダイアログは ANSI 部分再描画の副作用で "Do you want t creat ..."
+// のように 1〜2 文字単位で欠落するため、プロンプト本文ベースの検出が成立しなくなった。
+// 一方 "Esc to cancel" は別行に独立描画されるため空白崩れ ("Esctocancel") のみで済む。
+// 必要なら approval-config.json の dialogDetection.endMarker で上書き可能。
+const END_MARKER_PATTERN =
+  (config.dialogDetection && config.dialogDetection.endMarker) || 'Esc\\s*to\\s*cancel'
+const END_MARKER_RE_G = new RegExp(END_MARKER_PATTERN, 'gi')
 
 const isWindows = os.platform() === 'win32'
 
@@ -182,8 +189,11 @@ if (logStream) logStream.write(`\n===== ${new Date().toISOString()} wrapper star
 // ダイアログ検出
 // -------------------------------------------------------
 // 直近 PTY 出力のスライディングウィンドウ（クリーン済み）
+// 800 文字あれば 1 ダイアログ分（~300 文字）+ 周辺コンテキストを十分保持できる。
+// バッファを大きく取りすぎると、ダイアログが画面から消えた後も古い "Esc to cancel" が
+// 残り続けて parseDialog が誤検出し、resolved-by-cli の検知が遅れる。
 let cleanBuf = ''
-const CLEAN_BUF_MAX = 8000
+const CLEAN_BUF_MAX = 800
 
 // 現在有効なダイアログ（approval-server に登録済み）
 // { id, options, tool, args, prompt, lastSeenAt }
@@ -225,6 +235,13 @@ function promptSimilar(a, b) {
 
 function stripAnsi(s) {
   return s
+    // Claude Code v2.1.x はダイアログ内の半角スペースを実文字ではなく
+    // CSI <n>C (Cursor Forward) で「列をジャンプ」して描画する。
+    // そのまま削ると "Doyouwanttocreate..." のように単語が連結してしまうため、
+    // 一般 ANSI 除去の前に <n>C / 単独 C を相応の空白へ展開しておく。
+    // n が異常値の場合に備え 200 で頭打ち（行幅の上限相当）。
+    .replace(/\x1b\[(\d+)C/g, (_, n) => ' '.repeat(Math.min(parseInt(n, 10) || 0, 200)))
+    .replace(/\x1b\[C/g, ' ')
     .replace(/\x1b\]0;[^\x07]*\x07/g, '')
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
     .replace(/\x1b[=>]/g, '')
@@ -238,60 +255,134 @@ function onPtyData(chunk) {
   detectDialog().catch((e) => console.error('[wrapper] detect error:', e.message))
 }
 
-// ダイアログ構造パターン:
-//   "Do you want to <...>?" ... "❯ 1. <opt1>" ... "2. <opt2>" ... "3. <opt3>" ... "Esc to cancel" ... "● <Tool>(<args>)"
+// ダイアログ構造パターン (Claude Code v2.1.x 以降):
+//   ● <Tool>(<args>)
+//   ─────...                        ← ボックス上端
+//    <action description>           ← 例: "Create file"
+//    <target>                       ← 例: "test.txt"
+//   ╌╌╌╌...                         ← 区切り
+//    <preview / diff>
+//   ╌╌╌╌...
+//    Do you want to <...>?          ← 質問 (新フォーマットでは部分的に文字落ちすることあり)
+//    ❯ 1. <opt1>                    ← カーソル付きオプション 1
+//      2. <opt2 ... shift+tab>      ← オプション 2 (常に shift+tab ヒント付き)
+//      3. <opt3>                    ← オプション 3
+//   Esc to cancel                   ← 終端マーカー (新フォーマットでは "Esctocancel" に潰れる)
 //
-// 注意: ConPTY 経由のクリーン済みバッファでは空白が崩れることがある
-//   例: "Esc to cancel" → "Esctocancel"、"Yes, allow ..." → "Yes,allow..."
-// そのため終端マーカーとオプション区切りは空白を許容する正規表現で判定する。
-const END_MARKER_RE = /Esc\s*to\s*cancel/i
+// 検出戦略:
+//   1. 終端マーカー (Esc to cancel) の最後の出現を主アンカーとする
+//   2. その手前 ~2000 文字を「ダイアログ候補領域」とする
+//   3. 偽陽性除外: "❯" + 数字 (アクティブな選択カーソル) が領域内に存在
+//   4. プロンプト = 領域内の最後の "?" を含む行
+//   5. オプション = "?" 以降から終端マーカーまでに並ぶ 1, 2, 3 の番号マーカー
+//   6. ツール行 = プロンプトより前にある最新の `● Tool(args)`
 
 function parseDialog(buf) {
-  // 全バッファを対象に lastIndexOf で最新のダイアログを探す。
-  // cleanBuf は CLEAN_BUF_MAX 文字で自動ローテーションされるため、
-  // 画面外に出た古いダイアログはやがて buf から消えて null が返る。
-  const triggerIdx = Math.max(...TRIGGERS.map((t) => buf.lastIndexOf(t)))
-  if (triggerIdx < 0) return null
+  // 1. 終端マーカーの最終出現を取得
+  const endMatches = [...buf.matchAll(END_MARKER_RE_G)]
+  if (endMatches.length === 0) return null
+  const endIdx = endMatches[endMatches.length - 1].index
 
-  const tail = buf.slice(triggerIdx)
-  const endMatch = tail.match(END_MARKER_RE)
-  if (!endMatch) return null
-  const endIdx = endMatch.index
+  // 2. ダイアログ候補領域 (末尾マーカーの直前)
+  // cleanBuf 全体（最大 CLEAN_BUF_MAX 文字）が候補。
+  // ダイアログ自体は通常 ~300 文字程度だが、tool 行が画面上で
+  // ボックスより少し上に描画されるケースに備えて広めに見る。
+  const segStart = Math.max(0, endIdx - CLEAN_BUF_MAX)
+  const segment = buf.slice(segStart, endIdx)
 
-  const promptMatch = tail.match(/(Do you want to[^?]*\?)/)
-  if (!promptMatch) return null
-  const prompt = promptMatch[1].replace(/\s+/g, ' ').trim()
+  // 3. 偽陽性除外: アクティブカーソル `❯` + 数字 1〜3 が必須
+  if (!/❯\s*[123]/.test(segment)) return null
 
-  // オプション文字列抽出（ダイアログ末尾の Esc までの範囲）
-  const segment = tail.slice(0, endIdx)
-  // 数字マーカーの位置を取得して区切る
-  const markerRe = /([123])\./g
-  const markers = []
-  let m
-  while ((m = markerRe.exec(segment)) !== null) {
-    markers.push({ num: parseInt(m[1]), at: m.index, end: m.index + m[0].length })
+  // 4. プロンプト抽出
+  const qIdx = segment.lastIndexOf('?')
+  if (qIdx < 0) return null
+  const beforeQ = segment.slice(0, qIdx)
+  // 行頭は改行 / ボックス文字の直後とみなす
+  const lineStart = Math.max(
+    beforeQ.lastIndexOf('\n'),
+    beforeQ.lastIndexOf('│'),
+    beforeQ.lastIndexOf('─'),
+    beforeQ.lastIndexOf('╌'),
+    -1
+  )
+  const prompt = segment
+    .slice(lineStart + 1, qIdx + 1)
+    .replace(/[│╭╮╰╯─╌\r\n]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!prompt) return null
+
+  // 5. オプション抽出
+  const optionSegment = segment.slice(qIdx + 1)
+  // 数字 1〜3 単体 (前後に英数字なし) を番号マーカーとみなす
+  // 例: "❯1Yes" の 1、"2. Yes,..." の 2、"  3. No" の 3
+  // line number "1080-" のような桁続きは (?![0-9]) で除外
+  const markerRe = /(?<![A-Za-z0-9])([123])(?![0-9])/g
+  const found = new Map()
+  let mm
+  while ((mm = markerRe.exec(optionSegment)) !== null) {
+    if (!found.has(mm[1])) found.set(mm[1], { at: mm.index, end: mm.index + 1 })
   }
-  if (markers.length === 0) return null
-  // 同じ番号が複数出た場合は最後のもののみ保持（再描画で複数残ることがある）
-  const byNum = new Map()
-  for (const mk of markers) byNum.set(mk.num, mk)
-  const sorted = [...byNum.values()].sort((a, b) => a.at - b.at)
-  const options = sorted.map((mk, i) => {
-    const nextAt = i + 1 < sorted.length ? sorted[i + 1].at : segment.length
-    return segment
+  if (found.size === 0) return null
+
+  const sortedMarks = [...found.entries()]
+    .map(([num, pos]) => ({ num: parseInt(num), at: pos.at, end: pos.end }))
+    .sort((a, b) => a.at - b.at)
+  const options = sortedMarks.map((mk, i) => {
+    const nextAt = i + 1 < sortedMarks.length ? sortedMarks[i + 1].at : optionSegment.length
+    return optionSegment
       .slice(mk.end, nextAt)
       .replace(/❯/g, '')
+      .replace(/[\r\n]/g, ' ')
+      .replace(/[─╌│╭╮╰╯]/g, '')
+      .replace(/^[.\s]+/, '')
       .replace(/\s+/g, ' ')
       .trim()
   })
-  if (options.length === 0 || options.every((o) => !o)) return null
+  if (options.every((o) => !o)) return null
 
-  // ツール行
-  const toolMatch = tail.match(/●\s*([A-Za-z_]+)\(([\s\S]*?)\)/)
-  const tool = toolMatch ? toolMatch[1] : 'Unknown'
-  const args = toolMatch ? toolMatch[2].replace(/\s+/g, ' ').trim() : ''
+  // 6. ツール行: プロンプトより前にある最新の `● Tool(args)` を採用
+  const promptAbsStart = segStart + lineStart + 1
+  const beforeDialog = buf.slice(0, promptAbsStart)
+  const toolMatches = [...beforeDialog.matchAll(/●\s*([A-Za-z_]+)\s*\(([\s\S]*?)\)/g)]
+  const lastTool = toolMatches[toolMatches.length - 1]
+  let tool = lastTool ? lastTool[1] : 'Unknown'
+  let args = lastTool
+    ? lastTool[2].replace(/[\r\n]/g, ' ').replace(/\s+/g, ' ').trim()
+    : ''
+
+  // 6b. tool が拾えなかった場合の fallback: ダイアログボックス内のアクションラベルから推測。
+  // 新フォーマットでは初回ダイアログ時に `● Tool(args)` 行がまだ描画されていないことがあり、
+  // その場合でもスマホ側に何のツールか伝わるようにする。
+  if (tool === 'Unknown') {
+    const boxText = segment.slice(0, qIdx)
+    const labelTable = [
+      [/Bash\s*command|Run\s*command/i, 'Bash'],
+      [/Create\s*file/i, 'Write'],
+      [/Update|Edit/i, 'Edit'],
+      [/Delete/i, 'Bash'],
+      [/Read\s*file/i, 'Read'],
+      [/Search|Grep/i, 'Grep'],
+    ]
+    for (const [re, t] of labelTable) {
+      if (re.test(boxText)) {
+        tool = t
+        // ラベルの直後にある対象パスっぽい文字列を args として拾う
+        const m = boxText.match(
+          /(?:Bash\s*command|Create\s*file|Update|Edit|Delete|Read\s*file|Search|Grep)[\s│╭╮╰╯─╌:]*([^\n│╭╮╰╯─╌?]{2,80})/i
+        )
+        if (m && !args) args = m[1].replace(/\s+/g, ' ').trim()
+        break
+      }
+    }
+  }
 
   return { prompt, options, tool, args }
+}
+
+// テスト用エクスポート (実行時には影響なし)
+if (typeof module !== 'undefined') {
+  module.exports = { parseDialog, stripAnsi }
 }
 
 async function detectDialog() {
@@ -385,6 +476,10 @@ async function pollForResponse(id) {
       )
     } else {
       term.write(key + '\r')
+      // 古いダイアログ本文を捨てておかないと、画面上は閉じても cleanBuf に
+      // "Esc to cancel" 等が残って parseDialog が「まだダイアログがある」と
+      // 誤判定し、次のダイアログ検出や dismissal 検知が遅れる。
+      cleanBuf = ''
       process.stderr.write(`\n[wrapper] injected "${key}" for dialog ${id}\n`)
     }
     // currentDialog は PTY 出力でダイアログが消えたら自然に消える
@@ -420,6 +515,9 @@ async function onDialogDismissed() {
 async function resolveCurrentAsCli() {
   const d = currentDialog
   currentDialog = null
+  // dismiss 確定時点で古いダイアログ本文を捨てる。残しておくと次のダイアログ
+  // 検出時に古い tool 行を拾って誤分類する原因になる。
+  cleanBuf = ''
   if (!d || !d.id) return
   try {
     await httpRequest('POST', `/resolve/${d.id}`, {
@@ -437,16 +535,18 @@ function sleep(ms) {
 }
 
 // -------------------------------------------------------
-// メイン
+// メイン (require された場合は副作用を起こさない)
 // -------------------------------------------------------
-;(async () => {
-  await preflight()
-  process.stderr.write(`[wrapper] project="${PROJECT_NAME}" (cwd=${process.cwd()})\n`)
-  spawnClaude()
-})()
+if (require.main === module) {
+  ;(async () => {
+    await preflight()
+    process.stderr.write(`[wrapper] project="${PROJECT_NAME}" (cwd=${process.cwd()})\n`)
+    spawnClaude()
+  })()
 
-process.on('exit', () => {
-  try {
-    if (term) term.kill()
-  } catch (_) {}
-})
+  process.on('exit', () => {
+    try {
+      if (term) term.kill()
+    } catch (_) {}
+  })
+}
