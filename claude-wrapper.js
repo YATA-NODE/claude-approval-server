@@ -174,6 +174,7 @@ function spawnClaude() {
       } catch (_) {}
     }
     if (logStream) logStream.end()
+    if (wrapperLogStream) wrapperLogStream.end()
     process.exit(exitCode)
   })
 }
@@ -184,6 +185,26 @@ function spawnClaude() {
 const logPath = process.env.APPROVAL_PTY_LOG
 const logStream = logPath ? fs.createWriteStream(logPath, { flags: 'a' }) : null
 if (logStream) logStream.write(`\n===== ${new Date().toISOString()} wrapper start =====\n`)
+
+// -------------------------------------------------------
+// 実行中ログ（dialog posted / injected / resolved by CLI 等）
+// Claude Code TUI はフルスクリーン描画するため、stderr に直接書くと
+// ステータスバーや選択肢と重なって表示が崩れる。既定では完全サイレントとし、
+// APPROVAL_WRAPPER_LOG (env) または config.wrapperLog でファイル指定された
+// 場合のみそこへ append する。tail -f で別端末から監視する想定。
+// 起動時の preflight エラーと spawnClaude 直前の "project=..." 行は
+// TUI が始まる前なので従来どおり stderr に出す（このヘルパーの対象外）。
+const wrapperLogPath = process.env.APPROVAL_WRAPPER_LOG || config.wrapperLog || ''
+const wrapperLogStream = wrapperLogPath
+  ? fs.createWriteStream(wrapperLogPath, { flags: 'a' })
+  : null
+if (wrapperLogStream) {
+  wrapperLogStream.write(`\n===== ${new Date().toISOString()} wrapper start =====\n`)
+}
+function wlog(msg) {
+  if (!wrapperLogStream) return
+  wrapperLogStream.write(`[${new Date().toISOString()}] ${msg}\n`)
+}
 
 // -------------------------------------------------------
 // ダイアログ検出
@@ -252,7 +273,7 @@ function stripAnsi(s) {
 function onPtyData(chunk) {
   cleanBuf += stripAnsi(chunk)
   if (cleanBuf.length > CLEAN_BUF_MAX) cleanBuf = cleanBuf.slice(-CLEAN_BUF_MAX)
-  detectDialog().catch((e) => console.error('[wrapper] detect error:', e.message))
+  detectDialog().catch((e) => wlog(`detect error: ${e.message}`))
 }
 
 // ダイアログ構造パターン (Claude Code v2.1.x 以降):
@@ -426,7 +447,7 @@ async function detectDialog() {
 // onPtyData 経由だけだと、ユーザー入力待ちで止まっている間に detectDialog が
 // 呼ばれず、消失判定が実態と乖離する。
 setInterval(() => {
-  detectDialog().catch((e) => console.error('[wrapper] periodic detect error:', e.message))
+  detectDialog().catch((e) => wlog(`periodic detect error: ${e.message}`))
 }, 400)
 
 async function registerDialog(d) {
@@ -440,11 +461,11 @@ async function registerDialog(d) {
     // スロットが別物に置き換わっていなければ id を埋める
     if (currentDialog && currentDialog.id === null && currentDialog.prompt === d.prompt) {
       currentDialog.id = resp.id
-      process.stderr.write(`\n[wrapper] dialog posted: id=${resp.id}\n`)
-      pollForResponse(resp.id).catch((e) => console.error('[wrapper] poll error:', e.message))
+      wlog(`dialog posted: id=${resp.id}`)
+      pollForResponse(resp.id).catch((e) => wlog(`poll error: ${e.message}`))
     }
   } catch (e) {
-    process.stderr.write(`\n[wrapper] POST /request failed: ${e.message} (継続: CLI 応答のみ有効)\n`)
+    wlog(`POST /request failed: ${e.message} (継続: CLI 応答のみ有効)`)
     // サーバー連携断時は予約スロットを解放（誤って resolve を投げないため）
     if (currentDialog && currentDialog.id === null) currentDialog = null
   }
@@ -471,8 +492,8 @@ async function pollForResponse(id) {
     // C3: answer の厳密 whitelist
     const key = validateAnswer(resp.answer, currentDialog.options)
     if (!key) {
-      process.stderr.write(
-        `\n[wrapper] answer "${String(resp.answer).slice(0, 40)}" は許可された値ではない。注入スキップ。\n`
+      wlog(
+        `answer "${String(resp.answer).slice(0, 40)}" は許可された値ではない。注入スキップ。`
       )
     } else {
       term.write(key + '\r')
@@ -480,7 +501,7 @@ async function pollForResponse(id) {
       // "Esc to cancel" 等が残って parseDialog が「まだダイアログがある」と
       // 誤判定し、次のダイアログ検出や dismissal 検知が遅れる。
       cleanBuf = ''
-      process.stderr.write(`\n[wrapper] injected "${key}" for dialog ${id}\n`)
+      wlog(`injected "${key}" for dialog ${id}`)
     }
     // currentDialog は PTY 出力でダイアログが消えたら自然に消える
     return
@@ -524,7 +545,7 @@ async function resolveCurrentAsCli() {
       answer: 'resolved-by-cli',
       resolvedBy: 'cli',
     })
-    process.stderr.write(`\n[wrapper] dialog ${d.id} resolved by CLI\n`)
+    wlog(`dialog ${d.id} resolved by CLI`)
   } catch (e) {
     // すでに resolved 済み等は無視
   }
