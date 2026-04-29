@@ -9,6 +9,22 @@ PTY ラッパーが Claude Code の入出力を仲介し、ダイアログが出
 
 どちらで応答しても、もう一方の表示は自動的に閉じます。
 
+## 特徴
+
+- **Claude Code の設定を変更しない**: `~/.claude/settings.json` の hooks には何も書きません。ラッパー経由で `claude` を起動するだけで動作し、ラッパーの利用を止めればそのまま元の挙動に戻ります
+- **CLI 作業中に離席しても作業を継続できる**: 承認だけスマホ・別 PC から人手で応答できるため、`PreToolUse` フックに自動承認ロジックを書く必要がありません
+- **既存の hooks と非干渉**: PTY の入出力を観察するだけで Claude Code 内部には介入しないため、`PreToolUse` 等の自前 hooks がある環境にもそのまま追加できます
+- **複数プロジェクトを 1 画面に集約**: `[projectName][toolName]` 形式で識別され、並行プロジェクトの依頼が同じスマホ画面に届きます
+
+### hooks 方式との違い
+
+| 観点 | hooks (`PreToolUse` 等) | 本ツール |
+|---|---|---|
+| 設定変更 | `settings.json` に hook を登録する必要あり | 不要（Claude Code 側に書き込みなし） |
+| 離席中の承認 | hook で自動応答ロジックを書く | スマホで人手応答 |
+| 既存 hooks との共存 | 競合に注意 | 干渉しない |
+| Claude Code 更新追従 | hook 契約変更で壊れることがある | PTY 表示形式の追従だけで済む |
+
 ## 公式機能（/dispatch・/remote-control）との違い
 
 Claude Code を遠隔から扱う公式機能として **/dispatch**（Cowork 経由）と **/remote-control**（Claude Code v2.1.51+）が提供されていますが、本ツールは **承認ダイアログのみ** を遠隔化する点で立ち位置が異なります。
@@ -79,7 +95,8 @@ npm install
 
 - `approval-config.json` は `.gitignore` 済みです。公開リポジトリに push されません。
 - ポートを変えたい場合は `port` を任意の値に変更してください。
-- 設定ファイルを作らなくても、環境変数 `APPROVAL_PORT` / `APPROVAL_TOKEN`、あるいはデフォルト値（ポート 3000・起動ごとにランダム生成されるトークン）で動作します。
+- 設定ファイルを作らなくても、環境変数 `APPROVAL_PORT` / `APPROVAL_TOKEN`、あるいはデフォルト値（ポート 3000・起動ごとにランダム生成されるトークン）で動作します。長期固定したい場合は `approval-config.json` に書く方法も使えます（どちらでも構いません）。
+- ラッパー側もサーバーと同じトークンを参照します。サーバーをランダム生成モードで使う場合は、起動時に表示されたトークンを `APPROVAL_TOKEN=xxxx node /path/to/claude-wrapper.js` の形でラッパーに渡してください。
 - 優先順位:
   - **PORT**: `APPROVAL_PORT`（env）→ `approval-config.json` の `port` → 3000
   - **TOKEN**: `approval-config.json` の `token` → `APPROVAL_TOKEN`（env）→ 起動ごとのランダム値
@@ -141,20 +158,34 @@ URL と `SECRET_TOKEN` を入力して接続します。設定は `localStorage`
 
 プロジェクト用ターミナルで **対象プロジェクトに `cd` してから** ラッパーを実行します。コマンドのパスはラッパーの配置場所を指すだけで、Claude Code 自身は「いま `cd` しているディレクトリ」で起動します。
 
+WSL2 / Linux / macOS の場合：
+
 ```bash
 cd /path/to/my-project
 node /path/to/claude-approval-server/claude-wrapper.js
 ```
 
+Windows ネイティブ（cmd / PowerShell）の場合は区切りを `\` に置き換えます。シェルでは単一の `\` で書きます（`\\` のエスケープはソースコード内表記であり、コマンドラインでは不要です）：
+
+```cmd
+cd C:\Users\username\my-project
+node C:\Users\username\claude-approval-server\claude-wrapper.js
+```
+
 シェルにエイリアスを登録しておくと、任意のプロジェクトで `claude` と打つだけで起動できます。
 
 ```bash
-# ~/.bashrc / ~/.zshrc など
+# WSL2 / Linux / macOS: ~/.bashrc / ~/.zshrc など
 alias claude='node /path/to/claude-approval-server/claude-wrapper.js'
 
 # 使い方
 cd /path/to/my-project
 claude
+```
+
+```cmd
+:: Windows ネイティブ: doskey で同等の短縮を作る場合
+doskey claude=node C:\Users\username\claude-approval-server\claude-wrapper.js $*
 ```
 
 起動時にラッパーが認識したプロジェクト名が表示されます。
@@ -258,11 +289,23 @@ OS ごとのビルド環境を確認してください。
 
 ### ツール名が `[Unknown]` と表示されることがある
 
-ConPTY（Windows）をはじめ、PTY はダイアログを複数フレームに分けて描画します。ツール名を含む行が遅れて届くと、先に検出した「プロンプトのみ」のフレームで依頼を登録し、同一ダイアログの再描画は dedup で無視するため、サーバー側の表示は `[Unknown]` のままになります。承認・拒否の動作には影響しません。重複登録の発生よりもこちらを許容する設計です。
+PTY はダイアログを複数フレームに分けて描画します。ツール名を含む `● Tool(args)` 行がプロンプトより遅れて届くと、先に検出した「プロンプトのみ」のフレームで依頼を登録し、同一ダイアログの再描画は dedup で無視するため、サーバー側の表示は `[Unknown]` のままになります。承認・拒否の動作には影響しません。重複登録の発生よりもこちらを許容する設計です。
 
-### 旧バージョン（v1.3.0 以前）からの移行
+### スマホ側のオプション表示で空白が詰まって見える
 
-v1.3.0 以前で提供していた `PreToolUse` フック方式（`claude-hook.js`）は v1.4.0 で PTY ラッパー方式に刷新され、v1.7.0 でファイル自体が削除されました。過去に導入していた場合は `~/.claude/settings.json` などから該当の `PreToolUse` エントリを削除してください。以降は本 README ステップ 6 の手順で `claude-wrapper.js` 経由で Claude Code を起動してください。
+例: `Yes,allowalleditsduringthissession(shift+tab)` のように単語間の空白が消えた状態で表示されることがあります。これは Claude Code v2.1.x 以降のダイアログが ANSI カーソル制御で部分再描画される影響で、PTY 上で空白文字が落ちるために起きます。承認・拒否の動作には影響しません（注入は番号 1/2/3 で行うため）。
+
+### 承認依頼がスマホに届かない（Claude Code を更新後）
+
+Claude Code 本体のダイアログ書式が変わって検出が壊れた場合は、`approval-config.json` の `dialogDetection.endMarker` で終端マーカーの正規表現を上書きすることで暫定対処できます:
+
+```json
+{
+  "port": 3000,
+  "token": "...",
+  "dialogDetection": { "endMarker": "新しい終端文字列の正規表現" }
+}
+```
 
 ## 対応プラットフォーム
 
@@ -294,6 +337,22 @@ A PTY wrapper sits between Claude Code and the terminal: when an approval dialog
 - **simultaneously** pushed to the approval panel on smartphone / PC browser.
 
 Whichever side responds first dismisses the other side automatically.
+
+## Highlights
+
+- **Zero changes to Claude Code's config**: nothing is written to `~/.claude/settings.json` hooks. Use the wrapper in place of `claude`; stop using it and you're back to the default behavior immediately
+- **Keep working in the CLI even when you step away**: a human can answer approvals from a phone or another PC, so you don't need to script auto-approval logic in a `PreToolUse` hook
+- **Coexists with existing hooks**: the wrapper only observes PTY I/O — Claude Code's internals are not touched, so it slots into setups that already have custom `PreToolUse` hooks
+- **One screen for every project**: requests are tagged `[projectName][toolName]` so concurrent projects share the same approval panel
+
+### vs hooks-based approaches
+
+| Aspect | hooks (`PreToolUse` etc.) | This tool |
+|---|---|---|
+| Configuration | Register a hook in `settings.json` | None (nothing written to Claude Code) |
+| Approving while away | Script the auto-response in the hook | A human answers on the phone |
+| Coexistence with other hooks | Conflicts to watch out for | No interference |
+| Tracking Claude Code updates | Hook contract changes can break it | Only the PTY rendering needs to follow |
 
 ## How this differs from the official `/dispatch` and `/remote-control`
 
@@ -364,7 +423,8 @@ Copy `approval-config.example.json` to `approval-config.json` and replace `token
 ```
 
 - `approval-config.json` is gitignored; your token never leaves your machine.
-- You can also use the environment variables `APPROVAL_PORT` / `APPROVAL_TOKEN`, or the defaults (port 3000 and a freshly random token each start).
+- You can also use the environment variables `APPROVAL_PORT` / `APPROVAL_TOKEN`, or the defaults (port 3000 and a freshly random token each start). If you'd rather pin a long-term value, putting it in `approval-config.json` works too — both styles are supported.
+- The wrapper reads the same token as the server. If you run the server in random-token mode, pass the token printed at startup to the wrapper as `APPROVAL_TOKEN=xxxx node /path/to/claude-wrapper.js`.
 - Resolution order:
   - **PORT**: `APPROVAL_PORT` (env) → `approval-config.json` `port` → `3000`
   - **TOKEN**: `approval-config.json` `token` → `APPROVAL_TOKEN` (env) → random value per start
@@ -426,20 +486,34 @@ Enter the URL and `SECRET_TOKEN` to connect. Values are stored in `localStorage`
 
 In your project terminal, **`cd` into the target project first**, then run the wrapper. The path on the command line merely points at the wrapper's install location — Claude Code itself starts in whichever directory you are currently `cd`-ed into.
 
+WSL2 / Linux / macOS:
+
 ```bash
 cd /path/to/my-project
 node /path/to/claude-approval-server/claude-wrapper.js
 ```
 
+Native Windows (cmd / PowerShell) — use `\` as the separator. A single `\` is correct on the command line; the doubled `\\` is only an in-source escape, not a shell requirement:
+
+```cmd
+cd C:\Users\username\my-project
+node C:\Users\username\claude-approval-server\claude-wrapper.js
+```
+
 Aliasing makes it a one-word command in any project:
 
 ```bash
-# ~/.bashrc / ~/.zshrc
+# WSL2 / Linux / macOS: ~/.bashrc / ~/.zshrc
 alias claude='node /path/to/claude-approval-server/claude-wrapper.js'
 
 # Usage
 cd /path/to/my-project
 claude
+```
+
+```cmd
+:: Native Windows: doskey gives you the equivalent shorthand
+doskey claude=node C:\Users\username\claude-approval-server\claude-wrapper.js $*
 ```
 
 At startup the wrapper prints the project name it picked up:
@@ -543,11 +617,23 @@ Make sure you launched Claude Code through `claude-wrapper.js`, not plain `claud
 
 ### Tool name sometimes shows as `[Unknown]`
 
-PTYs (ConPTY on Windows especially) render the approval dialog across multiple frames. If the frame containing the tool-name line arrives after the prompt line, the wrapper registers the request from the earlier "prompt only" frame and treats subsequent frames as redraws via dedup, so the server keeps the `[Unknown]` label. Approve / reject still works correctly. This trade-off is intentional — preferable to duplicate registrations.
+PTYs render the approval dialog across multiple frames. If the frame containing the tool-name line (`● Tool(args)`) arrives after the prompt line, the wrapper registers the request from the earlier "prompt only" frame and treats subsequent frames as redraws via dedup, so the server keeps the `[Unknown]` label. Approve / reject still works correctly. This trade-off is intentional — preferable to duplicate registrations.
 
-### Migrating from earlier versions (v1.3.0 and older)
+### Option labels look like `Yes,allowalleditsduringthissession(shift+tab)` (no spaces)
 
-Versions v1.3.0 and earlier shipped a `PreToolUse` hook (`claude-hook.js`). That approach was replaced with the PTY wrapper in v1.4.0, and the file itself was removed in v1.7.0. If you previously registered the hook, delete the corresponding `PreToolUse` entry from `~/.claude/settings.json` (or any project-local `settings` file). From now on, start Claude Code through `claude-wrapper.js` as described in step 6 above.
+Claude Code v2.1.x and later draw the dialog with ANSI cursor positioning that drops whitespace inside option labels when read through the PTY. The labels remain readable but ugly. Approve / reject still works correctly because the wrapper injects the option **number** (`1`/`2`/`3`), not the label text.
+
+### Approval requests stop reaching the phone after a Claude Code update
+
+If a Claude Code update changes the dialog rendering and detection breaks, you can override the trailing-marker regex in `approval-config.json` as a stopgap:
+
+```json
+{
+  "port": 3000,
+  "token": "...",
+  "dialogDetection": { "endMarker": "regex of the new trailing marker" }
+}
+```
 
 ## Supported platforms
 
