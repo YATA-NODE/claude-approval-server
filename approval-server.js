@@ -55,6 +55,28 @@ app.get('/', (req, res) => {
 // 承認待ちキュー: { id, description, status, createdAt, resolvedAt }
 const queue = []
 
+// resolved になってから RESOLVED_TTL_MS 経過したエントリを定期的に除去する。
+// UI 側の「処理履歴」はブラウザローカルに保持されるため、サーバー側の resolved は
+// long-poll の取りこぼし対策として短時間だけ保持すれば十分。
+const RESOLVED_TTL_MS = 60 * 60 * 1000 // 1 時間
+const RESOLVED_GC_INTERVAL_MS = 5 * 60 * 1000 // 5 分ごとに走査
+function gcResolved() {
+  const now = Date.now()
+  let removed = 0
+  for (let i = queue.length - 1; i >= 0; i--) {
+    const it = queue[i]
+    if (it.status !== 'resolved' || !it.resolvedAt) continue
+    const age = now - new Date(it.resolvedAt).getTime()
+    if (age >= RESOLVED_TTL_MS) {
+      queue.splice(i, 1)
+      removed++
+    }
+  }
+  if (removed > 0) console.log(`[GC] removed ${removed} resolved entries`)
+}
+const gcTimer = setInterval(gcResolved, RESOLVED_GC_INTERVAL_MS)
+gcTimer.unref?.()
+
 // long-poll 待機中の /status/:id リクエスト通知用
 const { EventEmitter } = require('events')
 const resolveEvents = new EventEmitter()
@@ -244,6 +266,23 @@ app.post('/resolve/:id', authenticate, (req, res) => {
   resolveEvents.emit(item.id, item)
 
   res.json({ id: item.id, status: item.status })
+})
+
+/**
+ * DELETE /history
+ * resolved 済みエントリをサーバー側からまとめて除去する。
+ * UI の「すべて削除」操作で呼ばれる。pending には触れない。
+ */
+app.delete('/history', authenticate, (req, res) => {
+  let removed = 0
+  for (let i = queue.length - 1; i >= 0; i--) {
+    if (queue[i].status === 'resolved') {
+      queue.splice(i, 1)
+      removed++
+    }
+  }
+  console.log(`[HISTORY CLEAR] removed ${removed} resolved entries`)
+  res.json({ removed })
 })
 
 // -------------------------------------------------------

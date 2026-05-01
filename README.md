@@ -9,6 +9,8 @@ PTY ラッパーが Claude Code の入出力を仲介し、ダイアログが出
 
 どちらで応答しても、もう一方の表示は自動的に閉じます。
 
+![承認パネル（スマホ表示の例：承認待ち → Yes/No 選択 → 処理履歴）](docs/images/approval-panel-mobile.png)
+
 ## 特徴
 
 - **Claude Code の設定を変更しない**: `~/.claude/settings.json` の hooks には何も書きません。ラッパー経由で `claude` を起動するだけで動作し、ラッパーの利用を止めればそのまま元の挙動に戻ります
@@ -337,6 +339,8 @@ A PTY wrapper sits between Claude Code and the terminal: when an approval dialog
 - **simultaneously** pushed to the approval panel on smartphone / PC browser.
 
 Whichever side responds first dismisses the other side automatically.
+
+![Approval panel on a smartphone: pending request → Yes/No buttons → resolved history](docs/images/approval-panel-mobile.png)
 
 ## Highlights
 
