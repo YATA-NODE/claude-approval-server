@@ -359,12 +359,58 @@
       }
 
       /* 履歴 */
+      .hist-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .hist-head .section-label {
+        margin: 0;
+      }
+      .btn-hist-clear {
+        background: transparent;
+        color: var(--text-secondary);
+        border: 1px solid var(--text-secondary);
+        border-radius: 8px;
+        padding: 4px 10px;
+        font-size: 12px;
+        cursor: pointer;
+        opacity: 0.85;
+      }
+      .btn-hist-clear:hover {
+        opacity: 1;
+      }
       .hist-card {
         background: var(--card-bg);
         border-radius: 10px;
         padding: 10px 14px;
         margin-bottom: 8px;
         opacity: var(--hist-opacity);
+        position: relative;
+      }
+      .hist-card .btn-hist-del {
+        position: absolute;
+        top: 6px;
+        right: 6px;
+        background: transparent;
+        border: none;
+        color: var(--text-secondary);
+        font-size: 18px;
+        line-height: 1;
+        padding: 4px 8px;
+        cursor: pointer;
+        border-radius: 6px;
+      }
+      .hist-card .btn-hist-del:hover {
+        background: rgba(0, 0, 0, 0.06);
+      }
+      [data-theme='dark'] .hist-card .btn-hist-del:hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .hist-card .hist-label {
+        padding-right: 28px;
       }
       .hist-label {
         font-size: 13px;
@@ -433,7 +479,10 @@
 
         <!-- 処理履歴 -->
         <div id="hist-section" style="display: none; margin-top: 1.5rem">
-          <p class="section-label" id="lbl-history">処理履歴</p>
+          <div class="hist-head">
+            <p class="section-label" id="lbl-history">処理履歴</p>
+            <button class="btn-hist-clear" id="btn-hist-clear">すべて削除</button>
+          </div>
           <div id="hist-list"></div>
         </div>
       </div>
@@ -475,6 +524,9 @@
           resolvedBySmartphone: 'スマホで承認',
           resolvedByPcDenied: 'PC で拒否',
           resolvedBySmartphoneDenied: 'スマホで拒否',
+          histClearAll: 'すべて削除',
+          histDeleteOne: '削除',
+          histClearConfirm: '履歴をすべて削除しますか?',
           langToggle: 'EN',
           locale: 'ja-JP',
         },
@@ -509,6 +561,9 @@
           resolvedBySmartphone: 'Approved by smartphone',
           resolvedByPcDenied: 'Denied by PC',
           resolvedBySmartphoneDenied: 'Denied by smartphone',
+          histClearAll: 'Clear all',
+          histDeleteOne: 'Delete',
+          histClearConfirm: 'Clear all history?',
           langToggle: '日本語',
           locale: 'en-US',
         },
@@ -546,6 +601,7 @@
         document.getElementById('btn-fetch').textContent = t('btnFetch')
         document.getElementById('lbl-pending').textContent = t('pending')
         document.getElementById('lbl-history').textContent = t('history')
+        document.getElementById('btn-hist-clear').textContent = t('histClearAll')
         document.getElementById('btn-lang').textContent = t('langToggle')
 
         // 一括承認ボタンのテキストを現在の状態に合わせて更新
@@ -798,6 +854,9 @@
             body: JSON.stringify({ answer, resolvedBy }),
           })
           history.unshift({
+            histId:
+              (crypto.randomUUID && crypto.randomUUID()) ||
+              `${Date.now()}-${Math.random().toString(36).slice(2)}`,
             description: getDescription(id),
             answer,
             resolvedBy,
@@ -832,6 +891,7 @@
         history.forEach((item) => {
           const div = document.createElement('div')
           div.className = 'hist-card'
+          div.dataset.histId = item.histId || ''
           const a = item.answer.toLowerCase()
           const isNo = a === 'no' || a === 'rejected' || a === 'deny' || a === 'cancel'
           const color = isNo ? '#cc2a22' : '#1a7f37'
@@ -841,11 +901,39 @@
             return t(isNo ? 'resolvedBySmartphoneDenied' : 'resolvedBySmartphone')
           })()
           div.innerHTML = `
+      <button class="btn-hist-del" type="button" aria-label="${t('histDeleteOne')}" title="${t('histDeleteOne')}">×</button>
       <p class="hist-label" style="color:${color}">${byLabel} <span style="color:var(--text-secondary);font-weight:400;font-size:12px;">${fmt(item.resolvedAt)}</span></p>
       <p class="hist-desc">${escHtml(item.description)}</p>`
           el.appendChild(div)
         })
       }
+
+      // 履歴の個別「×」削除（ブラウザローカルの history のみ操作）
+      document.getElementById('hist-list').addEventListener('click', (e) => {
+        const btn = e.target.closest('.btn-hist-del')
+        if (!btn) return
+        const card = btn.closest('.hist-card')
+        const id = card?.dataset.histId
+        if (!id) return
+        history = history.filter((h) => h.histId !== id)
+        renderHistory()
+      })
+
+      // 履歴「すべて削除」: ローカル history を空にし、サーバー側 resolved も掃除する。
+      // サーバー側 DELETE /history は失敗してもローカル UI の見た目は更新する
+      // （resolved は GC でいずれ消えるため、UX を止めない方を優先）。
+      document.getElementById('btn-hist-clear').addEventListener('click', async () => {
+        if (history.length === 0) return
+        if (!window.confirm(t('histClearConfirm'))) return
+        history = []
+        renderHistory()
+        try {
+          await apiFetch('/history', { method: 'DELETE' })
+        } catch (e) {
+          // サーバー側削除に失敗してもローカル表示は既にクリアされている
+          document.getElementById('main-err').textContent = t('errOp', e.message)
+        }
+      })
     </script>
   </body>
 </html>
