@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "defaultMode": "plan"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/koishi/projects/dotfiles/.claude/scripts/session-start-readme.sh ~/vault/20_knowledge/common/yata-node/project-map.md ~/vault/01_inbox_agent_memory/claude-approval-server.md ~/vault/20_knowledge/common/agents-shared-knowledge/_tag-registry.md",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
