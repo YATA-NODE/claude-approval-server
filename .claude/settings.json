@@ -13,6 +13,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/koishi/projects/dotfiles/.claude/scripts/check-hardcoded-secrets.sh",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
