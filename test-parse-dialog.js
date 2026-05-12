@@ -11,7 +11,7 @@
 
 const fs = require('fs')
 
-const { parseDialog, stripAnsi } = require('./claude-wrapper.js')
+const { parseDialog, stripAnsi, validateAnswer } = require('./claude-wrapper.js')
 
 let failed = 0
 let passed = 0
@@ -131,6 +131,102 @@ console.log('\n[5] parseDialog: 偽陽性除外')
 {
   const buf = ' Some output mentioning Esc to cancel? but no dialog'
   assertEq('カーソル無し → null', parseDialog(buf), null)
+}
+
+// -------------------------------------------------------
+// 6. parseDialog: AskUserQuestion 型 4 択（tool 行なし・shift+tab 不在・長文）
+// -------------------------------------------------------
+console.log('\n[6] parseDialog: AskUserQuestion 4 択')
+{
+  const buf = [
+    '─────',
+    ' Auto-Switch Configuration',
+    '╌╌╌╌',
+    ' Which auto-switch mode do you prefer for short tasks?',
+    ' ❯ 1. Skip auto-switch (Recommended)',
+    '   2. Enable for short tasks only when the model is idle',
+    '   3. Enable for all tasks regardless of token cost',
+    '   4. Decide each time with a confirmation dialog',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('options 数 = 4', r && r.options.length, 4)
+  assertEq('tool=AskUserQuestion', r && r.tool, 'AskUserQuestion')
+  assertEq(
+    'options[0] 冒頭が欠けない',
+    r && r.options[0].startsWith('Skip auto-switch'),
+    true
+  )
+}
+
+// -------------------------------------------------------
+// 7. parseDialog: 選択肢本文に「1 枚目」「2 枚目」を含むケース（誤検知防止）
+// -------------------------------------------------------
+console.log('\n[7] parseDialog: 本文中の数字を誤検知しない')
+{
+  const buf = [
+    '─────',
+    ' 2 枚の図の扱いを選んでください?',
+    ' ❯ 1. 1 枚目を採用',
+    '   2. 2 枚目を採用',
+    '   3. 両方採用',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('options 数 = 3', r && r.options.length, 3)
+  assertEq(
+    'options[0] = "1 枚目を採用"（冒頭の 1 が欠けない）',
+    r && r.options[0],
+    '1 枚目を採用'
+  )
+  assertEq(
+    'options[1] = "2 枚目を採用"（冒頭の 2 が欠けない）',
+    r && r.options[1],
+    '2 枚目を採用'
+  )
+  assertEq('options[2] = "両方採用"', r && r.options[2], '両方採用')
+  assertEq(
+    'prompt 冒頭の "2 " が欠けない',
+    r && r.prompt.startsWith('2 枚の図'),
+    true
+  )
+}
+
+// -------------------------------------------------------
+// 8. parseDialog: 6 択 + validateAnswer の数字キー範囲
+// -------------------------------------------------------
+console.log('\n[8] parseDialog: 6 択 + validateAnswer')
+{
+  const buf = [
+    '─────',
+    ' What would you like to do next?',
+    ' ❯ 1. Continue interview',
+    '   2. Skip interview and plan immediately',
+    '   3. Chat about this',
+    '   4. Type something',
+    '   5. Pause and review',
+    '   6. Cancel session',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('options 数 = 6', r && r.options.length, 6)
+  if (r) {
+    assertEq('validateAnswer("5") = "5"', validateAnswer('5', r.options), '5')
+    assertEq('validateAnswer("6") = "6"', validateAnswer('6', r.options), '6')
+    assertEq(
+      'validateAnswer("7") = null（範囲外）',
+      validateAnswer('7', r.options),
+      null
+    )
+    assertEq(
+      'validateAnswer(完全一致) で番号に正規化',
+      validateAnswer('Pause and review', r.options),
+      '5'
+    )
+  }
 }
 
 // -------------------------------------------------------

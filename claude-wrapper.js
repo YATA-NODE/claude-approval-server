@@ -311,21 +311,27 @@ function parseDialog(buf) {
   const segStart = Math.max(0, endIdx - CLEAN_BUF_MAX)
   const segment = buf.slice(segStart, endIdx)
 
-  // 3. 偽陽性除外: アクティブカーソル `❯` + 数字 1〜3 が必須
-  if (!/❯\s*[123]/.test(segment)) return null
+  // 3. 偽陽性除外: アクティブカーソル `❯` + 数字 1〜9 が必須
+  // AskUserQuestion 型は選択肢が 4 個以上になることがあるため 1〜9 を許容。
+  if (!/❯\s*[1-9]/.test(segment)) return null
 
   // 4. プロンプト抽出
   const qIdx = segment.lastIndexOf('?')
   if (qIdx < 0) return null
   const beforeQ = segment.slice(0, qIdx)
-  // 行頭は改行 / ボックス文字の直後とみなす
-  const lineStart = Math.max(
-    beforeQ.lastIndexOf('\n'),
-    beforeQ.lastIndexOf('│'),
-    beforeQ.lastIndexOf('─'),
-    beforeQ.lastIndexOf('╌'),
-    -1
-  )
+  // 改行を最優先で行頭とみなす。改行が見つからない場合のみボックス文字へフォールバック。
+  // AskUserQuestion 型の prompt は同じ行内のボックス文字(─ など)を本文として持つ
+  // ことがあるため、改行があれば必ずそちらを優先する。
+  const nlIdx = beforeQ.lastIndexOf('\n')
+  const lineStart =
+    nlIdx >= 0
+      ? nlIdx
+      : Math.max(
+          beforeQ.lastIndexOf('│'),
+          beforeQ.lastIndexOf('─'),
+          beforeQ.lastIndexOf('╌'),
+          -1
+        )
   const prompt = segment
     .slice(lineStart + 1, qIdx + 1)
     .replace(/[│╭╮╰╯─╌\r\n]/g, ' ')
@@ -335,14 +341,45 @@ function parseDialog(buf) {
 
   // 5. オプション抽出
   const optionSegment = segment.slice(qIdx + 1)
-  // 数字 1〜3 単体 (前後に英数字なし) を番号マーカーとみなす
-  // 例: "❯1Yes" の 1、"2. Yes,..." の 2、"  3. No" の 3
-  // line number "1080-" のような桁続きは (?![0-9]) で除外
-  const markerRe = /(?<![A-Za-z0-9])([123])(?![0-9])/g
+  // 数字 1〜9 単体を番号マーカーとして検出する。
+  // 既定は厳格モード: 「行頭 / `❯` の直後 / 空白経由で行頭側」に位置するもののみ採用。
+  // 本文中の「1 枚目」「2 枚目」等を誤検知しないため。
+  // 厳格モードで 0 件のときは旧 regex(数字隣接のみで判定)にフォールバック =
+  // ANSI 部分再描画で行頭判定がズレた旧フォーマット互換も維持する。
+  const LINE_START_CHARS = '\n│╭╮╰╯─╌'
+  function isStrictMarkerStart(i) {
+    if (i === 0) return true
+    const prev = optionSegment[i - 1]
+    if (prev === '❯') return true
+    if (LINE_START_CHARS.includes(prev)) return true
+    if (/\s/.test(prev)) {
+      // 左にさかのぼり、空白だけを跨いで行頭/`❯`/区切り文字に到達するなら OK
+      for (let j = i - 2; j >= 0; j--) {
+        const c = optionSegment[j]
+        if (c === '❯' || LINE_START_CHARS.includes(c)) return true
+        if (!/\s/.test(c)) return false
+      }
+      return true
+    }
+    return false
+  }
   const found = new Map()
-  let mm
-  while ((mm = markerRe.exec(optionSegment)) !== null) {
-    if (!found.has(mm[1])) found.set(mm[1], { at: mm.index, end: mm.index + 1 })
+  // 厳格モード: 行頭限定で 1〜9 を歩く
+  for (let i = 0; i < optionSegment.length; i++) {
+    const ch = optionSegment[i]
+    if (ch < '1' || ch > '9') continue
+    const next = optionSegment[i + 1]
+    if (next && next >= '0' && next <= '9') continue // 連桁(行番号など)は除外
+    if (!isStrictMarkerStart(i)) continue
+    if (!found.has(ch)) found.set(ch, { at: i, end: i + 1 })
+  }
+  // フォールバック: 厳格 0 件なら旧 regex で再試行(後方互換性)
+  if (found.size === 0) {
+    const fallbackRe = /(?<![A-Za-z0-9])([1-9])(?![0-9])/g
+    let mm
+    while ((mm = fallbackRe.exec(optionSegment)) !== null) {
+      if (!found.has(mm[1])) found.set(mm[1], { at: mm.index, end: mm.index + 1 })
+    }
   }
   if (found.size === 0) return null
 
@@ -398,12 +435,25 @@ function parseDialog(buf) {
     }
   }
 
+  // 6c. それでも tool が Unknown のままなら AskUserQuestion 型ダイアログと推定する。
+  // 判定シグナル: shift+tab ヒント不在 ∧ (選択肢 4 個以上 ∨ 平均長 25 文字以上 ∨ prompt が "Do you want to" で始まらない)。
+  // 既存ツール系を AskUserQuestion と誤判定しないよう、必ず fallback テーブル不一致時のみ評価する。
+  if (tool === 'Unknown') {
+    const hasShiftTab = /shift\s*\+\s*tab/i.test(optionSegment)
+    const avgLen =
+      options.reduce((s, o) => s + o.length, 0) / Math.max(options.length, 1)
+    const looksLikeAUQ =
+      !hasShiftTab &&
+      (options.length >= 4 || avgLen >= 25 || !/Do you want to/i.test(prompt))
+    if (looksLikeAUQ) tool = 'AskUserQuestion'
+  }
+
   return { prompt, options, tool, args }
 }
 
 // テスト用エクスポート (実行時には影響なし)
 if (typeof module !== 'undefined') {
-  module.exports = { parseDialog, stripAnsi }
+  module.exports = { parseDialog, stripAnsi, validateAnswer }
 }
 
 async function detectDialog() {
@@ -452,7 +502,10 @@ setInterval(() => {
 
 async function registerDialog(d) {
   const shortArgs = d.args.length > 200 ? d.args.slice(0, 200) + '…' : d.args
-  const description = `[${PROJECT_NAME}][${d.tool}] ${shortArgs} — ${d.prompt}`
+  // args が空のとき "tool]  —" のような空白の間延びが起きるのを避ける
+  const description = shortArgs
+    ? `[${PROJECT_NAME}][${d.tool}] ${shortArgs} — ${d.prompt}`
+    : `[${PROJECT_NAME}][${d.tool}] ${d.prompt}`
   // POST /request 中に別の PTY チャンクで detectDialog が走ると
   // currentDialog=null のまま二重登録されてしまう。先にスロットを予約する。
   currentDialog = { ...d, id: null, lastSeenAt: Date.now() }
@@ -508,17 +561,18 @@ async function pollForResponse(id) {
   }
 }
 
-// answer を「1/2/3 の文字」または「options 完全一致」→ 対応する番号に正規化
+// answer を「1〜9 の文字」または「options 完全一致」→ 対応する番号に正規化
+// AskUserQuestion 型ダイアログでは選択肢が最大 9 個になり得るため、1〜9 を許容する。
 function validateAnswer(answer, options) {
   if (typeof answer !== 'string') return null
   const a = answer.trim()
-  if (a === '1' || a === '2' || a === '3') {
+  if (/^[1-9]$/.test(a)) {
     const idx = parseInt(a) - 1
     if (idx >= 0 && idx < options.length) return a
     return null
   }
   const idx = options.indexOf(a)
-  if (idx >= 0) return String(idx + 1)
+  if (idx >= 0 && idx < 9) return String(idx + 1)
   // 'resolved-by-cli' 等は CLI 側で既に応答済みを意味するので注入しない
   return null
 }
