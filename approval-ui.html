@@ -309,7 +309,7 @@
       }
       .btn-option {
         width: 100%;
-        padding: 12px;
+        padding: 12px 14px;
         border-radius: 10px;
         border: none;
         font-size: 15px;
@@ -320,6 +320,12 @@
         word-break: break-word;
         line-height: 1.4;
         text-align: center;
+        max-height: 12em;
+        overflow: auto;
+      }
+      /* 長文選択肢(AskUserQuestion 等)は左寄せの方が読みやすい */
+      .btn-option.btn-long {
+        text-align: left;
       }
       .btn-option:active {
         opacity: 0.7;
@@ -758,10 +764,15 @@
 
       function btnClass(opt, allOptions) {
         const o = opt.toLowerCase()
-        if (o === 'no' || o === 'rejected' || o === 'deny' || o === 'cancel') return 'btn-option btn-no'
-        if (o === 'yes' || o === 'approved' || o === 'allow') return 'btn-option btn-yes'
-        if (allOptions.indexOf(opt) === allOptions.length - 1) return 'btn-option btn-no'
-        return 'btn-option btn-other'
+        // 長文選択肢(AskUserQuestion 型)は左寄せにする
+        const longCls = opt.length >= 30 ? ' btn-long' : ''
+        if (o === 'no' || o === 'rejected' || o === 'deny' || o === 'cancel')
+          return 'btn-option btn-no' + longCls
+        if (o === 'yes' || o === 'approved' || o === 'allow')
+          return 'btn-option btn-yes' + longCls
+        // AskUserQuestion 型では「最後の要素 = 拒否」とは限らないため、
+        // キーワード一致しない選択肢はすべて青(その他)で揃える
+        return 'btn-option btn-other' + longCls
       }
 
       function renderQueue(items) {
