@@ -161,13 +161,15 @@ app.post('/request', authenticate, (req, res) => {
   const safeDesc =
     description.length > MAX_DESC_LEN ? description.slice(0, MAX_DESC_LEN) + '…' : description
 
-  // options: 文字列配列のみ許可、最大 8 件・各 100 文字
+  // options: 文字列配列のみ許可、最大 9 件・各 200 文字
+  // AskUserQuestion 型ダイアログでは長文選択肢(平均 25 文字以上)が並ぶことがあるため
+  // 各要素の上限を 200 文字に緩和。件数上限は数字キー注入の都合で 9 件まで。
   let safeOptions = ['Yes', 'No']
   if (Array.isArray(options)) {
     safeOptions = options
       .filter((o) => typeof o === 'string')
-      .slice(0, 8)
-      .map((o) => (o.length > 100 ? o.slice(0, 100) + '…' : o))
+      .slice(0, 9)
+      .map((o) => (o.length > 200 ? o.slice(0, 200) + '…' : o))
     if (safeOptions.length === 0) safeOptions = ['Yes', 'No']
   }
 
