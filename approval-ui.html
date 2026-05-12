@@ -279,6 +279,77 @@
         border-left-color: var(--req-card-selected-border);
         box-shadow: 0 2px 8px var(--req-card-selected-shadow);
       }
+      /* 複合質問カード(タブ式) */
+      .req-card.multi-card {
+        border-left-color: #ff9500;
+        cursor: default;
+      }
+      [data-theme='dark'] .req-card.multi-card {
+        border-left-color: #ff9f0a;
+      }
+      .multi-badge {
+        display: inline-block;
+        background: #ff9500;
+        color: #fff;
+        border-radius: 8px;
+        padding: 1px 8px;
+        font-size: 11px;
+        font-weight: 600;
+        margin-left: 6px;
+        vertical-align: middle;
+      }
+      [data-theme='dark'] .multi-badge {
+        background: #ff9f0a;
+      }
+      .sub-question {
+        margin-top: 14px;
+        padding-top: 10px;
+        border-top: 1px solid var(--req-card-border);
+      }
+      .sub-question:first-of-type {
+        border-top: none;
+        padding-top: 0;
+      }
+      .sub-label {
+        font-size: 11px;
+        color: var(--text-secondary);
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      .sub-prompt {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text-primary);
+        line-height: 1.5;
+        margin-bottom: 8px;
+        word-break: break-word;
+      }
+      .btn-option.selected {
+        outline: 3px solid #ffd60a;
+        outline-offset: -3px;
+      }
+      .btn-submit-all {
+        width: 100%;
+        margin-top: 16px;
+        padding: 14px;
+        border-radius: 10px;
+        border: none;
+        font-size: 16px;
+        font-weight: 700;
+        cursor: pointer;
+        background: #ff9500;
+        color: #fff;
+      }
+      [data-theme='dark'] .btn-submit-all {
+        background: #ff9f0a;
+      }
+      .btn-submit-all:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .btn-submit-all:not(:disabled):active {
+        opacity: 0.85;
+      }
       .req-card:active {
         opacity: 0.85;
       }
@@ -533,6 +604,11 @@
           histClearAll: 'すべて削除',
           histDeleteOne: '削除',
           histClearConfirm: '履歴をすべて削除しますか?',
+          multiBadge: (n) => `複合質問 ${n} 件`,
+          subQuestion: (i, n) => `Q${i}/${n}`,
+          submitAll: 'すべて送信',
+          submitAllProgress: (k, n) => `すべて送信 (${k}/${n})`,
+          multiHistory: (n) => `複合質問 ${n} 件回答`,
           langToggle: 'EN',
           locale: 'ja-JP',
         },
@@ -570,6 +646,11 @@
           histClearAll: 'Clear all',
           histDeleteOne: 'Delete',
           histClearConfirm: 'Clear all history?',
+          multiBadge: (n) => `${n} questions`,
+          subQuestion: (i, n) => `Q${i}/${n}`,
+          submitAll: 'Submit all',
+          submitAllProgress: (k, n) => `Submit all (${k}/${n})`,
+          multiHistory: (n) => `Answered ${n} questions`,
           langToggle: '日本語',
           locale: 'en-US',
         },
@@ -585,6 +666,8 @@
       let selectedId = null
       let currentQueueItems = null
       let lastFetchAt = null
+      // 複合質問の選択状態 { [itemId]: { [tabIndex]: optionNumberString } }
+      const selectedAnswers = {}
 
       function t(key, ...args) {
         const val = TRANSLATIONS[lang][key]
@@ -791,47 +874,132 @@
 
         badge.textContent = items.length
         badge.style.display = 'inline-block'
-        bulkBtn.disabled = false
-        bulkBtn.textContent = t('btnBulkApproveN', items.length)
+        // 一括承認は複合質問を含まない場合のみ enable
+        const hasMulti = items.some((i) => Array.isArray(i.tabs) && i.tabs.length > 0)
+        bulkBtn.disabled = hasMulti
+        bulkBtn.textContent = hasMulti
+          ? t('btnBulkApprove')
+          : t('btnBulkApproveN', items.length)
 
         if (selectedId && !items.find((i) => i.id === selectedId)) selectedId = null
 
+        // 残らない item の選択状態は破棄
+        for (const id of Object.keys(selectedAnswers)) {
+          if (!items.find((i) => i.id === id)) delete selectedAnswers[id]
+        }
+
         el.innerHTML = ''
         items.forEach((item) => {
-          const div = document.createElement('div')
-          const isSelected = item.id === selectedId
-          div.className = 'req-card' + (isSelected ? ' selected' : '')
-          div.dataset.id = item.id
-
-          const btnHtml = isSelected
-            ? `<div class="btn-area">${item.options
-                .map(
-                  (opt) =>
-                    `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-answer="${opt}">${opt}</button>`
-                )
-                .join('')}</div>`
-            : ''
-
-          div.innerHTML = `
-      <p class="req-time">${fmt(item.createdAt)}</p>
-      <p class="req-desc${isSelected ? '' : ' req-desc-short'}">${escHtml(item.description)}</p>
-      ${btnHtml}`
-
-          el.appendChild(div)
+          if (Array.isArray(item.tabs) && item.tabs.length > 0) {
+            el.appendChild(renderMultiCard(item))
+          } else {
+            el.appendChild(renderSingleCard(item))
+          }
         })
       }
 
+      function renderSingleCard(item) {
+        const div = document.createElement('div')
+        const isSelected = item.id === selectedId
+        div.className = 'req-card' + (isSelected ? ' selected' : '')
+        div.dataset.id = item.id
+
+        const btnHtml = isSelected
+          ? `<div class="btn-area">${item.options
+              .map(
+                (opt) =>
+                  `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-answer="${escHtml(opt)}">${escHtml(opt)}</button>`
+              )
+              .join('')}</div>`
+          : ''
+
+        div.innerHTML = `
+      <p class="req-time">${fmt(item.createdAt)}</p>
+      <p class="req-desc${isSelected ? '' : ' req-desc-short'}">${escHtml(item.description)}</p>
+      ${btnHtml}`
+        return div
+      }
+
+      function renderMultiCard(item) {
+        const div = document.createElement('div')
+        div.className = 'req-card multi-card'
+        div.dataset.id = item.id
+        div.dataset.multi = '1'
+
+        const sel = selectedAnswers[item.id] || {}
+        const n = item.tabs.length
+        const answeredCount = Object.keys(sel).filter((k) => sel[k]).length
+
+        const subHtml = item.tabs
+          .map((tab, ti) => {
+            const tabSel = sel[ti]
+            const opts = (tab.options || [])
+              .map((opt, oi) => {
+                const num = String(oi + 1)
+                const isSel = tabSel === num
+                const cls = btnClass(opt, tab.options) + (isSel ? ' selected' : '')
+                return `<button class="${cls}" data-multi-id="${item.id}" data-tab="${ti}" data-num="${num}">${escHtml(opt)}</button>`
+              })
+              .join('')
+            const labelHtml = `<p class="sub-label">${t('subQuestion', ti + 1, n)}${tab.label ? ' · ' + escHtml(tab.label) : ''}</p>`
+            return `<div class="sub-question">
+              ${labelHtml}
+              <p class="sub-prompt">${escHtml(tab.prompt)}</p>
+              <div class="btn-area">${opts}</div>
+            </div>`
+          })
+          .join('')
+
+        const submitDisabled = answeredCount < n ? 'disabled' : ''
+        const submitLabel =
+          answeredCount < n ? t('submitAllProgress', answeredCount, n) : t('submitAll')
+
+        div.innerHTML = `
+      <p class="req-time">${fmt(item.createdAt)}</p>
+      <p class="req-desc">${escHtml(item.description)} <span class="multi-badge">${t('multiBadge', n)}</span></p>
+      ${subHtml}
+      <button class="btn-submit-all" data-submit-id="${item.id}" ${submitDisabled}>${submitLabel}</button>`
+        return div
+      }
+
       function escHtml(str) {
-        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        // HTML 属性内に直接埋め込む箇所(例: data-answer="${escHtml(opt)}")があるため、
+        // " と ' もエスケープする(属性値の引用符を抜けるインジェクションを防ぐ)。
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;')
       }
 
       document.getElementById('queue-list').addEventListener('click', async (e) => {
+        // 複合質問の「すべて送信」ボタン
+        const submitBtn = e.target.closest('button[data-submit-id]')
+        if (submitBtn && !submitBtn.disabled) {
+          await resolveMultiItem(submitBtn.dataset.submitId, submitBtn)
+          return
+        }
+        // 複合質問のサブ選択肢ボタン
+        const multiBtn = e.target.closest('button[data-multi-id]')
+        if (multiBtn) {
+          const id = multiBtn.dataset.multiId
+          const ti = multiBtn.dataset.tab
+          const num = multiBtn.dataset.num
+          if (!selectedAnswers[id]) selectedAnswers[id] = {}
+          selectedAnswers[id][ti] = num
+          // 即再描画(currentQueueItems が最新)
+          if (currentQueueItems) renderQueue(currentQueueItems)
+          return
+        }
+        // 単一質問の通常ボタン
         const btn = e.target.closest('button[data-id]')
         if (btn) {
           await resolveItem(btn.dataset.id, btn.dataset.answer, btn.closest('.btn-area'))
           return
         }
-        const card = e.target.closest('.req-card')
+        // 単一質問カード選択(複合質問カードはトグル不要なので除外)
+        const card = e.target.closest('.req-card:not(.multi-card)')
         if (card) {
           selectedId = selectedId === card.dataset.id ? null : card.dataset.id
           await fetchQueue()
@@ -845,6 +1013,8 @@
         try {
           const items = await apiFetch('/queue')
           for (const item of items) {
+            // 複合質問は一括承認の対象外(個別タブの選択が必要)
+            if (Array.isArray(item.tabs) && item.tabs.length > 0) continue
             await resolveItem(item.id, 'Yes', null, true)
           }
         } catch (e) {
@@ -856,6 +1026,51 @@
       const resolvedBy =
         location.hostname === 'localhost' || location.hostname === '127.0.0.1' ? 'pc' : 'smartphone'
 
+      function pushHistory(description, answer) {
+        history.unshift({
+          histId:
+            (crypto.randomUUID && crypto.randomUUID()) ||
+            `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          description,
+          answer,
+          resolvedBy,
+          resolvedAt: new Date().toISOString(),
+        })
+        if (history.length > 20) history.pop()
+        renderHistory()
+      }
+
+      async function resolveMultiItem(id, submitBtn) {
+        const sel = selectedAnswers[id] || {}
+        const item = (currentQueueItems || []).find((i) => i.id === id)
+        if (!item || !Array.isArray(item.tabs)) return
+        const answers = []
+        for (let i = 0; i < item.tabs.length; i++) {
+          const v = sel[i]
+          if (!v) return // 未選択あり → 何もしない
+          answers.push(String(v))
+        }
+        submitBtn.disabled = true
+        submitBtn.textContent = t('btnProcessing')
+        try {
+          await apiFetch(`/resolve/${id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ answers, resolvedBy }),
+          })
+          pushHistory(
+            getDescription(id),
+            t('multiHistory', item.tabs.length) + ' [' + answers.join(',') + ']'
+          )
+          delete selectedAnswers[id]
+          await fetchQueue()
+        } catch (e) {
+          document.getElementById('main-err').textContent = t('errOp', e.message)
+          submitBtn.disabled = false
+          submitBtn.textContent = t('submitAll')
+        }
+      }
+
       async function resolveItem(id, answer, btnArea, isBulk = false) {
         if (btnArea) btnArea.querySelectorAll('button').forEach((b) => (b.disabled = true))
         try {
@@ -864,17 +1079,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ answer, resolvedBy }),
           })
-          history.unshift({
-            histId:
-              (crypto.randomUUID && crypto.randomUUID()) ||
-              `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-            description: getDescription(id),
-            answer,
-            resolvedBy,
-            resolvedAt: new Date().toISOString(),
-          })
-          if (history.length > 20) history.pop()
-          renderHistory()
+          pushHistory(getDescription(id), answer)
           if (!isBulk) {
             selectedId = null
             await fetchQueue()
