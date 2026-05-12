@@ -11,7 +11,13 @@
 
 const fs = require('fs')
 
-const { parseDialog, stripAnsi, validateAnswer } = require('./claude-wrapper.js')
+const {
+  parseDialog,
+  stripAnsi,
+  validateAnswer,
+  isTabbedDialog,
+  validateMultiAnswer,
+} = require('./claude-wrapper.js')
 
 let failed = 0
 let passed = 0
@@ -227,6 +233,73 @@ console.log('\n[8] parseDialog: 6 択 + validateAnswer')
       '5'
     )
   }
+}
+
+// -------------------------------------------------------
+// 9. isTabbedDialog: タブバー検出
+// -------------------------------------------------------
+console.log('\n[9] isTabbedDialog: タブ式 UI 検出')
+{
+  const tabbed = [
+    '□統合方式 □図再生成 ✓整理 □tier ✓Submit →',
+    ' 新候補を既存レポートにどう統合しますか?',
+    ' ❯ 1. A 案',
+    '   2. B 案',
+    ' Esc to cancel · Tab/Arrow keys to navigate',
+  ].join('\n')
+  assertEq('タブ式 → true', isTabbedDialog(tabbed), true)
+
+  const single = [
+    '● Write(test.txt)',
+    ' Do you want to create test.txt?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('単一質問 → false', isTabbedDialog(single), false)
+
+  assertEq('空文字 → false', isTabbedDialog(''), false)
+}
+
+// -------------------------------------------------------
+// 10. validateMultiAnswer: 複合質問の回答配列検証
+// -------------------------------------------------------
+console.log('\n[10] validateMultiAnswer')
+{
+  const tabs = [
+    { prompt: 'q1', options: ['a', 'b', 'c'] },
+    { prompt: 'q2', options: ['x', 'y'] },
+    { prompt: 'q3', options: ['p', 'q', 'r', 's'] },
+  ]
+  assertEq('正常 ["1","2","3"]', validateMultiAnswer(['1', '2', '3'], tabs), ['1', '2', '3'])
+  assertEq('長さ不一致 → null', validateMultiAnswer(['1', '2'], tabs), null)
+  assertEq('範囲外 → null', validateMultiAnswer(['1', '3', '1'], tabs), null) // q2 は 1〜2 のみ
+  assertEq('数字以外 → null', validateMultiAnswer(['1', 'x', '1'], tabs), null)
+  assertEq('空配列 + 空 tabs → null', validateMultiAnswer([], []), null)
+  assertEq('null tabs → null', validateMultiAnswer(['1'], null), null)
+  assertEq('9 件超 → null', validateMultiAnswer(['1', '1', '1', '1', '1', '1', '1', '1', '1', '1'], new Array(10).fill({ options: ['a'] })), null)
+}
+
+// -------------------------------------------------------
+// 11. parseDialog はタブ式入力でも単一タブとして解釈する(sweep 前提)
+// -------------------------------------------------------
+console.log('\n[11] parseDialog はタブ式入力の現タブのみ抽出')
+{
+  // タブ式 UI でも parseDialog は現在見えているタブの ❯ + 選択肢を抽出する
+  const buf = [
+    '□統合方式 □図再生成 ✓整理 ✓Submit →',
+    '─────',
+    ' 新候補を既存レポートにどう統合しますか?',
+    ' ❯ 1. 7→9 候補化',
+    '   2. 新ゾーン追加',
+    '   3. 補遺ファイル追記のみ',
+    ' Esc to cancel · Tab/Arrow keys to navigate',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('options 数 = 3', r && r.options.length, 3)
+  assertEq('現タブの prompt が取れる', r && r.prompt.includes('新候補'), true)
+  assertEq('isTabbedDialog も true', isTabbedDialog(buf), true)
 }
 
 // -------------------------------------------------------
