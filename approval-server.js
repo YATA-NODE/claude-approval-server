@@ -151,40 +151,75 @@ function authenticate(req, res, next) {
  *
  * その後、エージェントは GET /status/:id をポーリングして結果を確認する
  */
+// 文字列を最大長に切り詰めて末尾に "…" を付ける。短ければそのまま。
+function clipString(s, max) {
+  return s.length > max ? s.slice(0, max) + '…' : s
+}
+
+// options 配列を「文字列のみ・最大 9 件・各 200 文字」に正規化する。
+function sanitizeOptions(arr) {
+  return arr
+    .filter((o) => typeof o === 'string')
+    .slice(0, 9)
+    .map((o) => clipString(o, 200))
+}
+
 app.post('/request', authenticate, (req, res) => {
-  const { description, options } = req.body
+  const { description, options, tabs } = req.body
   if (!description || typeof description !== 'string') {
     return res.status(400).json({ error: 'description is required' })
   }
 
   // I1: 長過ぎる description は切り詰め（ngrok 経由の情報漏洩抑制・UI 表示の保護）
-  const safeDesc =
-    description.length > MAX_DESC_LEN ? description.slice(0, MAX_DESC_LEN) + '…' : description
+  const safeDesc = clipString(description, MAX_DESC_LEN)
 
   // options: 文字列配列のみ許可、最大 9 件・各 200 文字
   // AskUserQuestion 型ダイアログでは長文選択肢(平均 25 文字以上)が並ぶことがあるため
   // 各要素の上限を 200 文字に緩和。件数上限は数字キー注入の都合で 9 件まで。
   let safeOptions = ['Yes', 'No']
   if (Array.isArray(options)) {
-    safeOptions = options
-      .filter((o) => typeof o === 'string')
+    const sanitized = sanitizeOptions(options)
+    if (sanitized.length > 0) safeOptions = sanitized
+  }
+
+  // tabs: タブ式 AskUserQuestion(複合質問)用、optional
+  // 各タブは {label?, prompt, options} 形式、最大 9 タブ・各 9 options
+  let safeTabs = null
+  if (Array.isArray(tabs) && tabs.length > 0) {
+    safeTabs = tabs
       .slice(0, 9)
-      .map((o) => (o.length > 200 ? o.slice(0, 200) + '…' : o))
-    if (safeOptions.length === 0) safeOptions = ['Yes', 'No']
+      .filter(
+        (t) =>
+          t &&
+          typeof t === 'object' &&
+          typeof t.prompt === 'string' &&
+          Array.isArray(t.options)
+      )
+      .map((t) => ({
+        label: typeof t.label === 'string' ? clipString(t.label, 100) : undefined,
+        prompt: clipString(t.prompt, MAX_DESC_LEN),
+        options: sanitizeOptions(t.options),
+      }))
+      .filter((t) => t.options.length > 0)
+    if (safeTabs.length === 0) safeTabs = null
+    // tabs 存在時は options を Sentinel ["Submit"] に揃える(旧 UI 互換 + 一括承認除外の手がかり)
+    if (safeTabs) safeOptions = ['Submit']
   }
 
   const item = {
     id: crypto.randomUUID(),
     description: safeDesc,
     options: safeOptions,
+    tabs: safeTabs, // null または [{label?, prompt, options}]
     status: 'pending', // pending | resolved
     answer: null,
+    answers: null, // 複合質問の回答配列(null または string[])
     resolvedBy: null, // 'pc' | 'smartphone' | 'cli'
     createdAt: new Date().toISOString(),
     resolvedAt: null,
   }
   queue.push(item)
-  console.log(`[NEW REQUEST] ${item.id}: ${safeDesc}`)
+  console.log(`[NEW REQUEST] ${item.id}: ${safeDesc}${safeTabs ? ` (${safeTabs.length} tabs)` : ''}`)
   res.json({ id: item.id, status: item.status })
 })
 
@@ -199,13 +234,20 @@ app.get('/status/:id', authenticate, (req, res) => {
   const item = queue.find((q) => q.id === req.params.id)
   if (!item) return res.status(404).json({ error: 'Not found' })
 
+  const buildStatusResp = () => ({
+    id: item.id,
+    status: item.status,
+    answer: item.answer,
+    answers: item.answers, // 複合質問の回答配列(null または string[])
+  })
+
   const wait = Math.min(Math.max(parseInt(req.query.wait) || 0, 0), 60)
   if (item.status === 'resolved' || wait === 0) {
-    return res.json({ id: item.id, status: item.status, answer: item.answer })
+    return res.json(buildStatusResp())
   }
 
   const send = () => {
-    res.json({ id: item.id, status: item.status, answer: item.answer })
+    res.json(buildStatusResp())
   }
   const onResolve = () => {
     clearTimeout(timer)
@@ -241,8 +283,11 @@ app.get('/queue', authenticate, (req, res) => {
  * Body: { action: "approved" | "rejected" }
  */
 app.post('/resolve/:id', authenticate, (req, res) => {
-  const { answer, resolvedBy } = req.body
-  if (!answer) return res.status(400).json({ error: 'answer is required' })
+  const { answer, answers, resolvedBy } = req.body
+  const hasAnswers = Array.isArray(answers)
+  if (!answer && !hasAnswers) {
+    return res.status(400).json({ error: 'answer or answers is required' })
+  }
 
   const item = queue.find((q) => q.id === req.params.id)
   if (!item) return res.status(404).json({ error: 'Not found' })
@@ -250,19 +295,59 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     return res.status(409).json({ error: 'Already resolved' })
   }
 
-  // answer は文字列のみ受け付け（長さ上限 100）、resolvedBy は許可値のみ
-  if (typeof answer !== 'string') {
-    return res.status(400).json({ error: 'answer must be a string' })
-  }
-  const safeAnswer = answer.length > 100 ? answer.slice(0, 100) : answer
   const allowedResolvedBy = ['pc', 'smartphone', 'cli']
   const safeResolvedBy = allowedResolvedBy.includes(resolvedBy) ? resolvedBy : null
 
+  let safeAnswer = null
+  let safeAnswers = null
+
+  if (hasAnswers) {
+    // 複合質問: tabs を持つ item でしか受理しない、長さ一致と数字 1〜9 を厳格チェック
+    if (!Array.isArray(item.tabs)) {
+      return res.status(400).json({ error: 'answers is only allowed for tabbed items' })
+    }
+    if (answers.length !== item.tabs.length) {
+      return res.status(400).json({ error: 'answers.length must match tabs.length' })
+    }
+    if (answers.length > 9) {
+      return res.status(400).json({ error: 'answers too long' })
+    }
+    const norm = []
+    for (let i = 0; i < answers.length; i++) {
+      const a = String(answers[i] == null ? '' : answers[i]).trim()
+      if (!/^[1-9]$/.test(a)) {
+        return res.status(400).json({ error: `answers[${i}] must be a digit 1-9` })
+      }
+      const idx = parseInt(a, 10) - 1
+      if (idx >= item.tabs[i].options.length) {
+        return res.status(400).json({ error: `answers[${i}] out of range` })
+      }
+      norm.push(a)
+    }
+    safeAnswers = norm
+    // 互換のため answer にも要約を残す
+    safeAnswer = norm.join(',')
+  } else {
+    if (typeof answer !== 'string') {
+      return res.status(400).json({ error: 'answer must be a string' })
+    }
+    // tabs 持ち item は CLI からの "resolved-by-cli" 通知のみ answer 単独を受理する。
+    // 旧 UI / 第三者から answer="Submit" 等が来ても wrapper では再生不能なので
+    // ここで弾いて、複合質問は必ず answers 経路を通すようにする。
+    if (Array.isArray(item.tabs) && answer !== 'resolved-by-cli') {
+      return res.status(400).json({ error: 'tabbed items require answers array' })
+    }
+    safeAnswer = answer.length > 100 ? answer.slice(0, 100) : answer
+  }
+
   item.status = 'resolved'
   item.answer = safeAnswer
+  item.answers = safeAnswers
   item.resolvedBy = safeResolvedBy
   item.resolvedAt = new Date().toISOString()
-  console.log(`[RESOLVED] ${item.id}: ${item.answer} (by ${item.resolvedBy || 'unknown'})`)
+  console.log(
+    `[RESOLVED] ${item.id}: ${safeAnswers ? `answers=${JSON.stringify(safeAnswers)}` : `answer=${item.answer}`} (by ${item.resolvedBy || 'unknown'})`
+  )
 
   // long-poll 中の /status/:id を即座に返す
   resolveEvents.emit(item.id, item)
