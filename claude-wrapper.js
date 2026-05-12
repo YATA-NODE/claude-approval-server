@@ -157,9 +157,11 @@ function spawnClaude() {
   })
 
   // 画面 → PTY
+  // タブ巡回中・複合質問再生中は stdin を一時バッファして、
+  // 終了後に flushStdinBuffer() で流す。ユーザの PC 入力でタブ位置がズレないようにするため。
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
   process.stdin.resume()
-  process.stdin.on('data', (d) => term.write(d.toString()))
+  process.stdin.on('data', (d) => pipeStdinToTerm(d.toString()))
 
   // リサイズ
   process.stdout.on('resize', () => {
@@ -451,12 +453,230 @@ function parseDialog(buf) {
   return { prompt, options, tool, args }
 }
 
+// タブ式 AskUserQuestion(複合質問)の特徴判定。
+// 画面上部に `□タブ1 □タブ2 ✓タブ3 ✓Submit →` のタブバー + 下部に
+// "Tab/Arrow keys to navigate" ヘルプが出る形式を検出する。
+// `parseDialog` が単一ダイアログとして検出した上で、本関数が true なら
+// `sweepTabs` で全タブを巡回するパスに進む。
+function isTabbedDialog(buf) {
+  const boxMarks = (buf.match(/[□✓]/g) || []).length
+  const hasNav = /→|Tab\s*\/\s*Arrow\s+keys/i.test(buf)
+  return boxMarks >= 2 && hasNav
+}
+
+// 複合質問の回答配列バリデータ。
+// answers は数字文字列の配列で、長さは tabs.length と一致、各要素は
+// 該当 tab の options 範囲内である必要がある。
+// 安全に再生できる場合のみ正規化済みの配列を返す。違反は null。
+function validateMultiAnswer(answers, tabs) {
+  if (!Array.isArray(answers) || !Array.isArray(tabs)) return null
+  if (answers.length !== tabs.length) return null
+  if (tabs.length === 0 || tabs.length > 9) return null
+  const out = []
+  for (let i = 0; i < answers.length; i++) {
+    const a = String(answers[i] == null ? '' : answers[i]).trim()
+    if (!/^[1-9]$/.test(a)) return null
+    if (!tabs[i] || !Array.isArray(tabs[i].options)) return null
+    if (parseInt(a, 10) - 1 >= tabs[i].options.length) return null
+    out.push(a)
+  }
+  return out
+}
+
 // テスト用エクスポート (実行時には影響なし)
 if (typeof module !== 'undefined') {
-  module.exports = { parseDialog, stripAnsi, validateAnswer }
+  module.exports = { parseDialog, stripAnsi, validateAnswer, isTabbedDialog, validateMultiAnswer }
+}
+
+// -------------------------------------------------------
+// タブ式 AskUserQuestion(複合質問)対応
+// -------------------------------------------------------
+//
+// 複数質問を 1 ダイアログにまとめた「タブ式」UI に対応するため、
+// wrapper 側で各タブを巡回してキャプチャ → サーバー登録 → スマホで全件回答
+// → wrapper が PTY に再生して Submit するフローを実装する。
+//
+// 巡回・再生中は:
+//   - detectDialog の通常パスをガード(tabSweepInProgress / tabReplayInProgress)
+//   - process.stdin の入力を一時バッファ → 完了後に flush
+//
+// 注入する制御コード(Tab/Shift-Tab/Enter)は wrapper 内部生成のみ。
+// HTTP 経路から任意の制御コードが流れ込まないよう validateMultiAnswer で
+// 数字のみを許可する。
+
+let tabSweepInProgress = false
+let tabReplayInProgress = false
+const stdinBuffer = []
+
+function pipeStdinToTerm(data) {
+  if (tabSweepInProgress || tabReplayInProgress) {
+    stdinBuffer.push(data)
+    return
+  }
+  term.write(data)
+}
+
+function flushStdinBuffer() {
+  while (stdinBuffer.length > 0) {
+    term.write(stdinBuffer.shift())
+  }
+}
+
+// 1 タブ進めた後、parseDialog が 2 回連続同結果を返したら確定とみなす。
+// 80ms ポーリング、上限 timeoutMs。null 連続 3 回でも早期脱出(描画停止検知)。
+async function waitTabStable(timeoutMs = 600) {
+  const t0 = Date.now()
+  let prev = null
+  let stableCount = 0
+  let nullCount = 0
+  while (Date.now() - t0 < timeoutMs) {
+    await sleep(80)
+    const d = parseDialog(cleanBuf)
+    if (!d) {
+      nullCount++
+      if (nullCount >= 3) return prev
+      stableCount = 0
+      prev = d
+      continue
+    }
+    nullCount = 0
+    if (
+      prev &&
+      d.prompt === prev.prompt &&
+      d.options.length === prev.options.length
+    ) {
+      stableCount++
+      if (stableCount >= 2) return d
+    } else {
+      stableCount = 0
+    }
+    prev = d
+  }
+  return prev
+}
+
+// 現在の dialog から Tab で順送りしながら各タブを収集する。
+// 1 周完了の判定は「先頭タブと一致」または「直前タブと一致(Submit にフォーカスが
+// 移って Tab で動かなくなった状態)」のいずれか。最大 9 周で打ち切り。
+// 巡回後は Shift+Tab で元の位置(=先頭タブ)に戻す。
+// finally で flushStdinBuffer() を呼ぶことで、単一質問フォールバック時にも
+// 巡回中の PC 入力がバッファに残らないようにする。
+async function sweepTabs() {
+  tabSweepInProgress = true
+  try {
+    const first = parseDialog(cleanBuf)
+    if (!first) return null
+    const tabs = [first]
+    for (let i = 0; i < 9; i++) {
+      term.write('\t')
+      const next = await waitTabStable(600)
+      if (!next) break
+      const last = tabs[tabs.length - 1]
+      if (
+        promptSimilar(next.prompt, tabs[0].prompt) &&
+        next.options.length === tabs[0].options.length
+      ) {
+        break // 先頭に戻ってきた → 1 周完了
+      }
+      if (
+        promptSimilar(next.prompt, last.prompt) &&
+        next.options.length === last.options.length
+      ) {
+        break // Tab で動かない(Submit フォーカス等)
+      }
+      tabs.push(next)
+    }
+    // 先頭タブに戻す(Shift+Tab を tabs.length - 1 回)
+    for (let i = 0; i < tabs.length - 1; i++) {
+      term.write('\x1b[Z')
+      await sleep(80)
+    }
+    return tabs
+  } finally {
+    tabSweepInProgress = false
+    cleanBuf = ''
+    flushStdinBuffer()
+  }
+}
+
+// 複合質問の応答キー列を PTY に再生する。
+// answers は validateMultiAnswer で検証済みの数字文字列配列。
+async function replayMultiAnswers(answers) {
+  tabReplayInProgress = true
+  try {
+    for (let i = 0; i < answers.length; i++) {
+      term.write(answers[i]) // 数字 1 文字、改行なし
+      await sleep(60)
+      if (i < answers.length - 1) {
+        term.write('\t')
+        await sleep(120)
+      }
+    }
+    // 最後のタブで回答後、もう一度 Tab で Submit にフォーカス → Enter で全送信
+    term.write('\t')
+    await sleep(120)
+    term.write('\r')
+    cleanBuf = ''
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
+}
+
+async function registerMultiDialog(tabs, projectName) {
+  const description = `[${projectName}][AskUserQuestion-Multi] 複合質問 ${tabs.length} 件`
+  const tabsPayload = tabs.map((t, i) => ({
+    label: t.tool && t.tool !== 'Unknown' ? t.tool : `Q${i + 1}`,
+    prompt: t.prompt,
+    options: t.options,
+  }))
+  // タブ式ダイアログのために専用スロットを予約してから POST する。
+  currentDialog = {
+    prompt: tabs[0].prompt,
+    options: tabs[0].options,
+    tabs,
+    id: null,
+    lastSeenAt: Date.now(),
+  }
+  try {
+    const resp = await httpRequest('POST', '/request', {
+      description,
+      options: ['Submit'], // sentinel
+      tabs: tabsPayload,
+    })
+    if (currentDialog && currentDialog.id === null && currentDialog.tabs === tabs) {
+      currentDialog.id = resp.id
+      wlog(`multi dialog posted: id=${resp.id}, tabs=${tabs.length}`)
+      pollForResponse(resp.id).catch((e) => wlog(`poll error: ${e.message}`))
+    }
+  } catch (e) {
+    wlog(`POST /request (multi) failed: ${e.message} (継続: CLI 応答のみ有効)`)
+    if (currentDialog && currentDialog.id === null) currentDialog = null
+  }
 }
 
 async function detectDialog() {
+  // タブ巡回 / 再生中は通常検出をスキップ(dedup・誤登録を回避)
+  if (tabSweepInProgress || tabReplayInProgress) return
+
+  // タブ式の判定: parseDialog が non-null かつ isTabbedDialog が真なら sweep に進む
+  // ただし currentDialog が既にあって同じ複合質問が回答待ちなら通常パスに戻る
+  if (!currentDialog && isTabbedDialog(cleanBuf)) {
+    const probe = parseDialog(cleanBuf)
+    if (probe) {
+      const tabs = await sweepTabs()
+      if (tabs && tabs.length >= 2) {
+        await registerMultiDialog(tabs, PROJECT_NAME)
+        return
+      }
+      // タブが 1 件しか拾えなければ単一質問として通常パスへフォールバック
+    }
+  }
+
+  await detectDialogSingle()
+}
+
+async function detectDialogSingle() {
   const d = parseDialog(cleanBuf)
   if (d) {
     // ダイアログが見えている間は消失タイマーを止める。
@@ -540,6 +760,20 @@ async function pollForResponse(id) {
     }
     // resolve された。CLI で既に応答済みなら注入しない。
     if (!currentDialog || currentDialog.id !== id) return
+
+    // 複合質問: answers 配列を validateMultiAnswer で検証し replay
+    if (Array.isArray(currentDialog.tabs)) {
+      const validated = validateMultiAnswer(resp.answers, currentDialog.tabs)
+      if (!validated) {
+        wlog(
+          `multi answers "${JSON.stringify(resp.answers).slice(0, 80)}" は許可された値ではない。注入スキップ。`
+        )
+      } else {
+        await replayMultiAnswers(validated)
+        wlog(`injected multi answers ${JSON.stringify(validated)} for dialog ${id}`)
+      }
+      return
+    }
 
     // 他経路（cli/pc/smartphone）の区別は resp には含まれないので answer で判断
     // C3: answer の厳密 whitelist
