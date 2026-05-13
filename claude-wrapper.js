@@ -239,8 +239,13 @@ const DEDUP_WINDOW_MS = 15000
 
 // prompt 類似度: 文字落ち（"Do you want to create" → "Do you want t creat"）に
 // 耐性を持たせるため、正規化後に subsequence 一致率で判定する。
+// 日本語(ひらがな/カタカナ/漢字)も比較対象にするため、空白・罫線・制御文字のみ
+// 除去する。旧実装は /[^a-z0-9]/ で日本語を全削除しており、日本語 prompt が
+// 常に空文字列になって promptSimilar が機能不全(常に false 返却)だった。
 function normalizePrompt(s) {
-  return s.toLowerCase().replace(/[^a-z0-9]/g, '')
+  return s
+    .toLowerCase()
+    .replace(/[\s　│╭╮╰╯─╌\r\n]+/g, '')
 }
 function promptSimilar(a, b) {
   const na = normalizePrompt(a)
@@ -256,6 +261,15 @@ function promptSimilar(a, b) {
   return i / shorter.length >= 0.85
 }
 
+// 2 つのダイアログが「同じ形状」(prompt + options 長さ一致)か判定する。
+// dedup / sweepTabs / waitTabStable で共通利用。exactPrompt=true なら完全一致、
+// 既定は promptSimilar(部分描画・文字欠けに耐性)。a/b いずれかが null/falsy なら false。
+function dialogShapeMatches(a, b, { exactPrompt = false } = {}) {
+  if (!a || !b) return false
+  if (a.options.length !== b.options.length) return false
+  return exactPrompt ? a.prompt === b.prompt : promptSimilar(a.prompt, b.prompt)
+}
+
 function stripAnsi(s) {
   return s
     // Claude Code v2.1.x はダイアログ内の半角スペースを実文字ではなく
@@ -265,6 +279,11 @@ function stripAnsi(s) {
     // n が異常値の場合に備え 200 で頭打ち（行幅の上限相当）。
     .replace(/\x1b\[(\d+)C/g, (_, n) => ' '.repeat(Math.min(parseInt(n, 10) || 0, 200)))
     .replace(/\x1b\[C/g, ' ')
+    // ↓N 行: CSI B (Cursor Down) / CSI E (Cursor Next Line) を可視的な改行へ。
+    // ConPTY ではダイアログの行送りがこれで描画されるため、\n に翻訳しないと
+    // parseDialog が行頭マーカーを認識できず、タブバーが prompt に混入したり
+    // 同一行に並ぶオプション 2/3 を取りこぼす。n 異常値に備え 20 で頭打ち。
+    .replace(/\x1b\[(\d*)[BE]/g, (_, n) => '\n'.repeat(Math.min(parseInt(n, 10) || 1, 20)))
     .replace(/\x1b\]0;[^\x07]*\x07/g, '')
     .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
     .replace(/\x1b[=>]/g, '')
@@ -325,15 +344,39 @@ function parseDialog(buf) {
   // AskUserQuestion 型の prompt は同じ行内のボックス文字(─ など)を本文として持つ
   // ことがあるため、改行があれば必ずそちらを優先する。
   const nlIdx = beforeQ.lastIndexOf('\n')
-  const lineStart =
-    nlIdx >= 0
-      ? nlIdx
-      : Math.max(
-          beforeQ.lastIndexOf('│'),
-          beforeQ.lastIndexOf('─'),
-          beforeQ.lastIndexOf('╌'),
-          -1
-        )
+  // タブ式 (AskUserQuestion-Multi) では ConPTY が「↓1 行」を改行文字ではなく
+  // CSI B で描画するため stripAnsi 後に \n が残らず、タブバー (`← ... ✔ Submit →`)
+  // が prompt に混入する。
+  // hot path 削減: nlIdx >= 0 の通常パスでは isTabbedDialog を呼ばない。
+  //
+  // 行末アンカー優先順位:
+  //   1. `Submit` 末尾 — AskUserQuestion-Multi 仕様で必ず存在し、prompt 本文より
+  //      確実に手前にある(prompt 内の `→` 誤検出も Submit より後ろなので無害)
+  //   2. タブマーカー (☐ ✔ □ ✓) と `→` の最終出現 — Submit が無い UI へのフォールバック
+  let arrowIdx = -1
+  if (nlIdx < 0 && isTabbedDialog(segment)) {
+    const submitIdx = beforeQ.lastIndexOf('Submit')
+    if (submitIdx >= 0) {
+      arrowIdx = submitIdx + 'Submit'.length - 1
+    } else {
+      arrowIdx = Math.max(
+        beforeQ.lastIndexOf('☐'),
+        beforeQ.lastIndexOf('✔'),
+        beforeQ.lastIndexOf('□'),
+        beforeQ.lastIndexOf('✓'),
+        beforeQ.lastIndexOf('→')
+      )
+    }
+  }
+  // 行頭アンカーの優先順: 改行 > タブバー右端(arrowIdx) > ボックス文字
+  const boxCharIdx = Math.max(
+    beforeQ.lastIndexOf('│'),
+    beforeQ.lastIndexOf('─'),
+    beforeQ.lastIndexOf('╌'),
+    -1
+  )
+  const fallbackIdx = arrowIdx >= 0 ? arrowIdx : boxCharIdx
+  const lineStart = nlIdx >= 0 ? nlIdx : fallbackIdx
   const prompt = segment
     .slice(lineStart + 1, qIdx + 1)
     .replace(/[│╭╮╰╯─╌\r\n]/g, ' ')
@@ -388,6 +431,13 @@ function parseDialog(buf) {
   const sortedMarks = [...found.entries()]
     .map(([num, pos]) => ({ num: parseInt(num), at: pos.at, end: pos.end }))
     .sort((a, b) => a.at - b.at)
+  // 各 option 末尾には Claude TUI のキー操作ヒント
+  // ("Enter to select · Tab/Arrow keys to navigate · Esc to cancel" 等)が
+  // 文字列として混入することがあるので、抽出後に tail trim で除去する。
+  // ※ Claude TUI 組み込みの "Type something" / "Chat about this" 自体は v1.11.1
+  //   以降スマホ側に表示する(v1.12.0 でテキスト送信経路追加予定)。
+  const TUI_TAIL_HINT_RE =
+    /(?:Enter\s+to\s+select|Tab\s*\/\s*Arrow\s+keys|Esc\s+to\s+cancel)[\s\S]*$/i
   const options = sortedMarks.map((mk, i) => {
     const nextAt = i + 1 < sortedMarks.length ? sortedMarks[i + 1].at : optionSegment.length
     return optionSegment
@@ -397,9 +447,10 @@ function parseDialog(buf) {
       .replace(/[─╌│╭╮╰╯]/g, '')
       .replace(/^[.\s]+/, '')
       .replace(/\s+/g, ' ')
+      .replace(TUI_TAIL_HINT_RE, '')
       .trim()
   })
-  if (options.every((o) => !o)) return null
+  if (options.length === 0 || options.every((o) => !o)) return null
 
   // 6. ツール行: プロンプトより前にある最新の `● Tool(args)` を採用
   const promptAbsStart = segStart + lineStart + 1
@@ -459,7 +510,9 @@ function parseDialog(buf) {
 // `parseDialog` が単一ダイアログとして検出した上で、本関数が true なら
 // `sweepTabs` で全タブを巡回するパスに進む。
 function isTabbedDialog(buf) {
-  const boxMarks = (buf.match(/[□✓]/g) || []).length
+  // Claude TUI は U+2610 (☐) / U+2714 (✔) を使う環境が多いが、フォント未対応の
+  // 環境で U+25A1 (□) / U+2713 (✓) にフォールバックされる場合もあるため両方拾う。
+  const boxMarks = (buf.match(/[□☐✓✔]/g) || []).length
   const hasNav = /→|Tab\s*\/\s*Arrow\s+keys/i.test(buf)
   return boxMarks >= 2 && hasNav
 }
@@ -524,7 +577,15 @@ function flushStdinBuffer() {
 
 // 1 タブ進めた後、parseDialog が 2 回連続同結果を返したら確定とみなす。
 // 80ms ポーリング、上限 timeoutMs。null 連続 3 回でも早期脱出(描画停止検知)。
-async function waitTabStable(timeoutMs = 600) {
+// previous{Prompt,OptionsLen} が与えられた場合、それと類似する間は「タブ切替後の
+// 再描画がまだ完了していない」とみなし安定判定しない。完全一致ではなく
+// promptSimilar を使うのは、部分描画・文字欠け等で「前タブにかなり似てるが完全
+// 一致しない」状態を新タブと誤確定するのを防ぐため。
+async function waitTabStable(
+  timeoutMs = 600,
+  previousPrompt = null,
+  previousOptionsLen = -1
+) {
   const t0 = Date.now()
   let prev = null
   let stableCount = 0
@@ -539,12 +600,18 @@ async function waitTabStable(timeoutMs = 600) {
       prev = d
       continue
     }
-    nullCount = 0
+    // 前のタブとプロンプト類似 + 選択肢長さ一致 = 再描画未完了 → 待ち継続
     if (
-      prev &&
-      d.prompt === prev.prompt &&
-      d.options.length === prev.options.length
+      previousPrompt !== null &&
+      promptSimilar(d.prompt, previousPrompt) &&
+      (previousOptionsLen < 0 || d.options.length === previousOptionsLen)
     ) {
+      stableCount = 0
+      prev = d
+      continue
+    }
+    nullCount = 0
+    if (dialogShapeMatches(prev, d, { exactPrompt: true })) {
       stableCount++
       if (stableCount >= 2) return d
     } else {
@@ -561,40 +628,51 @@ async function waitTabStable(timeoutMs = 600) {
 // 巡回後は Shift+Tab で元の位置(=先頭タブ)に戻す。
 // finally で flushStdinBuffer() を呼ぶことで、単一質問フォールバック時にも
 // 巡回中の PC 入力がバッファに残らないようにする。
+// Shift+Tab を 3 回打って先頭タブ(タブ 1)へフォーカスを戻す。
+// Shift+Tab はタブ 1 から先には進まないので、余分に押しても副作用なし。
+// Submit にフォーカスがある状態から先頭まで戻るのに必要な回数 = タブ数 + 1。
+// 典型タブ数 2-3 のときは 3 回で十分。タブ数増加時はここを再調整する。
+async function rewindToFirstTab() {
+  for (let i = 0; i < 3; i++) {
+    term.write('\x1b[Z')
+    await sleep(50)
+  }
+}
+
 async function sweepTabs() {
   tabSweepInProgress = true
   try {
+    // 巡回開始前にフォーカスを先頭タブに戻す。初期フォーカスがタブ 2 等に
+    // あると、Tab で右回りに巡回して Submit に到達した時点で break してしまい、
+    // 戻る側のタブ(タブ 1 等)が漏れるため。
+    await rewindToFirstTab()
+    // 戻し後の再描画が安定するまで待つ
+    await waitTabStable(400)
+
     const first = parseDialog(cleanBuf)
     if (!first) return null
     const tabs = [first]
     for (let i = 0; i < 9; i++) {
       term.write('\t')
-      const next = await waitTabStable(600)
-      if (!next) break
+      // 前のタブの prompt + options 長さを渡し、再描画未完了の中間状態を
+      // 安定判定から除外する(部分描画・文字欠けでも promptSimilar で類似判定)。
       const last = tabs[tabs.length - 1]
-      if (
-        promptSimilar(next.prompt, tabs[0].prompt) &&
-        next.options.length === tabs[0].options.length
-      ) {
-        break // 先頭に戻ってきた → 1 周完了
-      }
-      if (
-        promptSimilar(next.prompt, last.prompt) &&
-        next.options.length === last.options.length
-      ) {
-        break // Tab で動かない(Submit フォーカス等)
-      }
+      const next = await waitTabStable(600, last.prompt, last.options.length)
+      if (!next) break
+      if (dialogShapeMatches(next, tabs[0])) break // 先頭に戻ってきた → 1 周完了
+      if (dialogShapeMatches(next, last)) break // Tab で動かない(Submit フォーカス等)
       tabs.push(next)
     }
-    // 先頭タブに戻す(Shift+Tab を tabs.length - 1 回)
-    for (let i = 0; i < tabs.length - 1; i++) {
-      term.write('\x1b[Z')
-      await sleep(80)
-    }
+    // 巡回終了後も先頭タブに戻す
+    await rewindToFirstTab()
     return tabs
   } finally {
     tabSweepInProgress = false
-    cleanBuf = ''
+    // cleanBuf は意図的にクリアしない。
+    // 巡回直後に空にすると registerMultiDialog の POST 完了前後で
+    // 定期 detectDialog (setInterval 400ms) が parseDialog=null を見て
+    // dismissalTimer を仕掛け、PTY 再描画が間に合わずに DISMISSAL_MS 後に
+    // resolveCurrentAsCli へ流れ、スマホ確認前にダイアログが消滅する。
     flushStdinBuffer()
   }
 }
@@ -646,6 +724,11 @@ async function registerMultiDialog(tabs, projectName) {
     })
     if (currentDialog && currentDialog.id === null && currentDialog.tabs === tabs) {
       currentDialog.id = resp.id
+      // POST 完了直後、最後に見た時刻も更新して dismissal 早発火を防ぐ。
+      // PTY 再描画が遅延しても 2 秒の猶予が確実に取れる。
+      currentDialog.lastSeenAt = Date.now()
+      clearTimeout(dismissalTimer)
+      dismissalTimer = null
       wlog(`multi dialog posted: id=${resp.id}, tabs=${tabs.length}`)
       pollForResponse(resp.id).catch((e) => wlog(`poll error: ${e.message}`))
     }
@@ -687,9 +770,7 @@ async function detectDialogSingle() {
     // ConPTY で tool 行が遅れて描画される/prompt 文字が落ちるケースに耐える。
     if (currentDialog) {
       const ago = Date.now() - currentDialog.lastSeenAt
-      const sameOptionShape = currentDialog.options.length === d.options.length
-      const similar = promptSimilar(currentDialog.prompt, d.prompt)
-      if (ago < DEDUP_WINDOW_MS && sameOptionShape && similar) {
+      if (ago < DEDUP_WINDOW_MS && dialogShapeMatches(currentDialog, d)) {
         // 再描画: ツール情報が遅れて揃った場合はここで補完
         if (currentDialog.tool === 'Unknown' && d.tool !== 'Unknown') {
           currentDialog.tool = d.tool
@@ -697,6 +778,17 @@ async function detectDialogSingle() {
         }
         currentDialog.lastSeenAt = Date.now()
         return
+      }
+      // 複合ダイアログ: いずれかの tab と一致 or タブバーがまだ画面にあれば
+      // 「ユーザーが ←/→ で別タブに動いただけ」とみなし、dedup pass + lastSeenAt 更新。
+      // これがないと初期フォーカスが tabs[0] 以外のタブにある場合に prompt 不一致で
+      // resolveCurrentAsCli に直行してダイアログが消える。
+      if (currentDialog.tabs && ago < DEDUP_WINDOW_MS) {
+        const tabMatched = currentDialog.tabs.some((t) => dialogShapeMatches(t, d))
+        if (tabMatched || isTabbedDialog(cleanBuf)) {
+          currentDialog.lastSeenAt = Date.now()
+          return
+        }
       }
     }
 

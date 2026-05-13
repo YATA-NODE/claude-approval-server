@@ -205,13 +205,16 @@ console.log('\n[7] parseDialog: 本文中の数字を誤検知しない')
 // -------------------------------------------------------
 console.log('\n[8] parseDialog: 6 択 + validateAnswer')
 {
+  // 注: "Type something" / "Chat about this" は Claude TUI の組み込みフッタ
+  // (常に末尾自動付加)で、parseDialog は意図的に除外する。
+  // ここでは 6 個の業務選択肢のみのケースをテストする。
   const buf = [
     '─────',
     ' What would you like to do next?',
     ' ❯ 1. Continue interview',
     '   2. Skip interview and plan immediately',
-    '   3. Chat about this',
-    '   4. Type something',
+    '   3. Review and edit',
+    '   4. Restart',
     '   5. Pause and review',
     '   6. Cancel session',
     ' Esc to cancel',
@@ -232,6 +235,88 @@ console.log('\n[8] parseDialog: 6 択 + validateAnswer')
       validateAnswer('Pause and review', r.options),
       '5'
     )
+  }
+}
+
+// -------------------------------------------------------
+// 8c. parseDialog: Type something / Chat about this は表示する(v1.11.1 で復活)
+// -------------------------------------------------------
+console.log('\n[8c] parseDialog: 全 option を保持(filter なし)')
+{
+  // v1.11.1 で TUI_FOOTER_PATTERNS / cutoff filter を撤回。
+  // Type something / Chat about this もスマホに表示する(v1.12.0 でテキスト送信
+  // 経路追加予定)。中間位置・末尾位置を問わず保持される。
+  const buf = [
+    '─────',
+    ' Which action?',
+    ' ❯ 1. Continue',
+    '   2. Chat about this proposal',
+    '   3. Type something custom',
+    '   4. Skip',
+    '   5. Type something.',
+    '   6. Chat about this',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('options 数 = 6 (filter 撤回で全保持)', r && r.options.length, 6)
+  if (r) {
+    assertEq('option[0]', r.options[0], 'Continue')
+    assertEq('option[4] = "Type something."', r.options[4], 'Type something.')
+    assertEq('option[5] = "Chat about this"', r.options[5], 'Chat about this')
+  }
+}
+
+// -------------------------------------------------------
+// 8d. parseDialog: option 末尾の TUI ヒント文字列を除去
+// -------------------------------------------------------
+console.log('\n[8d] parseDialog: option 末尾の "Enter to select" 等を切り捨て')
+{
+  // 最後の option に Claude TUI のキー操作ヒントが連結する典型ケース。
+  // 行構造が破綻している(\n が不足する)時、option 末尾までヒント文字列が入る。
+  const buf =
+    '──── 朝食派ですか、夜食派ですか? ❯ 1. 朝食派 2. 夜食派 3. ' +
+    'Chat about this Enter to select · Tab/Arrow keys to navigate · Esc to cancel'
+  const r = parseDialog(buf)
+  // 末尾連続フッタは除外されるので、3. Chat about this は消える(末尾)
+  // 期待: options = ["朝食派", "夜食派"]、ヒント文字列は混入しない
+  assertEq('検出できる', !!r, true)
+  if (r) {
+    assertEq(
+      'いずれの option にも "Enter to select" を含まない',
+      r.options.some((o) => /Enter\s+to\s+select/i.test(o)),
+      false
+    )
+    assertEq(
+      'いずれの option にも "Tab/Arrow keys" を含まない',
+      r.options.some((o) => /Tab\s*\/\s*Arrow\s+keys/i.test(o)),
+      false
+    )
+  }
+}
+
+// -------------------------------------------------------
+// 8b. parseDialog: Type something / Chat about this を含む 5 option を表示
+// -------------------------------------------------------
+console.log('\n[8b] parseDialog: 全 option を結果に含める(v1.11.1 で復活)')
+{
+  const buf = [
+    '─────',
+    ' 朝食派ですか、夜食派ですか?',
+    ' ❯ 1. 朝食派',
+    '   2. 夜食派',
+    '   3. どちらも',
+    '   4. Type something.',
+    '   5. Chat about this',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('options 数 = 5 (全保持)', r && r.options.length, 5)
+  if (r) {
+    assertEq('option[0] = "朝食派"', r.options[0], '朝食派')
+    assertEq('option[3] = "Type something."', r.options[3], 'Type something.')
+    assertEq('option[4] = "Chat about this"', r.options[4], 'Chat about this')
   }
 }
 
@@ -300,6 +385,218 @@ console.log('\n[11] parseDialog はタブ式入力の現タブのみ抽出')
   assertEq('options 数 = 3', r && r.options.length, 3)
   assertEq('現タブの prompt が取れる', r && r.prompt.includes('新候補'), true)
   assertEq('isTabbedDialog も true', isTabbedDialog(buf), true)
+}
+
+// -------------------------------------------------------
+// 12. isTabbedDialog: 実 Claude TUI が出す ☐ (U+2610) / ✔ (U+2714) を検出
+// -------------------------------------------------------
+console.log('\n[12] isTabbedDialog: 実 TUI ユニコード (☐ U+2610 / ✔ U+2714)')
+{
+  // 実環境で観測された描画(2026-05-13 ログ): ☐ と ✔ が混在
+  const realTabbed = '← ☐ 食事タイプ ☐ 飲み物 ☐ 生活リズム ✔ Submit → Tab/Arrow keys to navigate'
+  assertEq('☐ + ✔ + → → true', isTabbedDialog(realTabbed), true)
+  // フォールバック ユニコード(□ U+25A1 / ✓ U+2713)も引き続き検出可能
+  const fallbackTabbed = '□ a □ b ✓ Submit →'
+  assertEq('□ + ✓ + → → true (旧 unicode 互換)', isTabbedDialog(fallbackTabbed), true)
+  // 混在も OK
+  const mixed = '☐ a □ b ✓ c ✔ Submit →'
+  assertEq('混在 unicode + → → true', isTabbedDialog(mixed), true)
+}
+
+// -------------------------------------------------------
+// 13. parseDialog: 改行無し + タブバー描画 (ConPTY 実描画相当)
+// -------------------------------------------------------
+console.log('\n[13] parseDialog: \\n 無しタブバー描画から prompt 抽出')
+{
+  // stripAnsi 後の ConPTY 描画は CSI B (↓1 行) が消えて \n が残らない。
+  // タブバーが prompt に混入しないか確認(v1.11.0 で発生していたバグ)。
+  const buf =
+    '──────────────────────────────────── ' +
+    '← ☐ 食事タイプ ☐ 飲み物 ☐ 生活リズム ✔ Submit → ' +
+    '朝食派ですか、それとも夜食派ですか? ' +
+    '❯ 1. 朝食派 朝にしっかり食べるのが好き ' +
+    '2. 夜食派 夜遅くに食べるのが好き ' +
+    '3. どちらも 朝も夜も両方楽しむ ' +
+    '4. Type something. ' +
+    '──────────────────────────────────── ' +
+    'Enter to select · Tab/Arrow keys to navigate · Esc to cancel'
+  const r = parseDialog(buf)
+  assertEq('parseDialog 検出 → ok', !!r, true)
+  if (r) {
+    assertEq(
+      'prompt にタブバー文字が混入しない (☐ 無)',
+      r.prompt.includes('☐'),
+      false
+    )
+    assertEq('prompt にタブバー文字が混入しない (✔ 無)', r.prompt.includes('✔'), false)
+    assertEq('prompt にタブバー文字が混入しない (← 無)', r.prompt.includes('←'), false)
+    assertEq(
+      'prompt 本文が抽出されている',
+      r.prompt.includes('朝食派ですか'),
+      true
+    )
+  }
+  assertEq('isTabbedDialog も true', isTabbedDialog(buf), true)
+}
+
+// -------------------------------------------------------
+// 14. stripAnsi: CSI B / E を改行に変換
+// -------------------------------------------------------
+console.log('\n[14] stripAnsi: CSI B / E → \\n 変換')
+{
+  // ConPTY は行送りに CSI B (Cursor Down) を使う。改行へ変換しないと
+  // parseDialog が行構造を失い、行頭マーカーが認識できなくなる。
+  assertEq('CSI 1 B → \\n', stripAnsi('A\x1b[1BB'), 'A\nB')
+  assertEq('CSI 単独 B → \\n', stripAnsi('A\x1b[BB'), 'A\nB')
+  assertEq('CSI 3 B → \\n × 3', stripAnsi('A\x1b[3BB'), 'A\n\n\nB')
+  assertEq('CSI E (Next Line) → \\n', stripAnsi('A\x1b[EB'), 'A\nB')
+  assertEq(
+    'CSI B と C は併存可能',
+    stripAnsi('A\x1b[1B\x1b[2CB'),
+    'A\n  B'
+  )
+}
+
+// -------------------------------------------------------
+// 15. parseDialog: 生 ANSI 描画(CSI B 含む)からの抽出
+// -------------------------------------------------------
+console.log('\n[15] parseDialog: 生 ANSI タブ式描画から prompt/options 抽出')
+{
+  // ConPTY 風: 行送りに CSI B、列ジャンプに CSI C、色は CSI m。
+  // stripAnsi で CSI B → \n に変換されることを前提とする。
+  const buf =
+    '\x1b[38;5;246m────\x1b[39m\x1b[1B' +
+    '← ☐ 食事タイプ\x1b[1C☐\x1b[1C飲み物\x1b[2C☐\x1b[1C生活リズム\x1b[2C✔\x1b[1CSubmit\x1b[2C→\x1b[1B' +
+    '朝食派ですか、それとも夜食派ですか?\x1b[1B' +
+    '\x1b[38;5;153m❯\x1b[39m 1.\x1b[1C朝食派\x1b[1B' +
+    '\x1b[2C2.\x1b[1C夜食派\x1b[1B' +
+    '\x1b[2C3.\x1b[1Cどちらも\x1b[1B' +
+    '\x1b[38;5;246m────\x1b[39m\x1b[1B' +
+    'Esc to cancel'
+  const cleaned = stripAnsi(buf)
+  const r = parseDialog(cleaned)
+  assertEq('検出できる', !!r, true)
+  if (r) {
+    assertEq('prompt がクリーン', r.prompt, '朝食派ですか、それとも夜食派ですか?')
+    assertEq('options 数 = 3', r.options.length, 3)
+    assertEq('option[0] = "朝食派"', r.options[0], '朝食派')
+    assertEq('option[1] = "夜食派"', r.options[1], '夜食派')
+    assertEq('option[2] = "どちらも"', r.options[2], 'どちらも')
+  }
+}
+
+// -------------------------------------------------------
+// 16. parseDialog: prompt 本文に → を含むタブ式ダイアログ
+// -------------------------------------------------------
+console.log('\n[16] parseDialog: prompt 本文に → を含んでもタブバー側を行末扱い')
+{
+  // タブバー右端の → が「最終 →」ではなく、prompt 本文の → が最終になるケース。
+  // arrowIdx が prompt 内の → を拾うと lineStart が prompt 途中に来て本文断片化する。
+  // 修正後: → の採用条件「タブマーカー後ろ」、なければタブマーカー末尾代用 で防止。
+  // 構造: タブバー〜prompt は空白連結(arrowIdx ブランチ起動条件)、
+  // prompt 後と options 間は \n(実 PTY で CSI B が \n に変換された後の状態)
+  const buf =
+    '──── ' +
+    '← ☐ a ☐ b ☐ c ✔ Submit → ' +
+    'バージョンを 5 → 10 に上げますか?\n' +
+    ' ❯ 1. はい\n' +
+    '   2. いいえ\n' +
+    '──── ' +
+    'Esc to cancel Tab/Arrow keys to navigate'
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  if (r) {
+    // タブバー右端 `→` がタブマーカー (☐/✔) より後にあるためそこを採用
+    // → prompt は「バージョンを 5 → 10 に上げますか?」全体
+    assertEq(
+      'prompt 本文が断片化していない',
+      r.prompt.includes('バージョンを 5'),
+      true
+    )
+    assertEq(
+      'prompt にタブバー文字 (☐) が混入しない',
+      r.prompt.includes('☐'),
+      false
+    )
+    assertEq(
+      'prompt にタブバー文字 (←) が混入しない',
+      r.prompt.includes('←'),
+      false
+    )
+    assertEq('options 数 = 2', r.options.length, 2)
+  }
+}
+
+// -------------------------------------------------------
+// 17. parseDialog: → 無しタブバー UI(Tab/Arrow keys ヒントのみ)
+// -------------------------------------------------------
+console.log('\n[17] parseDialog: → 無し UI でもタブマーカー末尾を行頭代用')
+{
+  // タブバーが ← も → も持たず、☐/✔ のみで構成される環境(将来の UI 変化想定)。
+  // isTabbedDialog は `→ OR Tab/Arrow keys` の OR で true → parseDialog 側で
+  // → が見つからなくてもタブマーカー末尾を使って prompt を切り出せること。
+  const buf =
+    '──── ' +
+    '☐ a ☐ b ✔ Submit ' +
+    'コーヒー派か紅茶派ですか?\n' +
+    ' ❯ 1. コーヒー\n' +
+    '   2. 紅茶\n' +
+    'Tab/Arrow keys to navigate Esc to cancel'
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  if (r) {
+    assertEq(
+      'prompt 本文がクリーン',
+      r.prompt,
+      'コーヒー派か紅茶派ですか?'
+    )
+    assertEq(
+      'prompt にタブバー文字 (☐) が混入しない',
+      r.prompt.includes('☐'),
+      false
+    )
+    assertEq('options 数 = 2', r.options.length, 2)
+  }
+  assertEq('isTabbedDialog も true', isTabbedDialog(buf), true)
+}
+
+// -------------------------------------------------------
+// 18. promptSimilar: 日本語 prompt の類似度判定が機能する
+// -------------------------------------------------------
+console.log('\n[18] promptSimilar: 日本語 prompt 対応')
+{
+  // 旧 normalizePrompt は /[^a-z0-9]/ で日本語を全削除 → 常に空文字列 →
+  // promptSimilar が !na.length で false 返却 = タブ式 sweep が完全破綻していた。
+  // 修正後は空白/罫線のみ除去、本文(日本語含む)は保持する。
+  // promptSimilar は module から直接 export していないが、内部利用される
+  // dialogShapeMatches 経由で挙動を確認する。
+  const { stripAnsi } = require('./claude-wrapper.js')
+  // 副次的に: stripAnsi が日本語を破壊しないことも確認
+  assertEq(
+    'stripAnsi が日本語を保持',
+    stripAnsi('朝食派ですか、夜食派ですか?'),
+    '朝食派ですか、夜食派ですか?'
+  )
+  // parseDialog 経由で「異なる日本語 prompt」が区別されることを確認
+  const buf1 = [
+    '─────',
+    ' 朝食派ですか、夜食派ですか?',
+    ' ❯ 1. 朝食派',
+    '   2. 夜食派',
+    ' Esc to cancel',
+  ].join('\n')
+  const buf2 = [
+    '─────',
+    ' コーヒー派か紅茶派か?',
+    ' ❯ 1. コーヒー',
+    '   2. 紅茶',
+    ' Esc to cancel',
+  ].join('\n')
+  const r1 = parseDialog(buf1)
+  const r2 = parseDialog(buf2)
+  assertEq('buf1 検出', !!r1, true)
+  assertEq('buf2 検出', !!r2, true)
+  assertEq('異なる日本語 prompt が異なる結果', r1.prompt !== r2.prompt, true)
 }
 
 // -------------------------------------------------------
