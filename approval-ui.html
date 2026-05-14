@@ -499,6 +499,92 @@
         margin-top: 2px;
         word-break: break-all;
       }
+      /* v1.12.0 フリーテキスト送信モーダル */
+      .modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+        padding: 16px;
+      }
+      .modal-overlay[hidden] {
+        display: none;
+      }
+      .modal-card {
+        background: var(--card-bg);
+        color: var(--text-primary);
+        border-radius: 12px;
+        padding: 20px 18px;
+        max-width: 500px;
+        width: 100%;
+        max-height: 80vh;
+        overflow-y: auto;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+      }
+      .modal-title {
+        font-size: 18px;
+        font-weight: 600;
+        margin: 0 0 8px;
+      }
+      .modal-desc {
+        font-size: 13px;
+        color: var(--text-secondary);
+        margin: 0 0 12px;
+        line-height: 1.5;
+      }
+      .modal-textarea {
+        width: 100%;
+        box-sizing: border-box;
+        font-size: 14px;
+        font-family: inherit;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--input-bg);
+        color: var(--text-primary);
+        resize: vertical;
+        min-height: 120px;
+      }
+      .modal-textarea:focus {
+        outline: 2px solid #1f6feb;
+        outline-offset: -1px;
+      }
+      .modal-err {
+        font-size: 13px;
+        color: #cc2a22;
+        margin: 6px 0 0;
+        min-height: 18px;
+      }
+      .modal-btn-row {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        margin-top: 14px;
+      }
+      .modal-btn {
+        font-size: 14px;
+        font-weight: 600;
+        padding: 10px 18px;
+        border-radius: 8px;
+        border: none;
+        cursor: pointer;
+        min-width: 92px;
+      }
+      .modal-btn-cancel {
+        background: var(--border);
+        color: var(--text-primary);
+      }
+      .modal-btn-send {
+        background: #1f6feb;
+        color: #fff;
+      }
+      .modal-btn-send:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
     </style>
   </head>
   <body>
@@ -565,6 +651,27 @@
       </div>
     </div>
 
+    <!-- v1.12.0: フリーテキスト送信モーダル(Type something / Chat about this 経路) -->
+    <div id="freetext-modal" class="modal-overlay" hidden>
+      <div class="modal-card" role="dialog" aria-labelledby="freetext-title" aria-modal="true">
+        <h2 id="freetext-title" class="modal-title">テキストを送信</h2>
+        <p id="freetext-desc" class="modal-desc"></p>
+        <!-- v1.12.0: maxlength は approval-server.js / claude-wrapper.js MAX_FREE_TEXT_LEN と同期 -->
+        <textarea
+          id="freetext-input"
+          class="modal-textarea"
+          maxlength="2000"
+          rows="6"
+          placeholder=""
+        ></textarea>
+        <p id="freetext-err" class="modal-err"></p>
+        <div class="modal-btn-row">
+          <button id="freetext-cancel" class="modal-btn modal-btn-cancel" type="button">キャンセル</button>
+          <button id="freetext-send" class="modal-btn modal-btn-send" type="button">送信</button>
+        </div>
+      </div>
+    </div>
+
     <script>
       // -------------------------------------------------------
       // i18n
@@ -609,6 +716,14 @@
           submitAll: 'すべて送信',
           submitAllProgress: (k, n) => `すべて送信 (${k}/${n})`,
           multiHistory: (n) => `複合質問 ${n} 件回答`,
+          freeTextTitle: 'テキストを送信',
+          freeTextDesc: (opt) =>
+            `「${opt}」を選んだ後、ここに入力したテキストを Claude TUI に送信します。`,
+          freeTextPlaceholder: 'メッセージを入力…',
+          freeTextSend: '送信',
+          freeTextCancel: 'キャンセル',
+          freeTextEmpty: 'テキストを入力してください',
+          freeTextHistory: (opt, text) => `${opt}: ${text}`,
           langToggle: 'EN',
           locale: 'ja-JP',
         },
@@ -651,6 +766,14 @@
           submitAll: 'Submit all',
           submitAllProgress: (k, n) => `Submit all (${k}/${n})`,
           multiHistory: (n) => `Answered ${n} questions`,
+          freeTextTitle: 'Send Text',
+          freeTextDesc: (opt) =>
+            `After selecting "${opt}", the text below will be sent to Claude TUI.`,
+          freeTextPlaceholder: 'Enter your message…',
+          freeTextSend: 'Send',
+          freeTextCancel: 'Cancel',
+          freeTextEmpty: 'Please enter some text',
+          freeTextHistory: (opt, text) => `${opt}: ${text}`,
           langToggle: '日本語',
           locale: 'en-US',
         },
@@ -995,6 +1118,11 @@
         // 単一質問の通常ボタン
         const btn = e.target.closest('button[data-id]')
         if (btn) {
+          // v1.12.0: Type something / Chat about this はテキスト入力モーダルを開く
+          if (FREE_TEXT_OPTION_RE.test(btn.dataset.answer)) {
+            openFreeTextModal(btn.dataset.id, btn.dataset.answer)
+            return
+          }
           await resolveItem(btn.dataset.id, btn.dataset.answer, btn.closest('.btn-area'))
           return
         }
@@ -1070,6 +1198,92 @@
           submitBtn.textContent = t('submitAll')
         }
       }
+
+      // v1.12.0: Claude TUI 組み込みフッタ option(Type something / Chat about this)を検出。
+      // これらの option を押すと wrapper 側で自由入力モードへ遷移するので、UI 側で
+      // テキスト入力モーダルを出して "answer + text" をサーバへ送る。
+      const FREE_TEXT_OPTION_RE = /^(?:Type\s+something|Chat\s+about\s+this)/i
+
+      let activeFreeTextItemId = null
+      let activeFreeTextAnswer = null
+
+      function openFreeTextModal(itemId, answer) {
+        activeFreeTextItemId = itemId
+        activeFreeTextAnswer = answer
+        const modal = document.getElementById('freetext-modal')
+        const title = document.getElementById('freetext-title')
+        const desc = document.getElementById('freetext-desc')
+        const input = document.getElementById('freetext-input')
+        const err = document.getElementById('freetext-err')
+        const sendBtn = document.getElementById('freetext-send')
+        const cancelBtn = document.getElementById('freetext-cancel')
+        title.textContent = t('freeTextTitle')
+        desc.textContent = t('freeTextDesc', answer)
+        input.value = ''
+        input.placeholder = t('freeTextPlaceholder')
+        err.textContent = ''
+        sendBtn.textContent = t('freeTextSend')
+        sendBtn.disabled = false
+        cancelBtn.textContent = t('freeTextCancel')
+        modal.hidden = false
+        // 開いたらフォーカスを textarea へ
+        setTimeout(() => input.focus(), 30)
+      }
+
+      function closeFreeTextModal() {
+        const modal = document.getElementById('freetext-modal')
+        modal.hidden = true
+        activeFreeTextItemId = null
+        activeFreeTextAnswer = null
+      }
+
+      document.getElementById('freetext-cancel').addEventListener('click', () => {
+        closeFreeTextModal()
+      })
+
+      document.getElementById('freetext-send').addEventListener('click', async () => {
+        if (!activeFreeTextItemId || !activeFreeTextAnswer) {
+          closeFreeTextModal()
+          return
+        }
+        const input = document.getElementById('freetext-input')
+        const err = document.getElementById('freetext-err')
+        const sendBtn = document.getElementById('freetext-send')
+        // クライアント側 sanitize: 制御文字 + 改行除去(サーバ側でも同様の sanitize)
+        const raw = input.value || ''
+        const clean = raw.replace(/[\x00-\x1F\x7F]/g, '')
+        if (clean.length === 0) {
+          err.textContent = t('freeTextEmpty')
+          return
+        }
+        if (clean.length > 2000) {
+          err.textContent = '(>2000 chars)'
+          return
+        }
+        err.textContent = ''
+        sendBtn.disabled = true
+        const id = activeFreeTextItemId
+        const answer = activeFreeTextAnswer
+        try {
+          await apiFetch(`/resolve/${id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ answer, text: clean, resolvedBy }),
+          })
+          pushHistory(getDescription(id), t('freeTextHistory', answer, clean.slice(0, 60)))
+          closeFreeTextModal()
+          selectedId = null
+          await fetchQueue()
+        } catch (e) {
+          err.textContent = t('errOp', e.message)
+          sendBtn.disabled = false
+        }
+      })
+
+      // モーダル背景クリックでキャンセル(ただし modal-card 内クリックは無視)
+      document.getElementById('freetext-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'freetext-modal') closeFreeTextModal()
+      })
 
       async function resolveItem(id, answer, btnArea, isBulk = false) {
         if (btnArea) btnArea.querySelectorAll('button').forEach((b) => (b.disabled = true))

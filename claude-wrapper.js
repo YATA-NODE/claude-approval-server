@@ -388,6 +388,11 @@ function stripAnsi(s) {
     .replace(/\x1b[=>]/g, '')
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
     .replace(/\x7f/g, '')
+    // スピナー描画(Claude TUI の "Dilly-dallying…" 等)はカーソル上下移動を多用し、
+    // CSI B → \n 変換後に大量の連続改行を生む。これが cleanBuf のスライディング
+    // ウィンドウを埋め尽くしてダイアログ本体を押し出すため、3 個以上の連続改行は
+    // 2 個に圧縮する。parseDialog の行頭マーカー判定には \n 2 個あれば十分。
+    .replace(/\n{3,}/g, '\n\n')
 }
 
 function onPtyData(chunk) {
@@ -653,6 +658,7 @@ if (typeof module !== 'undefined') {
     isTabbedDialog,
     validateMultiAnswer,
     screenTextFromBuffer,
+    validateFreeText,
   }
 }
 
@@ -996,14 +1002,33 @@ async function pollForResponse(id) {
       wlog(
         `answer "${String(resp.answer).slice(0, 40)}" は許可された値ではない。注入スキップ。`
       )
-    } else {
-      term.write(key + '\r')
-      // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
-      // (旧実装の cleanBuf='' の代替。詳細は suppressCurrentDialog のコメント参照)
-      suppressCurrentDialog(currentDialog.prompt)
-      wlog(`injected "${key}" for dialog ${id}`)
+      return
     }
-    // currentDialog は PTY 出力でダイアログが消えたら自然に消える
+
+    // v1.12.0: スマホからフリーテキストが添付されている場合の経路。
+    // resp.text を validateFreeText で再検証(defense in depth)し、
+    // replayFreeText で「キー → モード遷移待ち → 1 文字ずつ → Enter」で注入。
+    // text なしの通常経路は従来通り「数字 + Enter」のみ。
+    if (resp.text != null) {
+      const safeText = validateFreeText(resp.text)
+      if (!safeText) {
+        wlog(
+          `text "${String(resp.text).slice(0, 40)}" は許可された値ではない。注入スキップ。`
+        )
+        return
+      }
+      await replayFreeText(key, safeText)
+      wlog(
+        `injected free text (key="${key}", len=${safeText.length}) for dialog ${id}`
+      )
+      return
+    }
+
+    term.write(key + '\r')
+    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
+    // (旧実装の cleanBuf='' の代替。詳細は suppressCurrentDialog のコメント参照)
+    suppressCurrentDialog(currentDialog.prompt)
+    wlog(`injected "${key}" for dialog ${id}`)
     return
   }
 }
@@ -1022,6 +1047,57 @@ function validateAnswer(answer, options) {
   if (idx >= 0 && idx < 9) return String(idx + 1)
   // 'resolved-by-cli' 等は CLI 側で既に応答済みを意味するので注入しない
   return null
+}
+
+// v1.12.0: フリーテキスト送信(Type something / Chat about this 経路)用の
+// defense in depth 検証。サーバ側 sanitizeFreeText は「制御文字を除去して整形」、
+// 本関数は「制御文字が残っていたら HTTP 経路で改竄された可能性として拒否」と
+// 役割が異なる(意図的な strict reject)。共通化はしないこと。
+// 返却値: 検証通過した文字列、または不正時 null。
+// MAX_FREE_TEXT_LEN は approval-server.js / approval-ui.html とも同期 (3 箇所)
+const MAX_FREE_TEXT_LEN = 2000
+const CONTROL_CHARS_RE = /[\x00-\x1F\x7F]/
+function validateFreeText(text) {
+  if (typeof text !== 'string') return null
+  if (text.length === 0 || text.length > MAX_FREE_TEXT_LEN) return null
+  if (CONTROL_CHARS_RE.test(text)) return null
+  return text
+}
+
+// v1.12.0 注入タイミング定数。Claude TUI のテキスト入力欄が値を受け取れる
+// ペース。MODE_TRANSITION_MS は「数字キーで Type something モードへ切替 →
+// 入力欄表示完了」までの待ち。CHAR_INJECT_MS_SLOW は遷移直後のウォームアップ
+// 用(入力欄バッファが安定するまで)、CHAR_INJECT_MS_FAST は定常時。
+const MODE_TRANSITION_MS = 200
+const CHAR_INJECT_MS_SLOW = 30
+const CHAR_INJECT_MS_FAST = 10
+const CHAR_INJECT_WARMUP = 30 // 最初の N 文字を SLOW、以後 FAST
+
+// v1.12.0: フリーテキストを PTY に「1 文字ずつ + 遅延」で再生する。
+// 1. 該当数字キー(Type something など)を注入して Claude TUI をテキスト入力モードへ
+// 2. モード遷移完了を待つため sleep MODE_TRANSITION_MS
+// 3. text を 1 文字ずつ term.write、最初 CHAR_INJECT_WARMUP 文字は SLOW、以後 FAST
+// 4. 最後に Enter で確定
+// 200 文字テキストの場合: 30*30 + 170*10 = 2.6 秒。固定 30ms (6 秒) より速い。
+async function replayFreeText(key, text) {
+  tabReplayInProgress = true
+  try {
+    term.write(key)
+    await sleep(MODE_TRANSITION_MS)
+    // for-of は Unicode code point ベース(サロゲートペアの絵文字も 1 文字扱い)
+    let i = 0
+    for (const ch of text) {
+      term.write(ch)
+      await sleep(i < CHAR_INJECT_WARMUP ? CHAR_INJECT_MS_SLOW : CHAR_INJECT_MS_FAST)
+      i++
+    }
+    term.write('\r')
+    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
 }
 
 // ダイアログが画面から消えた（= β 応答があった）と判定する処理

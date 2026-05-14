@@ -94,6 +94,12 @@ resolveEvents.setMaxListeners(100)
 
 // I1: description の最大長（ngrok 経由で機微情報が長大化するのを抑制）
 const MAX_DESC_LEN = 500
+// v1.12.0 フリーテキスト送信機能(Type something / Chat about this 経路)用。
+// 制御文字を除いた上で 2000 文字を上限とする。Claude TUI のテキスト入力欄の
+// 想定ユースケース(中規模メッセージ)を覆う長さで設定。
+// ※ claude-wrapper.js MAX_FREE_TEXT_LEN / approval-ui.html textarea maxlength
+//   と同期する(3 箇所、変更時は同時更新)。
+const MAX_FREE_TEXT_LEN = 2000
 
 // I2: レート制限（同一 IP の 401 連発を 10 分ブロック）
 const failCounter = new Map() // ip -> { count, resetAt, blockedUntil }
@@ -174,6 +180,23 @@ function sanitizeOptions(arr) {
     .map((o) => clipString(o, 200))
 }
 
+// v1.12.0 フリーテキスト送信(Type something / Chat about this)用のサニタイズ。
+// 役割: 「制御文字を **除去** して整形」。HTTP 入力経路の最前段で実施。
+// 制御文字 (\x00-\x1F \x7F) を全削除して、最大長 MAX_FREE_TEXT_LEN で頭打ち。
+// 改行 / Tab / ESC / Ctrl-C 等が一括除去されるため PTY 注入経路で制御コード混入
+// (画面破壊・任意コマンド実行・意図せぬ確定)を構造的に防止する。
+// ※ claude-wrapper.js validateFreeText とは役割が違う(あちらは「残留したら拒否」
+//   の strict reject)。両者は defense in depth として意図的に異なる挙動を持つ。
+// 返却値: 検証通過した文字列、または検証失敗時 null。
+const CONTROL_CHARS_RE = /[\x00-\x1F\x7F]/g
+function sanitizeFreeText(s) {
+  if (typeof s !== 'string') return null
+  if (s.length > MAX_FREE_TEXT_LEN) return null
+  const cleaned = s.replace(CONTROL_CHARS_RE, '')
+  if (cleaned.length === 0) return null
+  return cleaned
+}
+
 app.post('/request', authenticate, (req, res) => {
   const { description, options, tabs } = req.body
   if (!description || typeof description !== 'string') {
@@ -224,6 +247,7 @@ app.post('/request', authenticate, (req, res) => {
     status: 'pending', // pending | resolved
     answer: null,
     answers: null, // 複合質問の回答配列(null または string[])
+    text: null, // v1.12.0: フリーテキスト送信(Type something / Chat about this 経路)
     resolvedBy: null, // 'pc' | 'smartphone' | 'cli'
     createdAt: new Date().toISOString(),
     resolvedAt: null,
@@ -249,6 +273,7 @@ app.get('/status/:id', authenticate, (req, res) => {
     status: item.status,
     answer: item.answer,
     answers: item.answers, // 複合質問の回答配列(null または string[])
+    text: item.text, // v1.12.0: フリーテキスト(null またはサニタイズ済 string)
   })
 
   const wait = Math.min(Math.max(parseInt(req.query.wait) || 0, 0), 60)
@@ -293,8 +318,9 @@ app.get('/queue', authenticate, (req, res) => {
  * Body: { action: "approved" | "rejected" }
  */
 app.post('/resolve/:id', authenticate, (req, res) => {
-  const { answer, answers, resolvedBy } = req.body
+  const { answer, answers, text, resolvedBy } = req.body
   const hasAnswers = Array.isArray(answers)
+  const hasText = text != null
   if (!answer && !hasAnswers) {
     return res.status(400).json({ error: 'answer or answers is required' })
   }
@@ -310,6 +336,23 @@ app.post('/resolve/:id', authenticate, (req, res) => {
 
   let safeAnswer = null
   let safeAnswers = null
+  let safeText = null
+
+  // v1.12.0: フリーテキスト送信。Type something / Chat about this 経路で
+  // スマホからテキスト入力を受信した場合、サニタイズして wrapper に渡す。
+  // tabs を持つ複合 dialog では text は受理しない(複合質問は数字回答のみ)。
+  if (hasText) {
+    if (Array.isArray(item.tabs)) {
+      return res.status(400).json({ error: 'text is not allowed for tabbed items' })
+    }
+    safeText = sanitizeFreeText(text)
+    if (safeText === null) {
+      return res.status(400).json({
+        error:
+          'text must be a non-empty string under MAX_FREE_TEXT_LEN, control characters not allowed',
+      })
+    }
+  }
 
   if (hasAnswers) {
     // 複合質問: tabs を持つ item でしか受理しない、長さ一致と数字 1〜9 を厳格チェック
@@ -353,6 +396,7 @@ app.post('/resolve/:id', authenticate, (req, res) => {
   item.status = 'resolved'
   item.answer = safeAnswer
   item.answers = safeAnswers
+  item.text = safeText
   item.resolvedBy = safeResolvedBy
   item.resolvedAt = new Date().toISOString()
   console.log(
