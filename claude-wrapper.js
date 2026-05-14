@@ -348,6 +348,10 @@ let suppressedPrompt = null
 let suppressedAt = 0
 const SUPPRESS_WINDOW_MS = 3000
 
+// replayMultiAnswers のタイミング値(実機 TUI の再描画速度に依存)
+const MULTI_TAB_STEP_MS = 150 // 数字キー入力 → タブ自動遷移 + 再描画の待ち
+const MULTI_SUBMIT_WAIT_MS = 250 // 最終回答 → Submit 確認画面の描画待ち
+
 function suppressCurrentDialog(prompt) {
   if (typeof prompt !== 'string' || !prompt) return
   suppressedPrompt = prompt
@@ -790,18 +794,19 @@ async function sweepTabs() {
 async function replayMultiAnswers(answers) {
   tabReplayInProgress = true
   try {
+    // AskUserQuestion-Multi のタブは、数字キーを押すと「選択肢を選択 + 自動で
+    // 次のタブへ移動」する(実機確認済 2026-05-14: 一番左のタブで 2 を押すと
+    // 2 番目のタブへ移動)。そのため Tab は挟まない。挟むと 1 回答ごとに
+    // 数字(1 タブ)+ Tab(1 タブ)で 2 タブ進み、タブが 1 つおきに飛ばされる。
     for (let i = 0; i < answers.length; i++) {
-      term.write(answers[i]) // 数字 1 文字、改行なし
-      await sleep(60)
-      if (i < answers.length - 1) {
-        term.write('\t')
-        await sleep(120)
-      }
+      term.write(answers[i]) // 数字 1 文字
+      await sleep(MULTI_TAB_STEP_MS)
     }
-    // 最後のタブで回答後、もう一度 Tab で Submit にフォーカス → Enter で全送信
-    term.write('\t')
-    await sleep(120)
-    term.write('\r')
+    // 最後のタブを回答すると自動で Submit タブ(「Review your answers」+
+    // 「❯ 1. Submit answers / 2. Cancel」の確認画面)へ遷移する。
+    // '1'(Submit answers)+ Enter で確定。
+    await sleep(MULTI_SUBMIT_WAIT_MS)
+    term.write('1\r')
     // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
   } finally {
