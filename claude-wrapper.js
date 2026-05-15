@@ -852,6 +852,20 @@ async function replayMultiAnswers(answers) {
   }
 }
 
+// v1.12.0: スマホからのキャンセル指示を PC TUI の Esc キーで再現する。
+// 単一質問・複合質問・Type something 入力モードのいずれの状態でもダイアログ
+// を抜けて通常チャットへ戻る(TUI のフッタ「Esc to cancel」と同等の操作)。
+async function replayCancel() {
+  tabReplayInProgress = true
+  try {
+    term.write('\x1b') // Esc
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
+}
+
 async function registerMultiDialog(tabs, projectName) {
   const description = `[${projectName}][AskUserQuestion-Multi] 複合質問 ${tabs.length} 件`
   const tabsPayload = tabs.map((t, i) => ({
@@ -1011,6 +1025,14 @@ async function pollForResponse(id) {
     }
     // resolve された。CLI で既に応答済みなら注入しない。
     if (!currentDialog || currentDialog.id !== id) return
+
+    // v1.12.0: スマホからキャンセル指示が来た場合、Esc キーを TUI に注入して
+    // ダイアログを破棄する。complete/single 両方の経路で使える。
+    if (resp.action === 'cancel') {
+      await replayCancel()
+      wlog(`cancelled dialog ${id} by remote`)
+      return
+    }
 
     // 複合質問: answers 配列を validateMultiAnswer で検証し replay
     if (Array.isArray(currentDialog.tabs)) {

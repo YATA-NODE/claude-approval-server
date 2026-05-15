@@ -328,9 +328,13 @@
         outline: 3px solid #ffd60a;
         outline-offset: -3px;
       }
-      .btn-submit-all {
-        width: 100%;
+      .multi-actions {
+        display: flex;
+        gap: 8px;
         margin-top: 16px;
+      }
+      .btn-submit-all {
+        flex: 1 1 auto;
         padding: 14px;
         border-radius: 10px;
         border: none;
@@ -349,6 +353,30 @@
       }
       .btn-submit-all:not(:disabled):active {
         opacity: 0.85;
+      }
+      /* v1.12.0: ダイアログ全体を Esc 相当で破棄するキャンセルボタン。
+         multi では「すべて送信」の横、single ではボタン群の末尾に並ぶ。 */
+      .btn-cancel-dialog {
+        flex: 0 0 auto;
+        padding: 14px 18px;
+        border-radius: 10px;
+        border: 1px solid var(--border, #ccc);
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+        background: transparent;
+        color: var(--text-secondary, #666);
+      }
+      .btn-cancel-dialog:active {
+        opacity: 0.7;
+      }
+      [data-theme='dark'] .btn-cancel-dialog {
+        border-color: #444;
+        color: #aaa;
+      }
+      /* single カードでは btn-area 内に単独で並ぶので margin で離す */
+      .btn-area .btn-cancel-dialog {
+        margin-top: 8px;
       }
       .req-card:active {
         opacity: 0.85;
@@ -716,6 +744,9 @@
           submitAll: 'すべて送信',
           submitAllProgress: (k, n) => `すべて送信 (${k}/${n})`,
           multiHistory: (n) => `複合質問 ${n} 件回答`,
+          btnCancelDialog: 'キャンセル',
+          cancelConfirm: 'このダイアログをキャンセル(Esc 相当)しますか?',
+          cancelHistory: '(キャンセル)',
           freeTextTitle: 'テキストを送信',
           freeTextDesc: (opt) =>
             `「${opt}」を選んだ後、ここに入力したテキストを Claude TUI に送信します。`,
@@ -766,6 +797,9 @@
           submitAll: 'Submit all',
           submitAllProgress: (k, n) => `Submit all (${k}/${n})`,
           multiHistory: (n) => `Answered ${n} questions`,
+          btnCancelDialog: 'Cancel',
+          cancelConfirm: 'Cancel this dialog (equivalent to Esc)?',
+          cancelHistory: '(cancelled)',
           freeTextTitle: 'Send Text',
           freeTextDesc: (opt) =>
             `After selecting "${opt}", the text below will be sent to Claude TUI.`,
@@ -1033,11 +1067,12 @@
 
         const btnHtml = isSelected
           ? `<div class="btn-area">${item.options
+              .filter((opt) => !CHAT_ABOUT_RE.test(opt))
               .map(
                 (opt) =>
                   `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-answer="${escHtml(opt)}">${escHtml(opt)}</button>`
               )
-              .join('')}</div>`
+              .join('')}<button class="btn-cancel-dialog" data-cancel-id="${item.id}">${t('btnCancelDialog')}</button></div>`
           : ''
 
         div.innerHTML = `
@@ -1065,6 +1100,9 @@
             const hasText = tabSel && typeof tabSel === 'object' && tabSel.text != null
             const opts = (tab.options || [])
               .map((opt, oi) => {
+                // v1.12.0: Chat about this は遠隔不能なので UI で非表示。
+                // num は元の oi+1 を保持(wrapper への番号と整合させる)
+                if (CHAT_ABOUT_RE.test(opt)) return ''
                 const num = String(oi + 1)
                 const isSel = selNum === num
                 const isFreeText = FREE_TEXT_OPTION_RE.test(opt)
@@ -1090,7 +1128,10 @@
       <p class="req-time">${fmt(item.createdAt)}</p>
       <p class="req-desc">${escHtml(item.description)} <span class="multi-badge">${t('multiBadge', n)}</span></p>
       ${subHtml}
-      <button class="btn-submit-all" data-submit-id="${item.id}" ${submitDisabled}>${submitLabel}</button>`
+      <div class="multi-actions">
+        <button class="btn-submit-all" data-submit-id="${item.id}" ${submitDisabled}>${submitLabel}</button>
+        <button class="btn-cancel-dialog" data-cancel-id="${item.id}">${t('btnCancelDialog')}</button>
+      </div>`
         return div
       }
 
@@ -1106,6 +1147,13 @@
       }
 
       document.getElementById('queue-list').addEventListener('click', async (e) => {
+        // v1.12.0: ダイアログキャンセル(Esc 相当)
+        const cancelBtn = e.target.closest('button[data-cancel-id]')
+        if (cancelBtn && !cancelBtn.disabled) {
+          if (!confirm(t('cancelConfirm'))) return
+          await cancelItem(cancelBtn.dataset.cancelId, cancelBtn)
+          return
+        }
         // 複合質問の「すべて送信」ボタン
         const submitBtn = e.target.closest('button[data-submit-id]')
         if (submitBtn && !submitBtn.disabled) {
@@ -1184,6 +1232,28 @@
         renderHistory()
       }
 
+      // v1.12.0: ダイアログ全体をキャンセル(PC TUI の Esc 相当)。
+      // wrapper が Esc 注入 → ダイアログ消失 → 通常チャットに戻る。
+      async function cancelItem(id, btn) {
+        btn.disabled = true
+        btn.textContent = t('btnProcessing')
+        try {
+          await apiFetch(`/resolve/${id}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'cancel', resolvedBy }),
+          })
+          pushHistory(getDescription(id), t('cancelHistory'))
+          delete selectedAnswers[id]
+          selectedId = null
+          await fetchQueue()
+        } catch (e) {
+          document.getElementById('main-err').textContent = t('errOp', e.message)
+          btn.disabled = false
+          btn.textContent = t('btnCancelDialog')
+        }
+      }
+
       async function resolveMultiItem(id, submitBtn) {
         const sel = selectedAnswers[id] || {}
         const item = (currentQueueItems || []).find((i) => i.id === id)
@@ -1231,6 +1301,10 @@
       // これらの option を押すと wrapper 側で自由入力モードへ遷移するので、UI 側で
       // テキスト入力モーダルを出して "answer + text" をサーバへ送る。
       const FREE_TEXT_OPTION_RE = /^(?:Type\s+something|Chat\s+about\s+this)/i
+      // v1.12.0: Chat about this は遠隔不能(数字キー単独で選べず、選択するとダイアログ
+      // 全体を抜けて通常チャットへ移行する仕様)。UI 側で非表示にし、選びたい場合は
+      // 下部の「キャンセル」ボタンで Esc 相当の操作を行う。
+      const CHAT_ABOUT_RE = /^Chat\s+about\s+this/i
 
       let activeFreeTextItemId = null
       let activeFreeTextAnswer = null

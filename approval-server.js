@@ -197,6 +197,11 @@ function sanitizeFreeText(s) {
   return cleaned
 }
 
+// v1.12.0: Chat about this は遠隔不能(数字キー単独で選べず、選んでもダイアログ
+// 全体を抜ける TUI 仕様)。サーバ側で answer / answers が指す option がこのパターン
+// に一致する場合は 400 reject(旧クライアントからの不正リクエスト防御)。
+const CHAT_ABOUT_RE = /^Chat\s+about\s+this/i
+
 app.post('/request', authenticate, (req, res) => {
   const { description, options, tabs } = req.body
   if (!description || typeof description !== 'string') {
@@ -272,8 +277,9 @@ app.get('/status/:id', authenticate, (req, res) => {
     id: item.id,
     status: item.status,
     answer: item.answer,
-    answers: item.answers, // 複合質問の回答配列(null または string[])
+    answers: item.answers, // 複合質問の回答配列(null または (string|{num,text})[])
     text: item.text, // v1.12.0: フリーテキスト(null またはサニタイズ済 string)
+    action: item.action || null, // v1.12.0: 'cancel' または null
   })
 
   const wait = Math.min(Math.max(parseInt(req.query.wait) || 0, 0), 60)
@@ -318,10 +324,11 @@ app.get('/queue', authenticate, (req, res) => {
  * Body: { action: "approved" | "rejected" }
  */
 app.post('/resolve/:id', authenticate, (req, res) => {
-  const { answer, answers, text, resolvedBy } = req.body
+  const { answer, answers, text, action, resolvedBy } = req.body
   const hasAnswers = Array.isArray(answers)
   const hasText = text != null
-  if (!answer && !hasAnswers) {
+  const isCancel = action === 'cancel'
+  if (!isCancel && !answer && !hasAnswers) {
     return res.status(400).json({ error: 'answer or answers is required' })
   }
 
@@ -387,6 +394,12 @@ app.post('/resolve/:id', authenticate, (req, res) => {
       if (idx >= item.tabs[i].options.length) {
         return res.status(400).json({ error: `answers[${i}] out of range` })
       }
+      // v1.12.0: Chat about this オプションを指す回答は遠隔不能なので reject
+      if (CHAT_ABOUT_RE.test(item.tabs[i].options[idx])) {
+        return res.status(400).json({
+          error: `answers[${i}] points to "Chat about this" which is not remote-controllable`,
+        })
+      }
       if (rawText !== undefined) {
         const safeAtText = sanitizeFreeText(rawText)
         if (safeAtText === null) {
@@ -402,6 +415,10 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     safeAnswers = norm
     // 互換のため answer にも要約を残す(text 内容は含めず num のみ)
     safeAnswer = norm.map((a) => (typeof a === 'string' ? a : a.num)).join(',')
+  } else if (isCancel) {
+    // v1.12.0: ダイアログキャンセル(Esc 相当)。answer/answers は不要。
+    // wrapper が cancel を検知して Esc キーを TUI に送る。
+    safeAnswer = 'cancelled-by-remote'
   } else {
     if (typeof answer !== 'string') {
       return res.status(400).json({ error: 'answer must be a string' })
@@ -412,6 +429,12 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     if (Array.isArray(item.tabs) && answer !== 'resolved-by-cli') {
       return res.status(400).json({ error: 'tabbed items require answers array' })
     }
+    // v1.12.0: Chat about this 直接指定も遠隔不能なので reject
+    if (CHAT_ABOUT_RE.test(answer)) {
+      return res.status(400).json({
+        error: 'Chat about this is not remote-controllable (use cancel instead)',
+      })
+    }
     safeAnswer = answer.length > 100 ? answer.slice(0, 100) : answer
   }
 
@@ -419,6 +442,7 @@ app.post('/resolve/:id', authenticate, (req, res) => {
   item.answer = safeAnswer
   item.answers = safeAnswers
   item.text = safeText
+  item.action = isCancel ? 'cancel' : null
   item.resolvedBy = safeResolvedBy
   item.resolvedAt = new Date().toISOString()
   // ログには text 本文を出さない(defense in depth、長さのみ)
@@ -427,8 +451,16 @@ app.post('/resolve/:id', authenticate, (req, res) => {
         typeof a === 'string' ? a : { num: a.num, text_len: a.text.length }
       )
     : null
+  let logBody
+  if (isCancel) {
+    logBody = 'action=cancel'
+  } else if (logSafeAnswers) {
+    logBody = `answers=${JSON.stringify(logSafeAnswers)}`
+  } else {
+    logBody = `answer=${item.answer}`
+  }
   console.log(
-    `[RESOLVED] ${item.id}: ${logSafeAnswers ? `answers=${JSON.stringify(logSafeAnswers)}` : `answer=${item.answer}`} (by ${item.resolvedBy || 'unknown'})`
+    `[RESOLVED] ${item.id}: ${logBody} (by ${item.resolvedBy || 'unknown'})`
   )
 
   // long-poll 中の /status/:id を即座に返す
