@@ -23,6 +23,10 @@ PTY ラッパーが Claude Code の入出力を仲介し、ダイアログが出
   - **Type something のテキスト送信**(v1.12+): スマホからフリーテキストを Claude TUI に注入できる。単一質問・複合質問の両方で対応
   - **ダイアログのキャンセル**(v1.12+): スマホから Esc 相当の操作でダイアログを破棄して通常チャットに戻る
 
+![複合質問 + Type something の実例(v1.12.0+)。左: PC ターミナルのタブ式 AskUserQuestion / 中央 3 列: スマホ承認パネルの各タブで選択 + 一部タブで Type something を入力済み(✓ マーク)+ 「すべて送信」横にキャンセルボタン / 右: テキスト入力モーダル](docs/images/approval-panel-multi-text.png)
+
+PC ターミナル(左)に表示された複合質問が、そのままスマホの承認パネルに転送されます。各タブで通常の選択肢(数字)を選ぶか、Type something を押せばテキスト入力モーダル(右端)が開き、フリーテキストでも回答できます。全タブの回答が揃ったら「すべて送信」で PC TUI へ一括反映、操作を取りやめたいときは隣の「キャンセル」で Esc 相当の破棄ができます。
+
 ### hooks 方式との違い
 
 | 観点 | hooks (`PreToolUse` 等) | 本ツール |
@@ -372,6 +376,10 @@ Whichever side responds first dismisses the other side automatically.
   - **Multi-tab questions**: multiple questions grouped into a single tabbed AskUserQuestion (v1.11+)
   - **Free-text via "Type something"** (v1.12+): send arbitrary text from the phone into the Claude TUI. Available for both single and multi-tab questions
   - **Dialog cancellation** (v1.12+): an Esc-equivalent button on the phone dismisses the current dialog and returns the TUI to normal chat
+
+![Multi-tab AskUserQuestion + Type something in action (v1.12.0+). Left: tabbed dialog in the PC terminal / Center three columns: the smartphone approval panel with per-tab selection, one tab marked with a ✓ after submitting text, and the Cancel button beside Submit all / Right: the free-text input modal](docs/images/approval-panel-multi-text.png)
+
+A multi-tab dialog shown in the PC terminal (left) is forwarded as-is to the approval panel. Each tab accepts a numeric choice, or pressing **Type something** opens the free-text modal (right) so the answer can be a typed message. Once every tab is filled, **Submit all** applies the responses to the PC TUI in one go; the neighbouring **Cancel** button dismisses the whole dialog (Esc-equivalent) if you change your mind.
 
 ### vs hooks-based approaches
 
