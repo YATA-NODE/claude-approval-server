@@ -388,6 +388,11 @@ function stripAnsi(s) {
     .replace(/\x1b[=>]/g, '')
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
     .replace(/\x7f/g, '')
+    // スピナー描画(Claude TUI の "Dilly-dallying…" 等)はカーソル上下移動を多用し、
+    // CSI B → \n 変換後に大量の連続改行を生む。これが cleanBuf のスライディング
+    // ウィンドウを埋め尽くしてダイアログ本体を押し出すため、3 個以上の連続改行は
+    // 2 個に圧縮する。parseDialog の行頭マーカー判定には \n 2 個あれば十分。
+    .replace(/\n{3,}/g, '\n\n')
 }
 
 function onPtyData(chunk) {
@@ -625,21 +630,52 @@ function isTabbedDialog(buf) {
   return boxMarks >= 2 && hasNav
 }
 
+// v1.12.0 (D1): approval-server.js / approval-ui.html の同名定数と完全同期。
+// Defense in depth として wrapper 側にも持つ(サーバ防御を信頼しすぎず、
+// 注入直前の最後の関門で再検証)。
+const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
+const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
+
 // 複合質問の回答配列バリデータ。
-// answers は数字文字列の配列で、長さは tabs.length と一致、各要素は
-// 該当 tab の options 範囲内である必要がある。
-// 安全に再生できる場合のみ正規化済みの配列を返す。違反は null。
+// answers は次の要素を含む配列(長さは tabs.length と一致):
+//   - 文字列 "1"〜"9"(=数字キーのみ送信、Type something 以外のオプション)
+//   - { num: "1"〜"9", text?: string }(=text あれば「数字キー → モード遷移
+//     待ち → 1 文字ずつ → Enter」で TUI に Type something を注入)
+// 後方互換: v1.11.x 時点の「string 配列」呼び出しもそのまま受容する。
+// 戻り値は常に { num, text? } 形式に正規化された配列(replayMultiAnswers の
+// 単一処理パスに揃えるため)。違反は null。
 function validateMultiAnswer(answers, tabs) {
   if (!Array.isArray(answers) || !Array.isArray(tabs)) return null
   if (answers.length !== tabs.length) return null
   if (tabs.length === 0 || tabs.length > 9) return null
   const out = []
   for (let i = 0; i < answers.length; i++) {
-    const a = String(answers[i] == null ? '' : answers[i]).trim()
-    if (!/^[1-9]$/.test(a)) return null
+    const item = answers[i]
+    let num, rawText
+    if (typeof item === 'string') {
+      num = item.trim()
+    } else if (item && typeof item === 'object' && !Array.isArray(item)) {
+      num = String(item.num == null ? '' : item.num).trim()
+      if (item.text != null) rawText = item.text
+    } else {
+      return null
+    }
+    if (!/^[1-9]$/.test(num)) return null
     if (!tabs[i] || !Array.isArray(tabs[i].options)) return null
-    if (parseInt(a, 10) - 1 >= tabs[i].options.length) return null
-    out.push(a)
+    const idx = parseInt(num, 10) - 1
+    if (idx >= tabs[i].options.length) return null
+    const selectedOpt = tabs[i].options[idx]
+    // D1 (codex B002 修正 defense in depth): Chat about this を指す回答は遠隔不能
+    if (CHAT_ABOUT_RE.test(selectedOpt)) return null
+    if (rawText !== undefined) {
+      // D1 (codex B002 修正 defense in depth): text 添付は Type something 限定
+      if (!FREE_TEXT_OPTION_RE.test(selectedOpt)) return null
+      const safeText = validateFreeText(rawText)
+      if (!safeText) return null
+      out.push({ num, text: safeText })
+    } else {
+      out.push({ num })
+    }
   }
   return out
 }
@@ -653,6 +689,7 @@ if (typeof module !== 'undefined') {
     isTabbedDialog,
     validateMultiAnswer,
     screenTextFromBuffer,
+    validateFreeText,
   }
 }
 
@@ -790,24 +827,50 @@ async function sweepTabs() {
 }
 
 // 複合質問の応答キー列を PTY に再生する。
-// answers は validateMultiAnswer で検証済みの数字文字列配列。
+// answers は validateMultiAnswer 通過済の { num, text? } 配列。
+//   - text なし: 数字キー押下で「選択肢選択 + 自動で次のタブへ移動」
+//     (実機確認済 2026-05-14)
+//   - text あり: 数字キー(Type something モードへ遷移)→ MODE_TRANSITION_MS
+//     待ち → 1 文字ずつ → Enter → TUI が自動で次タブへ遷移
+//     (実機確認済 2026-05-15)
+// 最後のタブ回答完了で自動的に Submit 確認画面(「Review your answers」)
+// へ遷移するので '1\r' で確定。
 async function replayMultiAnswers(answers) {
   tabReplayInProgress = true
   try {
-    // AskUserQuestion-Multi のタブは、数字キーを押すと「選択肢を選択 + 自動で
-    // 次のタブへ移動」する(実機確認済 2026-05-14: 一番左のタブで 2 を押すと
-    // 2 番目のタブへ移動)。そのため Tab は挟まない。挟むと 1 回答ごとに
-    // 数字(1 タブ)+ Tab(1 タブ)で 2 タブ進み、タブが 1 つおきに飛ばされる。
     for (let i = 0; i < answers.length; i++) {
-      term.write(answers[i]) // 数字 1 文字
+      const a = answers[i]
+      term.write(a.num) // 数字 1 文字
+      if (a.text != null) {
+        await sleep(MODE_TRANSITION_MS)
+        let j = 0
+        for (const ch of a.text) {
+          term.write(ch)
+          await sleep(j < CHAR_INJECT_WARMUP ? CHAR_INJECT_MS_SLOW : CHAR_INJECT_MS_FAST)
+          j++
+        }
+        term.write('\r')
+      }
+      // Enter 後 / 数字キー後ともに次タブの描画安定を待つ
       await sleep(MULTI_TAB_STEP_MS)
     }
-    // 最後のタブを回答すると自動で Submit タブ(「Review your answers」+
-    // 「❯ 1. Submit answers / 2. Cancel」の確認画面)へ遷移する。
-    // '1'(Submit answers)+ Enter で確定。
     await sleep(MULTI_SUBMIT_WAIT_MS)
     term.write('1\r')
     // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
+}
+
+// v1.12.0: スマホからのキャンセル指示を PC TUI の Esc キーで再現する。
+// 単一質問・複合質問・Type something 入力モードのいずれの状態でもダイアログ
+// を抜けて通常チャットへ戻る(TUI のフッタ「Esc to cancel」と同等の操作)。
+async function replayCancel() {
+  tabReplayInProgress = true
+  try {
+    term.write('\x1b') // Esc
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
   } finally {
     tabReplayInProgress = false
@@ -975,6 +1038,14 @@ async function pollForResponse(id) {
     // resolve された。CLI で既に応答済みなら注入しない。
     if (!currentDialog || currentDialog.id !== id) return
 
+    // v1.12.0: スマホからキャンセル指示が来た場合、Esc キーを TUI に注入して
+    // ダイアログを破棄する。complete/single 両方の経路で使える。
+    if (resp.action === 'cancel') {
+      await replayCancel()
+      wlog(`cancelled dialog ${id} by remote`)
+      return
+    }
+
     // 複合質問: answers 配列を validateMultiAnswer で検証し replay
     if (Array.isArray(currentDialog.tabs)) {
       const validated = validateMultiAnswer(resp.answers, currentDialog.tabs)
@@ -984,7 +1055,11 @@ async function pollForResponse(id) {
         )
       } else {
         await replayMultiAnswers(validated)
-        wlog(`injected multi answers ${JSON.stringify(validated)} for dialog ${id}`)
+        // text 内容はログに出さず、長さのみ記録(defense in depth)
+        const summary = validated.map((a) =>
+          a.text != null ? { num: a.num, text_len: a.text.length } : { num: a.num }
+        )
+        wlog(`injected multi answers ${JSON.stringify(summary)} for dialog ${id}`)
       }
       return
     }
@@ -996,14 +1071,47 @@ async function pollForResponse(id) {
       wlog(
         `answer "${String(resp.answer).slice(0, 40)}" は許可された値ではない。注入スキップ。`
       )
-    } else {
-      term.write(key + '\r')
-      // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
-      // (旧実装の cleanBuf='' の代替。詳細は suppressCurrentDialog のコメント参照)
-      suppressCurrentDialog(currentDialog.prompt)
-      wlog(`injected "${key}" for dialog ${id}`)
+      return
     }
-    // currentDialog は PTY 出力でダイアログが消えたら自然に消える
+
+    // D1 (codex B003 修正 defense in depth): key が指す option が Chat about this なら注入拒否
+    const selectedOpt = currentDialog.options[parseInt(key, 10) - 1]
+    if (CHAT_ABOUT_RE.test(selectedOpt)) {
+      wlog(`answer points to "Chat about this" which is not remote-controllable. 注入スキップ。`)
+      return
+    }
+
+    // v1.12.0: スマホからフリーテキストが添付されている場合の経路。
+    // resp.text を validateFreeText で再検証(defense in depth)し、
+    // replayFreeText で「キー → モード遷移待ち → 1 文字ずつ → Enter」で注入。
+    // text なしの通常経路は従来通り「数字 + Enter」のみ。
+    if (resp.text != null) {
+      // D1 (codex B001 修正 defense in depth): text 添付は Type something option 限定
+      if (!FREE_TEXT_OPTION_RE.test(selectedOpt)) {
+        wlog(
+          `text is attached but selected option "${selectedOpt}" is not "Type something". 注入スキップ。`
+        )
+        return
+      }
+      const safeText = validateFreeText(resp.text)
+      if (!safeText) {
+        wlog(
+          `text "${String(resp.text).slice(0, 40)}" は許可された値ではない。注入スキップ。`
+        )
+        return
+      }
+      await replayFreeText(key, safeText)
+      wlog(
+        `injected free text (key="${key}", len=${safeText.length}) for dialog ${id}`
+      )
+      return
+    }
+
+    term.write(key + '\r')
+    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
+    // (旧実装の cleanBuf='' の代替。詳細は suppressCurrentDialog のコメント参照)
+    suppressCurrentDialog(currentDialog.prompt)
+    wlog(`injected "${key}" for dialog ${id}`)
     return
   }
 }
@@ -1022,6 +1130,59 @@ function validateAnswer(answer, options) {
   if (idx >= 0 && idx < 9) return String(idx + 1)
   // 'resolved-by-cli' 等は CLI 側で既に応答済みを意味するので注入しない
   return null
+}
+
+// v1.12.0: フリーテキスト送信(Type something 経路)用の defense in depth 検証。
+// v1.12.0 (codex 3rd s2 / D2 反映): server の sanitizeFreeText は現在 strict reject
+// 型(v1.11.x までの「削除整形」から v1.12.0 で挙動変更)= wrapper の本関数と同じ
+// 契約。UI 側は事前削除型(ユーザー入力ミスを優しく整形)。
+// 検査: 文字列 / 長さ 1〜MAX_FREE_TEXT_LEN / C0 + DEL + C1 制御文字を含まない /
+//      trim 後 length>0(空白のみ拒否)。
+// v1.12.0 (codex 3rd W002 修正): C1 制御文字(\x80-\x9F)も server と統一して拒否。
+const MAX_FREE_TEXT_LEN = 2000
+const CONTROL_CHARS_RE = /[\x00-\x1F\x7F\x80-\x9F]/
+function validateFreeText(text) {
+  if (typeof text !== 'string') return null
+  if (text.length === 0 || text.length > MAX_FREE_TEXT_LEN) return null
+  if (CONTROL_CHARS_RE.test(text)) return null
+  if (text.trim().length === 0) return null
+  return text
+}
+
+// v1.12.0 注入タイミング定数。Claude TUI のテキスト入力欄が値を受け取れる
+// ペース。MODE_TRANSITION_MS は「数字キーで Type something モードへ切替 →
+// 入力欄表示完了」までの待ち。CHAR_INJECT_MS_SLOW は遷移直後のウォームアップ
+// 用(入力欄バッファが安定するまで)、CHAR_INJECT_MS_FAST は定常時。
+const MODE_TRANSITION_MS = 200
+const CHAR_INJECT_MS_SLOW = 30
+const CHAR_INJECT_MS_FAST = 10
+const CHAR_INJECT_WARMUP = 30 // 最初の N 文字を SLOW、以後 FAST
+
+// v1.12.0: フリーテキストを PTY に「1 文字ずつ + 遅延」で再生する。
+// 1. 該当数字キー(Type something など)を注入して Claude TUI をテキスト入力モードへ
+// 2. モード遷移完了を待つため sleep MODE_TRANSITION_MS
+// 3. text を 1 文字ずつ term.write、最初 CHAR_INJECT_WARMUP 文字は SLOW、以後 FAST
+// 4. 最後に Enter で確定
+// 200 文字テキストの場合: 30*30 + 170*10 = 2.6 秒。固定 30ms (6 秒) より速い。
+async function replayFreeText(key, text) {
+  tabReplayInProgress = true
+  try {
+    term.write(key)
+    await sleep(MODE_TRANSITION_MS)
+    // for-of は Unicode code point ベース(サロゲートペアの絵文字も 1 文字扱い)
+    let i = 0
+    for (const ch of text) {
+      term.write(ch)
+      await sleep(i < CHAR_INJECT_WARMUP ? CHAR_INJECT_MS_SLOW : CHAR_INJECT_MS_FAST)
+      i++
+    }
+    term.write('\r')
+    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
 }
 
 // ダイアログが画面から消えた（= β 応答があった）と判定する処理
