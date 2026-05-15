@@ -631,20 +631,39 @@ function isTabbedDialog(buf) {
 }
 
 // 複合質問の回答配列バリデータ。
-// answers は数字文字列の配列で、長さは tabs.length と一致、各要素は
-// 該当 tab の options 範囲内である必要がある。
-// 安全に再生できる場合のみ正規化済みの配列を返す。違反は null。
+// answers は次の要素を含む配列(長さは tabs.length と一致):
+//   - 文字列 "1"〜"9"(=数字キーのみ送信、Type something 以外のオプション)
+//   - { num: "1"〜"9", text?: string }(=text あれば「数字キー → モード遷移
+//     待ち → 1 文字ずつ → Enter」で TUI に Type something を注入)
+// 後方互換: v1.11.x 時点の「string 配列」呼び出しもそのまま受容する。
+// 戻り値は常に { num, text? } 形式に正規化された配列(replayMultiAnswers の
+// 単一処理パスに揃えるため)。違反は null。
 function validateMultiAnswer(answers, tabs) {
   if (!Array.isArray(answers) || !Array.isArray(tabs)) return null
   if (answers.length !== tabs.length) return null
   if (tabs.length === 0 || tabs.length > 9) return null
   const out = []
   for (let i = 0; i < answers.length; i++) {
-    const a = String(answers[i] == null ? '' : answers[i]).trim()
-    if (!/^[1-9]$/.test(a)) return null
+    const item = answers[i]
+    let num, rawText
+    if (typeof item === 'string') {
+      num = item.trim()
+    } else if (item && typeof item === 'object' && !Array.isArray(item)) {
+      num = String(item.num == null ? '' : item.num).trim()
+      if (item.text != null) rawText = item.text
+    } else {
+      return null
+    }
+    if (!/^[1-9]$/.test(num)) return null
     if (!tabs[i] || !Array.isArray(tabs[i].options)) return null
-    if (parseInt(a, 10) - 1 >= tabs[i].options.length) return null
-    out.push(a)
+    if (parseInt(num, 10) - 1 >= tabs[i].options.length) return null
+    if (rawText !== undefined) {
+      const safeText = validateFreeText(rawText)
+      if (!safeText) return null
+      out.push({ num, text: safeText })
+    } else {
+      out.push({ num })
+    }
   }
   return out
 }
@@ -796,21 +815,33 @@ async function sweepTabs() {
 }
 
 // 複合質問の応答キー列を PTY に再生する。
-// answers は validateMultiAnswer で検証済みの数字文字列配列。
+// answers は validateMultiAnswer 通過済の { num, text? } 配列。
+//   - text なし: 数字キー押下で「選択肢選択 + 自動で次のタブへ移動」
+//     (実機確認済 2026-05-14)
+//   - text あり: 数字キー(Type something モードへ遷移)→ MODE_TRANSITION_MS
+//     待ち → 1 文字ずつ → Enter → TUI が自動で次タブへ遷移
+//     (実機確認済 2026-05-15)
+// 最後のタブ回答完了で自動的に Submit 確認画面(「Review your answers」)
+// へ遷移するので '1\r' で確定。
 async function replayMultiAnswers(answers) {
   tabReplayInProgress = true
   try {
-    // AskUserQuestion-Multi のタブは、数字キーを押すと「選択肢を選択 + 自動で
-    // 次のタブへ移動」する(実機確認済 2026-05-14: 一番左のタブで 2 を押すと
-    // 2 番目のタブへ移動)。そのため Tab は挟まない。挟むと 1 回答ごとに
-    // 数字(1 タブ)+ Tab(1 タブ)で 2 タブ進み、タブが 1 つおきに飛ばされる。
     for (let i = 0; i < answers.length; i++) {
-      term.write(answers[i]) // 数字 1 文字
+      const a = answers[i]
+      term.write(a.num) // 数字 1 文字
+      if (a.text != null) {
+        await sleep(MODE_TRANSITION_MS)
+        let j = 0
+        for (const ch of a.text) {
+          term.write(ch)
+          await sleep(j < CHAR_INJECT_WARMUP ? CHAR_INJECT_MS_SLOW : CHAR_INJECT_MS_FAST)
+          j++
+        }
+        term.write('\r')
+      }
+      // Enter 後 / 数字キー後ともに次タブの描画安定を待つ
       await sleep(MULTI_TAB_STEP_MS)
     }
-    // 最後のタブを回答すると自動で Submit タブ(「Review your answers」+
-    // 「❯ 1. Submit answers / 2. Cancel」の確認画面)へ遷移する。
-    // '1'(Submit answers)+ Enter で確定。
     await sleep(MULTI_SUBMIT_WAIT_MS)
     term.write('1\r')
     // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
@@ -990,7 +1021,11 @@ async function pollForResponse(id) {
         )
       } else {
         await replayMultiAnswers(validated)
-        wlog(`injected multi answers ${JSON.stringify(validated)} for dialog ${id}`)
+        // text 内容はログに出さず、長さのみ記録(defense in depth)
+        const summary = validated.map((a) =>
+          a.text != null ? { num: a.num, text_len: a.text.length } : { num: a.num }
+        )
+        wlog(`injected multi answers ${JSON.stringify(summary)} for dialog ${id}`)
       }
       return
     }

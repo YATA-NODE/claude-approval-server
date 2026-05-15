@@ -356,6 +356,7 @@ app.post('/resolve/:id', authenticate, (req, res) => {
 
   if (hasAnswers) {
     // 複合質問: tabs を持つ item でしか受理しない、長さ一致と数字 1〜9 を厳格チェック
+    // 各要素は文字列(数字のみ) か { num, text? }(Type something 入力済み)
     if (!Array.isArray(item.tabs)) {
       return res.status(400).json({ error: 'answers is only allowed for tabbed items' })
     }
@@ -367,19 +368,40 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     }
     const norm = []
     for (let i = 0; i < answers.length; i++) {
-      const a = String(answers[i] == null ? '' : answers[i]).trim()
-      if (!/^[1-9]$/.test(a)) {
-        return res.status(400).json({ error: `answers[${i}] must be a digit 1-9` })
+      const item_i = answers[i]
+      let num, rawText
+      if (typeof item_i === 'string') {
+        num = item_i.trim()
+      } else if (item_i && typeof item_i === 'object' && !Array.isArray(item_i)) {
+        num = String(item_i.num == null ? '' : item_i.num).trim()
+        if (item_i.text != null) rawText = item_i.text
+      } else {
+        return res
+          .status(400)
+          .json({ error: `answers[${i}] must be string or {num,text}` })
       }
-      const idx = parseInt(a, 10) - 1
+      if (!/^[1-9]$/.test(num)) {
+        return res.status(400).json({ error: `answers[${i}].num must be a digit 1-9` })
+      }
+      const idx = parseInt(num, 10) - 1
       if (idx >= item.tabs[i].options.length) {
         return res.status(400).json({ error: `answers[${i}] out of range` })
       }
-      norm.push(a)
+      if (rawText !== undefined) {
+        const safeAtText = sanitizeFreeText(rawText)
+        if (safeAtText === null) {
+          return res.status(400).json({
+            error: `answers[${i}].text must be a non-empty string under MAX_FREE_TEXT_LEN, control characters not allowed`,
+          })
+        }
+        norm.push({ num, text: safeAtText })
+      } else {
+        norm.push(num)
+      }
     }
     safeAnswers = norm
-    // 互換のため answer にも要約を残す
-    safeAnswer = norm.join(',')
+    // 互換のため answer にも要約を残す(text 内容は含めず num のみ)
+    safeAnswer = norm.map((a) => (typeof a === 'string' ? a : a.num)).join(',')
   } else {
     if (typeof answer !== 'string') {
       return res.status(400).json({ error: 'answer must be a string' })
@@ -399,8 +421,14 @@ app.post('/resolve/:id', authenticate, (req, res) => {
   item.text = safeText
   item.resolvedBy = safeResolvedBy
   item.resolvedAt = new Date().toISOString()
+  // ログには text 本文を出さない(defense in depth、長さのみ)
+  const logSafeAnswers = safeAnswers
+    ? safeAnswers.map((a) =>
+        typeof a === 'string' ? a : { num: a.num, text_len: a.text.length }
+      )
+    : null
   console.log(
-    `[RESOLVED] ${item.id}: ${safeAnswers ? `answers=${JSON.stringify(safeAnswers)}` : `answer=${item.answer}`} (by ${item.resolvedBy || 'unknown'})`
+    `[RESOLVED] ${item.id}: ${logSafeAnswers ? `answers=${JSON.stringify(logSafeAnswers)}` : `answer=${item.answer}`} (by ${item.resolvedBy || 'unknown'})`
   )
 
   // long-poll 中の /status/:id を即座に返す

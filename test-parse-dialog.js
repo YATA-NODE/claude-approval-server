@@ -350,6 +350,7 @@ console.log('\n[9] isTabbedDialog: タブ式 UI 検出')
 
 // -------------------------------------------------------
 // 10. validateMultiAnswer: 複合質問の回答配列検証
+// v1.12.0: 戻り値は {num, text?} 配列に正規化。後方互換で string 要素も受容。
 // -------------------------------------------------------
 console.log('\n[10] validateMultiAnswer')
 {
@@ -358,13 +359,67 @@ console.log('\n[10] validateMultiAnswer')
     { prompt: 'q2', options: ['x', 'y'] },
     { prompt: 'q3', options: ['p', 'q', 'r', 's'] },
   ]
-  assertEq('正常 ["1","2","3"]', validateMultiAnswer(['1', '2', '3'], tabs), ['1', '2', '3'])
+  assertEq(
+    '正常 ["1","2","3"](string 入力 → {num} 出力)',
+    validateMultiAnswer(['1', '2', '3'], tabs),
+    [{ num: '1' }, { num: '2' }, { num: '3' }]
+  )
   assertEq('長さ不一致 → null', validateMultiAnswer(['1', '2'], tabs), null)
   assertEq('範囲外 → null', validateMultiAnswer(['1', '3', '1'], tabs), null) // q2 は 1〜2 のみ
   assertEq('数字以外 → null', validateMultiAnswer(['1', 'x', '1'], tabs), null)
   assertEq('空配列 + 空 tabs → null', validateMultiAnswer([], []), null)
   assertEq('null tabs → null', validateMultiAnswer(['1'], null), null)
   assertEq('9 件超 → null', validateMultiAnswer(['1', '1', '1', '1', '1', '1', '1', '1', '1', '1'], new Array(10).fill({ options: ['a'] })), null)
+
+  // v1.12.0: {num, text?} オブジェクト入力対応
+  assertEq(
+    '{num, text} 入力 → 正規化',
+    validateMultiAnswer([{ num: '1', text: 'hello' }, '2', '3'], tabs),
+    [{ num: '1', text: 'hello' }, { num: '2' }, { num: '3' }]
+  )
+  assertEq(
+    'string と {num,text} 混在',
+    validateMultiAnswer(['1', { num: '2', text: 'foo' }, { num: '3' }], tabs),
+    [{ num: '1' }, { num: '2', text: 'foo' }, { num: '3' }]
+  )
+  assertEq(
+    '全 text 入り',
+    validateMultiAnswer(
+      [{ num: '1', text: 'a' }, { num: '2', text: 'b' }, { num: '3', text: 'c' }],
+      tabs
+    ),
+    [{ num: '1', text: 'a' }, { num: '2', text: 'b' }, { num: '3', text: 'c' }]
+  )
+  assertEq(
+    'text に制御文字 → null',
+    validateMultiAnswer([{ num: '1', text: 'a\nb' }, '2', '3'], tabs),
+    null
+  )
+  assertEq(
+    'text に ESC → null',
+    validateMultiAnswer([{ num: '1', text: 'a\x1bb' }, '2', '3'], tabs),
+    null
+  )
+  assertEq(
+    'text が空文字 → null',
+    validateMultiAnswer([{ num: '1', text: '' }, '2', '3'], tabs),
+    null
+  )
+  assertEq(
+    'object でも num 範囲外 → null',
+    validateMultiAnswer([{ num: '9', text: 'a' }, '2', '3'], tabs),
+    null
+  )
+  assertEq(
+    '配列要素が配列 → null',
+    validateMultiAnswer([['1'], '2', '3'], tabs),
+    null
+  )
+  assertEq(
+    '配列要素が数値 → null',
+    validateMultiAnswer([1, '2', '3'], tabs),
+    null
+  )
 }
 
 // -------------------------------------------------------
