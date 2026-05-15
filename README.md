@@ -17,6 +17,11 @@ PTY ラッパーが Claude Code の入出力を仲介し、ダイアログが出
 - **CLI 作業中に離席しても作業を継続できる**: 承認だけスマホ・別 PC から人手で応答できるため、`PreToolUse` フックに自動承認ロジックを書く必要がありません
 - **既存の hooks と非干渉**: PTY の入出力を観察するだけで Claude Code 内部には介入しないため、`PreToolUse` 等の自前 hooks がある環境にもそのまま追加できます
 - **複数プロジェクトを 1 画面に集約**: `[projectName][toolName]` 形式で識別され、並行プロジェクトの依頼が同じスマホ画面に届きます
+- **Yes/No 系の承認だけでなく対話的選択にも対応**(v1.10+):
+  - **AskUserQuestion**: Claude Code が選択肢を提示するダイアログ(v1.10+)
+  - **複合質問(Multi)**: 複数質問を 1 ダイアログにまとめたタブ式 AskUserQuestion(v1.11+)
+  - **Type something のテキスト送信**(v1.12+): スマホからフリーテキストを Claude TUI に注入できる。単一質問・複合質問の両方で対応
+  - **ダイアログのキャンセル**(v1.12+): スマホから Esc 相当の操作でダイアログを破棄して通常チャットに戻る
 
 ### hooks 方式との違い
 
@@ -243,15 +248,29 @@ doskey claude=node C:\Users\username\claude-approval-server\claude-wrapper.js $*
 - **トークン認証**: 全 API で `x-secret-token` ヘッダー必須。`crypto.timingSafeEqual` でタイミング攻撃に耐性あり
 - **レート制限**: 認証失敗が 60 秒あたり 10 回を超えた IP は 10 分間ブロック
 - **入力サニタイズ**: `description` は 500 文字、`options` は 8 件 × 100 文字まで。余剰は切り詰め
-- **注入ホワイトリスト**: ラッパーが PTY に書き込むのは、承認パネル側 answer が `1` / `2` / `3` または `options` の完全一致だった場合のみ。任意キー注入を防止
-- **設定ファイル**: `approval-config.json` は `.gitignore` 済み。リポジトリにトークンを漏らしません
+- **注入ホワイトリスト**: PTY に書き込まれるのは以下のいずれかのみ。任意キー注入を構造的に防止
+  - 数字 `1`〜`9`(選択肢番号)
+  - `options` の完全一致文字列
+  - `Type something` 経路の text(制御文字 C0+DEL+C1 を 3 層 reject、最大 2000 文字)
+  - cancel 経路の `\x1b`(Esc キー、wrapper 内部生成のみ)
+- **option 種別検証**(v1.12.0+): text 添付は `Type something` option を選択した場合のみ許可。通常選択肢への text 添付は server / wrapper 両方で 400 reject(defense in depth)
+- **`Chat about this` 完全防御**(v1.12.0+): 遠隔不能仕様(数字キーで選べず、選ぶとダイアログ全体を抜けて通常チャットへ移行)のため、UI から除外 + サーバで 4 経路全て reject(options[idx] / answer 数字指定 / answer 文字列完全一致 / Multi `{num,text}`)。代替として「キャンセル」ボタンを提供
+- **静的配信の絞り込み**(v1.12.0+): 旧版で `express.static(__dirname)` がプロジェクトルート全ファイルを未認証配信していた問題を解消。`/` での `approval-ui.html` 配信のみ許可し、`approval-config.json` 等への直接アクセスは 404
+- **ログ非露出**: フリーテキストの本文は server コンソール / wrapper wlog / UI 履歴のいずれにも残さず、長さのみ記録
+- **設定ファイル**: `approval-config.json` は `.gitignore` 済み + 上記の通り配信もされません
 - **ngrok URL 漏洩対策**: ngrok URL は毎セッション変わります。使用後はトンネルを閉じてください
+
+> ⚠️ **権限拡張の注記**(v1.12.0+): 上記の防御層により注入経路は厳格にホワイトリスト化されていますが、本ツールの認証トークン(`approval-config.json` 内の値)を保持している人は **`Type something` 経路を通じて Claude TUI に任意テキストを送信できます**。トークンの取り扱い(共有しない / セッション後の `approval-config.json` 削除)に注意してください。
 
 ## スマートフォン UI の機能
 
 - 承認待ちキューの一覧表示（手動取得）
 - 個別・一括の承認／拒否
-- 履歴表示（直近 20 件、承認元が `PC` / `スマホ` / `CLI` で識別可能）
+- **AskUserQuestion 対応**(v1.10+): 選択肢ダイアログを通常の Yes/No 系と区別して表示
+- **複合質問のタブ式承認**(v1.11+): 1 ダイアログにまとめられた複数質問を各タブごとに回答 → 「すべて送信」で一括反映
+- **テキスト入力モーダル**(v1.12+): `Type something` を選ぶと textarea モーダルが開き、スマホからフリーテキストを送信。単一質問・複合質問の両方で対応(複合質問は各タブの回答揃い次第「すべて送信」で一括反映)
+- **キャンセルボタン**(v1.12+): 「すべて送信」横 / 単一質問のボタン群末尾に表示。押下で wrapper が PC TUI に Esc キーを注入してダイアログを破棄
+- 履歴表示（直近 20 件、承認元が `PC` / `スマホ` / `CLI` で識別可能。フリーテキストは本文を残さず長さのみ表示)
 - プロジェクト識別（`[プロジェクト名][ツール名] 引数 — プロンプト` 形式で表示）
 - 日本語 / 英語 切替
 - ダーク / ライト テーマ切替
@@ -348,6 +367,11 @@ Whichever side responds first dismisses the other side automatically.
 - **Keep working in the CLI even when you step away**: a human can answer approvals from a phone or another PC, so you don't need to script auto-approval logic in a `PreToolUse` hook
 - **Coexists with existing hooks**: the wrapper only observes PTY I/O — Claude Code's internals are not touched, so it slots into setups that already have custom `PreToolUse` hooks
 - **One screen for every project**: requests are tagged `[projectName][toolName]` so concurrent projects share the same approval panel
+- **Beyond Yes/No: interactive choice dialogs** (v1.10+):
+  - **AskUserQuestion**: option lists prompted by Claude Code (v1.10+)
+  - **Multi-tab questions**: multiple questions grouped into a single tabbed AskUserQuestion (v1.11+)
+  - **Free-text via "Type something"** (v1.12+): send arbitrary text from the phone into the Claude TUI. Available for both single and multi-tab questions
+  - **Dialog cancellation** (v1.12+): an Esc-equivalent button on the phone dismisses the current dialog and returns the TUI to normal chat
 
 ### vs hooks-based approaches
 
@@ -573,15 +597,29 @@ After the one-time setup:
 - **Token auth**: every API requires the `x-secret-token` header. Compared with `crypto.timingSafeEqual` to resist timing attacks.
 - **Rate limiting**: an IP with 10+ auth failures per 60s is blocked for 10 minutes.
 - **Input sanitization**: `description` is capped at 500 chars, `options` at 8 items × 100 chars.
-- **Injection whitelist**: the wrapper only writes to the PTY when the panel's answer is `1` / `2` / `3` or an exact match of an `options` entry — arbitrary keystrokes cannot be injected.
-- **Config file**: `approval-config.json` is gitignored so the token never leaks into a public repo.
+- **Injection whitelist**: PTY writes are restricted to one of the following — arbitrary keystrokes cannot be injected:
+  - digits `1`–`9` (option number)
+  - exact match of an `options` entry
+  - text via the `Type something` path (C0 + DEL + C1 controls rejected in 3 layers, max 2000 chars)
+  - `\x1b` (Esc) for the cancel path, generated internally by the wrapper
+- **Option-type validation** (v1.12.0+): attached `text` is only accepted when the selected option matches `Type something`. Attaching text to a normal option returns HTTP 400 on both the server and the wrapper (defense in depth).
+- **`Chat about this` blocked across all paths** (v1.12.0+): the built-in `Chat about this` option cannot be selected by a digit key alone and exits the dialog to plain chat when chosen, so it is not remotely controllable. The UI hides it and the server rejects all four entry paths (`options[idx]` / numeric `answer` / exact-match `answer` / multi `{num,text}`). Use the new **Cancel** button as the equivalent action.
+- **Restricted static serving** (v1.12.0+): earlier versions used `express.static(__dirname)`, which exposed every file in the project root (including `approval-config.json`) without authentication. The static middleware has been removed; only `/` serves `approval-ui.html` and other files return 404.
+- **No log leak**: free-text bodies are never written to the server console, wrapper wlog, or UI history — only the length is recorded.
+- **Config file**: `approval-config.json` is gitignored and (as of v1.12.0) no longer served over HTTP.
 - **ngrok URL rotation**: the public URL changes each session. Close the tunnel when you're done.
+
+> ⚠️ **Authorization scope notice** (v1.12.0+): the defense layers above strictly whitelist what reaches the PTY, but anyone holding the auth token (value of `APPROVAL_TOKEN` in `approval-config.json`) **can now send arbitrary text to the Claude TUI via the `Type something` path**. Treat the token accordingly: do not share it, and remove `approval-config.json` once your session is over.
 
 ## Smartphone UI features
 
 - Manual-fetch queue view of pending requests
 - Per-request approve / reject and bulk approve
-- History view (last 20 resolved items, labeled `PC` / `smartphone` / `CLI`)
+- **AskUserQuestion support** (v1.10+): option-choice dialogs are rendered distinctly from plain Yes/No
+- **Multi-tab questions** (v1.11+): each sub-question is answered per tab, then "Submit all" applies them in one go
+- **Free-text modal** (v1.12+): selecting `Type something` opens a textarea modal. Works for both single and multi-tab questions (in the multi case, all tabs must be filled before "Submit all")
+- **Cancel button** (v1.12+): next to "Submit all" (multi) or at the end of the option list (single). Pressing it asks the wrapper to inject an Esc key into the PC TUI to dismiss the dialog
+- History view (last 20 resolved items, labeled `PC` / `smartphone` / `CLI`. Free-text entries record only the length, not the body)
 - Project identification (requests are rendered as `[projectName][toolName] args — prompt`)
 - Japanese / English toggle
 - Dark / light theme toggle
