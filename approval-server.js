@@ -45,18 +45,13 @@ app.set('trust proxy', 'loopback')
 
 app.use(cors())
 app.use(express.json({ limit: '64kb' }))
-// v1.11.2: approval-ui.html / 静的アセットはキャッシュさせない。
-// スマホブラウザ(特に ngrok 経由)が古い UI をキャッシュし続けると、
-// UI 修正が反映されず実機検証がブロックされるため。
-app.use(
-  express.static(__dirname, {
-    etag: false,
-    lastModified: false,
-    setHeaders: (res) => res.set('Cache-Control', 'no-store, must-revalidate'),
-  })
-)
-
-// ルートアクセスで approval-ui.html を返す
+// v1.12.0 (codex B001 修正): 旧 `express.static(__dirname)` を撤去。
+// プロジェクトルート全体を未認証配信していたため、approval-config.json
+// (APPROVAL_TOKEN を含む)が ngrok 経由で取得可能だった(2026-05-15 検証時に
+// HTTP 200 で配信を確認 = token 漏洩リスク)。
+// approval-ui.html は CSS/JS を全 inline で外部アセット参照なし = 個別ルート
+// のみで配信し、それ以外のファイルへの直接アクセスは Express デフォルトの
+// 404 で拒否する設計に変更。
 app.get('/', (req, res) => {
   res.set('Cache-Control', 'no-store, must-revalidate')
   res.sendFile(path.join(__dirname, 'approval-ui.html'))
@@ -94,6 +89,12 @@ resolveEvents.setMaxListeners(100)
 
 // I1: description の最大長（ngrok 経由で機微情報が長大化するのを抑制）
 const MAX_DESC_LEN = 500
+// v1.12.0 フリーテキスト送信機能(Type something / Chat about this 経路)用。
+// 制御文字を除いた上で 2000 文字を上限とする。Claude TUI のテキスト入力欄の
+// 想定ユースケース(中規模メッセージ)を覆う長さで設定。
+// ※ claude-wrapper.js MAX_FREE_TEXT_LEN / approval-ui.html textarea maxlength
+//   と同期する(3 箇所、変更時は同時更新)。
+const MAX_FREE_TEXT_LEN = 2000
 
 // I2: レート制限（同一 IP の 401 連発を 10 分ブロック）
 const failCounter = new Map() // ip -> { count, resetAt, blockedUntil }
@@ -174,6 +175,50 @@ function sanitizeOptions(arr) {
     .map((o) => clipString(o, 200))
 }
 
+// v1.12.0 フリーテキスト送信(Type something)用の入力検証。
+// v1.12.0 (D2/W001 修正): エラー文と実装の不整合(silent 削除 vs "not allowed")
+// を解消するため、削除型 → strict reject 型へ変更。UI 側で先に制御文字を削除して
+// 送るので通常ケースで影響なし。wrapper validateFreeText と一貫した挙動になり、
+// defense in depth は「UI 削除 → server reject → wrapper reject」の 3 段化。
+// 検査: 文字列 / 長さ 1〜MAX_FREE_TEXT_LEN / 制御文字を含まない /
+//      trim 後 length>0(空白のみ拒否、suggestion s2 対応)。
+// 違反は null。通過したらそのままの文字列(変更しない)を返す。
+// v1.12.0 (codex W3 修正): C0(\x00-\x1F)+ DEL(\x7F)+ C1(\x80-\x9F)を統一拒否。
+// C1 は UTF-8 decode 後の string で単独出現するケースは限定的だが、端末/アプリ
+// 解釈差を排除して defense in depth を完全化する。
+const CONTROL_CHAR_TEST_RE = /[\x00-\x1F\x7F\x80-\x9F]/
+function sanitizeFreeText(s) {
+  if (typeof s !== 'string') return null
+  if (s.length === 0 || s.length > MAX_FREE_TEXT_LEN) return null
+  if (CONTROL_CHAR_TEST_RE.test(s)) return null
+  if (s.trim().length === 0) return null
+  return s
+}
+
+// v1.12.0: Chat about this は遠隔不能(数字キー単独で選べず、選んでもダイアログ
+// 全体を抜ける TUI 仕様)。サーバ側で answer / answers が指す option がこのパターン
+// に一致する場合は 400 reject(旧クライアントからの不正リクエスト防御)。
+const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
+// v1.12.0 (D1, codex B001/B002 修正): text 添付は Type something 系 option 限定。
+// approval-ui.html / claude-wrapper.js の同名定数と完全同期。
+// v1.12.0 (codex B002 修正): 前方一致だと "Type something custom" のような通常
+// 選択肢を誤マッチして text 注入を許してしまう。末尾アンカー $ + period 任意で
+// Claude TUI 組み込みの "Type something" / "Type something." だけに限定。
+const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
+
+// v1.12.0 (D1): answer 文字列(数字 or 完全一致 option 文字列)から該当 option を解決。
+// codex B001-B003 の防御: API 直叩きで数字指定により option 種別チェックを迂回されない
+// よう、サーバ側で必ず options 配列に照合する。
+function resolveOption(opts, ans) {
+  if (!Array.isArray(opts) || typeof ans !== 'string') return null
+  const trimmed = ans.trim()
+  if (/^[1-9]$/.test(trimmed)) {
+    const idx = parseInt(trimmed, 10) - 1
+    return idx < opts.length ? opts[idx] : null
+  }
+  return opts.includes(trimmed) ? trimmed : null
+}
+
 app.post('/request', authenticate, (req, res) => {
   const { description, options, tabs } = req.body
   if (!description || typeof description !== 'string') {
@@ -224,6 +269,7 @@ app.post('/request', authenticate, (req, res) => {
     status: 'pending', // pending | resolved
     answer: null,
     answers: null, // 複合質問の回答配列(null または string[])
+    text: null, // v1.12.0: フリーテキスト送信(Type something / Chat about this 経路)
     resolvedBy: null, // 'pc' | 'smartphone' | 'cli'
     createdAt: new Date().toISOString(),
     resolvedAt: null,
@@ -248,7 +294,9 @@ app.get('/status/:id', authenticate, (req, res) => {
     id: item.id,
     status: item.status,
     answer: item.answer,
-    answers: item.answers, // 複合質問の回答配列(null または string[])
+    answers: item.answers, // 複合質問の回答配列(null または (string|{num,text})[])
+    text: item.text, // v1.12.0: フリーテキスト(null またはサニタイズ済 string)
+    action: item.action || null, // v1.12.0: 'cancel' または null
   })
 
   const wait = Math.min(Math.max(parseInt(req.query.wait) || 0, 0), 60)
@@ -293,10 +341,24 @@ app.get('/queue', authenticate, (req, res) => {
  * Body: { action: "approved" | "rejected" }
  */
 app.post('/resolve/:id', authenticate, (req, res) => {
-  const { answer, answers, resolvedBy } = req.body
+  const { answer, answers, text, action, resolvedBy } = req.body
   const hasAnswers = Array.isArray(answers)
-  if (!answer && !hasAnswers) {
+  const hasText = text != null
+  const isCancel = action === 'cancel'
+  if (!isCancel && !answer && !hasAnswers) {
     return res.status(400).json({ error: 'answer or answers is required' })
+  }
+  // v1.12.0 (D4 改善 + codex 3rd s1): action='cancel' と answer/answers/text の
+  // 同時送信を排他化。truthy 判定だと answer:'' が抜けるので property presence で判定。
+  if (isCancel) {
+    const hasAny = ['answer', 'answers', 'text'].some((k) =>
+      Object.prototype.hasOwnProperty.call(req.body, k)
+    )
+    if (hasAny) {
+      return res.status(400).json({
+        error: 'action=cancel cannot be combined with answer / answers / text',
+      })
+    }
   }
 
   const item = queue.find((q) => q.id === req.params.id)
@@ -305,14 +367,47 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     return res.status(409).json({ error: 'Already resolved' })
   }
 
+  // v1.12.0 (D3/suggestion): resolvedBy 不正値は null 丸めではなく 400 reject。
+  // 未指定(null/undefined)は許可(後方互換)、指定があって不正値のみ reject。
   const allowedResolvedBy = ['pc', 'smartphone', 'cli']
+  if (resolvedBy != null && !allowedResolvedBy.includes(resolvedBy)) {
+    return res.status(400).json({
+      error: `invalid resolvedBy "${resolvedBy}", must be one of ${allowedResolvedBy.join('|')}`,
+    })
+  }
   const safeResolvedBy = allowedResolvedBy.includes(resolvedBy) ? resolvedBy : null
 
   let safeAnswer = null
   let safeAnswers = null
+  let safeText = null
+
+  // v1.12.0: フリーテキスト送信。Type something 経路でスマホからテキスト入力を
+  // 受信した場合、サニタイズして wrapper に渡す。
+  // tabs を持つ複合 dialog のフリーテキストは answers[i].text 経由(下の Multi 経路)。
+  // D1 (codex B001 修正): text は Type something option 選択時のみ許可。通常選択肢
+  // に text を添付して送る経路を server 側で塞ぐ。
+  if (hasText) {
+    if (Array.isArray(item.tabs)) {
+      return res.status(400).json({ error: 'text is not allowed for tabbed items (use answers[i].text)' })
+    }
+    const selectedOpt = resolveOption(item.options, answer)
+    if (!selectedOpt || !FREE_TEXT_OPTION_RE.test(selectedOpt)) {
+      return res.status(400).json({
+        error: 'text is only allowed when the selected option matches "Type something"',
+      })
+    }
+    safeText = sanitizeFreeText(text)
+    if (safeText === null) {
+      return res.status(400).json({
+        error:
+          'text must be a non-empty string under MAX_FREE_TEXT_LEN, control characters not allowed',
+      })
+    }
+  }
 
   if (hasAnswers) {
     // 複合質問: tabs を持つ item でしか受理しない、長さ一致と数字 1〜9 を厳格チェック
+    // 各要素は文字列(数字のみ) か { num, text? }(Type something 入力済み)
     if (!Array.isArray(item.tabs)) {
       return res.status(400).json({ error: 'answers is only allowed for tabbed items' })
     }
@@ -324,19 +419,59 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     }
     const norm = []
     for (let i = 0; i < answers.length; i++) {
-      const a = String(answers[i] == null ? '' : answers[i]).trim()
-      if (!/^[1-9]$/.test(a)) {
-        return res.status(400).json({ error: `answers[${i}] must be a digit 1-9` })
+      const item_i = answers[i]
+      let num, rawText
+      if (typeof item_i === 'string') {
+        num = item_i.trim()
+      } else if (item_i && typeof item_i === 'object' && !Array.isArray(item_i)) {
+        num = String(item_i.num == null ? '' : item_i.num).trim()
+        if (item_i.text != null) rawText = item_i.text
+      } else {
+        return res
+          .status(400)
+          .json({ error: `answers[${i}] must be string or {num,text}` })
       }
-      const idx = parseInt(a, 10) - 1
+      if (!/^[1-9]$/.test(num)) {
+        return res.status(400).json({ error: `answers[${i}].num must be a digit 1-9` })
+      }
+      const idx = parseInt(num, 10) - 1
       if (idx >= item.tabs[i].options.length) {
         return res.status(400).json({ error: `answers[${i}] out of range` })
       }
-      norm.push(a)
+      const selectedOpt = item.tabs[i].options[idx]
+      // v1.12.0: Chat about this オプションを指す回答は遠隔不能なので reject
+      if (CHAT_ABOUT_RE.test(selectedOpt)) {
+        return res.status(400).json({
+          error: `answers[${i}] points to "Chat about this" which is not remote-controllable`,
+        })
+      }
+      if (rawText !== undefined) {
+        // D1 (codex B002 修正): text 添付は Type something option 限定。
+        // 通常選択肢に text を添付すると、wrapper が数字キー押下後にテキスト本文を
+        // 注入し、次タブや Submit 画面に流れ込む脆弱性を防ぐ。
+        if (!FREE_TEXT_OPTION_RE.test(selectedOpt)) {
+          return res.status(400).json({
+            error: `answers[${i}].text is only allowed when the selected option matches "Type something"`,
+          })
+        }
+        const safeAtText = sanitizeFreeText(rawText)
+        if (safeAtText === null) {
+          return res.status(400).json({
+            error: `answers[${i}].text must be a non-empty string under MAX_FREE_TEXT_LEN, control characters not allowed`,
+          })
+        }
+        norm.push({ num, text: safeAtText })
+      } else {
+        norm.push(num)
+      }
     }
     safeAnswers = norm
-    // 互換のため answer にも要約を残す
-    safeAnswer = norm.join(',')
+    // 互換のため answer にも要約を残す(text 内容は含めず num のみ)
+    safeAnswer = norm.map((a) => (typeof a === 'string' ? a : a.num)).join(',')
+  } else if (isCancel) {
+    // v1.12.0: ダイアログキャンセル(Esc 相当)。answer/answers は不要。
+    // wrapper が cancel を検知して Esc キーを TUI に送る。
+    safeAnswer = 'cancelled-by-remote'
   } else {
     if (typeof answer !== 'string') {
       return res.status(400).json({ error: 'answer must be a string' })
@@ -347,16 +482,72 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     if (Array.isArray(item.tabs) && answer !== 'resolved-by-cli') {
       return res.status(400).json({ error: 'tabbed items require answers array' })
     }
+    // v1.12.0: Chat about this 直接指定も遠隔不能なので reject
+    if (CHAT_ABOUT_RE.test(answer)) {
+      return res.status(400).json({
+        error: 'Chat about this is not remote-controllable (use cancel instead)',
+      })
+    }
+    // v1.12.0 (codex W2/W3 修正): answer に制御文字が含まれていたら reject。
+    // 通常 wrapper 側で再生不能だが、サーバログ([RESOLVED] answer=...)に
+    // 制御文字が混入すると端末崩れ / ログ汚染になる。
+    if (CONTROL_CHAR_TEST_RE.test(answer)) {
+      return res.status(400).json({
+        error: 'answer must not contain control characters',
+      })
+    }
+    // v1.12.0 (codex 3rd W001 修正): 'resolved-by-cli' は wrapper 内部通知用 sentinel。
+    // リモートクライアント(resolvedBy='pc' or 'smartphone')から送られた場合は
+    // server 状態と TUI 状態の乖離を生むので 400 reject。CLI 経由(resolvedBy='cli'
+    // または明示なし)からのみ許可。
+    if (answer === 'resolved-by-cli' && safeResolvedBy && safeResolvedBy !== 'cli') {
+      return res.status(400).json({
+        error: 'resolved-by-cli is reserved for CLI internal use',
+      })
+    }
+    // single dialog の answer は item.options に必ず一致する必要。
+    // 旧設計は文字列をそのまま resolved にできたため、認証済み攻撃者が任意
+    // answer を送信して承認フローを妨害できた。'resolved-by-cli' は CLI 通知
+    // の内部 sentinel として例外的に許可。
+    if (!Array.isArray(item.tabs) && answer !== 'resolved-by-cli') {
+      const resolved = resolveOption(item.options, answer)
+      if (!resolved) {
+        return res.status(400).json({
+          error: `answer "${String(answer).slice(0, 40)}" does not match any option in this dialog`,
+        })
+      }
+      if (CHAT_ABOUT_RE.test(resolved)) {
+        return res.status(400).json({
+          error: 'Chat about this is not remote-controllable (use cancel instead)',
+        })
+      }
+    }
     safeAnswer = answer.length > 100 ? answer.slice(0, 100) : answer
   }
 
   item.status = 'resolved'
   item.answer = safeAnswer
   item.answers = safeAnswers
+  item.text = safeText
+  item.action = isCancel ? 'cancel' : null
   item.resolvedBy = safeResolvedBy
   item.resolvedAt = new Date().toISOString()
+  // ログには text 本文を出さない(defense in depth、長さのみ)
+  const logSafeAnswers = safeAnswers
+    ? safeAnswers.map((a) =>
+        typeof a === 'string' ? a : { num: a.num, text_len: a.text.length }
+      )
+    : null
+  let logBody
+  if (isCancel) {
+    logBody = 'action=cancel'
+  } else if (logSafeAnswers) {
+    logBody = `answers=${JSON.stringify(logSafeAnswers)}`
+  } else {
+    logBody = `answer=${item.answer}`
+  }
   console.log(
-    `[RESOLVED] ${item.id}: ${safeAnswers ? `answers=${JSON.stringify(safeAnswers)}` : `answer=${item.answer}`} (by ${item.resolvedBy || 'unknown'})`
+    `[RESOLVED] ${item.id}: ${logBody} (by ${item.resolvedBy || 'unknown'})`
   )
 
   // long-poll 中の /status/:id を即座に返す
