@@ -630,6 +630,12 @@ function isTabbedDialog(buf) {
   return boxMarks >= 2 && hasNav
 }
 
+// v1.12.0 (D1): approval-server.js / approval-ui.html の同名定数と完全同期。
+// Defense in depth として wrapper 側にも持つ(サーバ防御を信頼しすぎず、
+// 注入直前の最後の関門で再検証)。
+const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
+const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
+
 // 複合質問の回答配列バリデータ。
 // answers は次の要素を含む配列(長さは tabs.length と一致):
 //   - 文字列 "1"〜"9"(=数字キーのみ送信、Type something 以外のオプション)
@@ -656,8 +662,14 @@ function validateMultiAnswer(answers, tabs) {
     }
     if (!/^[1-9]$/.test(num)) return null
     if (!tabs[i] || !Array.isArray(tabs[i].options)) return null
-    if (parseInt(num, 10) - 1 >= tabs[i].options.length) return null
+    const idx = parseInt(num, 10) - 1
+    if (idx >= tabs[i].options.length) return null
+    const selectedOpt = tabs[i].options[idx]
+    // D1 (codex B002 修正 defense in depth): Chat about this を指す回答は遠隔不能
+    if (CHAT_ABOUT_RE.test(selectedOpt)) return null
     if (rawText !== undefined) {
+      // D1 (codex B002 修正 defense in depth): text 添付は Type something 限定
+      if (!FREE_TEXT_OPTION_RE.test(selectedOpt)) return null
       const safeText = validateFreeText(rawText)
       if (!safeText) return null
       out.push({ num, text: safeText })
@@ -1062,11 +1074,25 @@ async function pollForResponse(id) {
       return
     }
 
+    // D1 (codex B003 修正 defense in depth): key が指す option が Chat about this なら注入拒否
+    const selectedOpt = currentDialog.options[parseInt(key, 10) - 1]
+    if (CHAT_ABOUT_RE.test(selectedOpt)) {
+      wlog(`answer points to "Chat about this" which is not remote-controllable. 注入スキップ。`)
+      return
+    }
+
     // v1.12.0: スマホからフリーテキストが添付されている場合の経路。
     // resp.text を validateFreeText で再検証(defense in depth)し、
     // replayFreeText で「キー → モード遷移待ち → 1 文字ずつ → Enter」で注入。
     // text なしの通常経路は従来通り「数字 + Enter」のみ。
     if (resp.text != null) {
+      // D1 (codex B001 修正 defense in depth): text 添付は Type something option 限定
+      if (!FREE_TEXT_OPTION_RE.test(selectedOpt)) {
+        wlog(
+          `text is attached but selected option "${selectedOpt}" is not "Type something". 注入スキップ。`
+        )
+        return
+      }
       const safeText = validateFreeText(resp.text)
       if (!safeText) {
         wlog(
@@ -1106,18 +1132,20 @@ function validateAnswer(answer, options) {
   return null
 }
 
-// v1.12.0: フリーテキスト送信(Type something / Chat about this 経路)用の
-// defense in depth 検証。サーバ側 sanitizeFreeText は「制御文字を除去して整形」、
-// 本関数は「制御文字が残っていたら HTTP 経路で改竄された可能性として拒否」と
-// 役割が異なる(意図的な strict reject)。共通化はしないこと。
-// 返却値: 検証通過した文字列、または不正時 null。
-// MAX_FREE_TEXT_LEN は approval-server.js / approval-ui.html とも同期 (3 箇所)
+// v1.12.0: フリーテキスト送信(Type something 経路)用の defense in depth 検証。
+// v1.12.0 (codex 3rd s2 / D2 反映): server の sanitizeFreeText は現在 strict reject
+// 型(v1.11.x までの「削除整形」から v1.12.0 で挙動変更)= wrapper の本関数と同じ
+// 契約。UI 側は事前削除型(ユーザー入力ミスを優しく整形)。
+// 検査: 文字列 / 長さ 1〜MAX_FREE_TEXT_LEN / C0 + DEL + C1 制御文字を含まない /
+//      trim 後 length>0(空白のみ拒否)。
+// v1.12.0 (codex 3rd W002 修正): C1 制御文字(\x80-\x9F)も server と統一して拒否。
 const MAX_FREE_TEXT_LEN = 2000
-const CONTROL_CHARS_RE = /[\x00-\x1F\x7F]/
+const CONTROL_CHARS_RE = /[\x00-\x1F\x7F\x80-\x9F]/
 function validateFreeText(text) {
   if (typeof text !== 'string') return null
   if (text.length === 0 || text.length > MAX_FREE_TEXT_LEN) return null
   if (CONTROL_CHARS_RE.test(text)) return null
+  if (text.trim().length === 0) return null
   return text
 }
 

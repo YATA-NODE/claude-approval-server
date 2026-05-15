@@ -754,7 +754,9 @@
           freeTextSend: '送信',
           freeTextCancel: 'キャンセル',
           freeTextEmpty: 'テキストを入力してください',
-          freeTextHistory: (opt, text) => `${opt}: ${text}`,
+          // v1.12.0 (D2/W002): 履歴に本文を残さず長さのみ表示
+          // (スクリーン共有時の漏洩防止、server ログと同じ defense in depth)
+          freeTextHistory: (opt, textLen) => `${opt}(${textLen} 文字)`,
           langToggle: 'EN',
           locale: 'ja-JP',
         },
@@ -807,7 +809,8 @@
           freeTextSend: 'Send',
           freeTextCancel: 'Cancel',
           freeTextEmpty: 'Please enter some text',
-          freeTextHistory: (opt, text) => `${opt}: ${text}`,
+          // v1.12.0 (D2/W002): omit content from history (defense in depth)
+          freeTextHistory: (opt, textLen) => `${opt} (${textLen} chars)`,
           langToggle: '日本語',
           locale: 'en-US',
         },
@@ -1300,11 +1303,11 @@
       // v1.12.0: Claude TUI 組み込みフッタ option(Type something / Chat about this)を検出。
       // これらの option を押すと wrapper 側で自由入力モードへ遷移するので、UI 側で
       // テキスト入力モーダルを出して "answer + text" をサーバへ送る。
-      const FREE_TEXT_OPTION_RE = /^(?:Type\s+something|Chat\s+about\s+this)/i
+      const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
       // v1.12.0: Chat about this は遠隔不能(数字キー単独で選べず、選択するとダイアログ
       // 全体を抜けて通常チャットへ移行する仕様)。UI 側で非表示にし、選びたい場合は
       // 下部の「キャンセル」ボタンで Esc 相当の操作を行う。
-      const CHAT_ABOUT_RE = /^Chat\s+about\s+this/i
+      const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
 
       let activeFreeTextItemId = null
       let activeFreeTextAnswer = null
@@ -1357,7 +1360,8 @@
         const sendBtn = document.getElementById('freetext-send')
         // クライアント側 sanitize: 制御文字 + 改行除去(サーバ側でも同様の sanitize)
         const raw = input.value || ''
-        const clean = raw.replace(/[\x00-\x1F\x7F]/g, '')
+        // v1.12.0 (codex 3rd W002 修正): server / wrapper と統一して C1 (\x80-\x9F) も除去
+        const clean = raw.replace(/[\x00-\x1F\x7F\x80-\x9F]/g, '')
         if (clean.length === 0) {
           err.textContent = t('freeTextEmpty')
           return
@@ -1385,7 +1389,8 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ answer, text: clean, resolvedBy }),
           })
-          pushHistory(getDescription(id), t('freeTextHistory', answer, clean.slice(0, 60)))
+          // v1.12.0 (D2/W002): 履歴に本文を残さず長さのみ
+          pushHistory(getDescription(id), t('freeTextHistory', answer, clean.length))
           closeFreeTextModal()
           selectedId = null
           await fetchQueue()

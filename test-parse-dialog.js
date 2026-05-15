@@ -371,43 +371,41 @@ console.log('\n[10] validateMultiAnswer')
   assertEq('null tabs → null', validateMultiAnswer(['1'], null), null)
   assertEq('9 件超 → null', validateMultiAnswer(['1', '1', '1', '1', '1', '1', '1', '1', '1', '1'], new Array(10).fill({ options: ['a'] })), null)
 
-  // v1.12.0: {num, text?} オブジェクト入力対応
+  // v1.12.0 (D1): {num, text?} オブジェクト入力対応。text 添付は Type something
+  // option 限定。Chat about this を指す回答も reject(codex B002/B003 防御)。
+  const tabsFT = [
+    { prompt: 'q1', options: ['a', 'b', 'c', 'Type something.', 'Chat about this'] },
+    { prompt: 'q2', options: ['x', 'y'] },
+    { prompt: 'q3', options: ['p', 'q', 'r', 's'] },
+  ]
   assertEq(
-    '{num, text} 入力 → 正規化',
-    validateMultiAnswer([{ num: '1', text: 'hello' }, '2', '3'], tabs),
-    [{ num: '1', text: 'hello' }, { num: '2' }, { num: '3' }]
+    '{num=4, text} 入力(Type something 指定)→ 正規化',
+    validateMultiAnswer([{ num: '4', text: 'hello' }, '2', '3'], tabsFT),
+    [{ num: '4', text: 'hello' }, { num: '2' }, { num: '3' }]
   )
   assertEq(
-    'string と {num,text} 混在',
-    validateMultiAnswer(['1', { num: '2', text: 'foo' }, { num: '3' }], tabs),
-    [{ num: '1' }, { num: '2', text: 'foo' }, { num: '3' }]
-  )
-  assertEq(
-    '全 text 入り',
-    validateMultiAnswer(
-      [{ num: '1', text: 'a' }, { num: '2', text: 'b' }, { num: '3', text: 'c' }],
-      tabs
-    ),
-    [{ num: '1', text: 'a' }, { num: '2', text: 'b' }, { num: '3', text: 'c' }]
+    'string と {num,text} 混在(Type something 指定)',
+    validateMultiAnswer(['1', '2', { num: '3' }], tabsFT),
+    [{ num: '1' }, { num: '2' }, { num: '3' }]
   )
   assertEq(
     'text に制御文字 → null',
-    validateMultiAnswer([{ num: '1', text: 'a\nb' }, '2', '3'], tabs),
+    validateMultiAnswer([{ num: '4', text: 'a\nb' }, '2', '3'], tabsFT),
     null
   )
   assertEq(
     'text に ESC → null',
-    validateMultiAnswer([{ num: '1', text: 'a\x1bb' }, '2', '3'], tabs),
+    validateMultiAnswer([{ num: '4', text: 'a\x1bb' }, '2', '3'], tabsFT),
     null
   )
   assertEq(
     'text が空文字 → null',
-    validateMultiAnswer([{ num: '1', text: '' }, '2', '3'], tabs),
+    validateMultiAnswer([{ num: '4', text: '' }, '2', '3'], tabsFT),
     null
   )
   assertEq(
     'object でも num 範囲外 → null',
-    validateMultiAnswer([{ num: '9', text: 'a' }, '2', '3'], tabs),
+    validateMultiAnswer([{ num: '9', text: 'a' }, '2', '3'], tabsFT),
     null
   )
   assertEq(
@@ -418,6 +416,24 @@ console.log('\n[10] validateMultiAnswer')
   assertEq(
     '配列要素が数値 → null',
     validateMultiAnswer([1, '2', '3'], tabs),
+    null
+  )
+
+  // D1 (codex B002 修正): 通常 option に text 添付 → reject
+  assertEq(
+    'num=1(通常 option "a")に text 添付 → null',
+    validateMultiAnswer([{ num: '1', text: 'hello' }, '2', '3'], tabsFT),
+    null
+  )
+  // D1 (codex B002 修正): Chat about this を指す num → reject(text 有無に関わらず)
+  assertEq(
+    'num=5(Chat about this)を指す → null',
+    validateMultiAnswer([{ num: '5' }, '2', '3'], tabsFT),
+    null
+  )
+  assertEq(
+    'num=5(Chat about this)+ text → null',
+    validateMultiAnswer([{ num: '5', text: 'hi' }, '2', '3'], tabsFT),
     null
   )
 }
@@ -763,6 +779,61 @@ console.log('\n[20] validateFreeText: 制御文字 / 長さ / 型チェック')
   for (const [label, input, expected] of cases) {
     assertEq(label, validateFreeText(input), expected)
   }
+}
+
+// -------------------------------------------------------
+// 21. 定数 / 正規表現の 3 ファイル同期(v1.12.0 D3, codex suggestion s1)
+// MAX_FREE_TEXT_LEN / FREE_TEXT_OPTION_RE / CHAT_ABOUT_RE が
+// claude-wrapper.js / approval-server.js / approval-ui.html の 3 ファイルで
+// 一致していることを検証(将来のズレを検出)
+// -------------------------------------------------------
+console.log('\n[21] 定数 / 正規表現の 3 ファイル同期')
+{
+  const path = require('path')
+  const root = __dirname
+  const wrapperSrc = fs.readFileSync(path.join(root, 'claude-wrapper.js'), 'utf-8')
+  const serverSrc = fs.readFileSync(path.join(root, 'approval-server.js'), 'utf-8')
+  const uiSrc = fs.readFileSync(path.join(root, 'approval-ui.html'), 'utf-8')
+
+  // MAX_FREE_TEXT_LEN は const 定義行(= 2000)を抽出
+  const maxLen = (src) => {
+    const m = src.match(/MAX_FREE_TEXT_LEN\s*=\s*(\d+)/)
+    return m ? m[1] : null
+  }
+  assertEq('MAX_FREE_TEXT_LEN (wrapper)', maxLen(wrapperSrc), '2000')
+  assertEq('MAX_FREE_TEXT_LEN (server)', maxLen(serverSrc), '2000')
+  assertEq('MAX_FREE_TEXT_LEN (UI)', maxLen(uiSrc), '2000')
+  // textarea の maxlength 属性も同期
+  const m = uiSrc.match(/maxlength="(\d+)"/)
+  assertEq('UI textarea maxlength も同期', m ? m[1] : null, '2000')
+
+  // 正規表現リテラルを文字列として抽出して比較
+  const reSource = (src, name) => {
+    const re = new RegExp(`${name}\\s*=\\s*/([^/]+)/i`)
+    const m = src.match(re)
+    return m ? m[1] : null
+  }
+  const expectedFT = '^Type\\s+something\\.?$'
+  assertEq('FREE_TEXT_OPTION_RE (wrapper)', reSource(wrapperSrc, 'FREE_TEXT_OPTION_RE'), expectedFT)
+  assertEq('FREE_TEXT_OPTION_RE (server)', reSource(serverSrc, 'FREE_TEXT_OPTION_RE'), expectedFT)
+  assertEq('FREE_TEXT_OPTION_RE (UI)', reSource(uiSrc, 'FREE_TEXT_OPTION_RE'), expectedFT)
+
+  const expectedCA = '^Chat\\s+about\\s+this\\.?$'
+  assertEq('CHAT_ABOUT_RE (wrapper)', reSource(wrapperSrc, 'CHAT_ABOUT_RE'), expectedCA)
+  assertEq('CHAT_ABOUT_RE (server)', reSource(serverSrc, 'CHAT_ABOUT_RE'), expectedCA)
+  assertEq('CHAT_ABOUT_RE (UI)', reSource(uiSrc, 'CHAT_ABOUT_RE'), expectedCA)
+
+  // v1.12.0 (codex 2nd round suggestion s1): 前方一致しない負例。
+  // "Type something custom" のような通常選択肢が誤マッチしないことを保証。
+  const ftRE = /^Type\s+something\.?$/i
+  const caRE = /^Chat\s+about\s+this\.?$/i
+  assertEq('FT 正例 "Type something"', ftRE.test('Type something'), true)
+  assertEq('FT 正例 "Type something."', ftRE.test('Type something.'), true)
+  assertEq('FT 負例 "Type something custom" → false', ftRE.test('Type something custom'), false)
+  assertEq('FT 負例 "Type somethings"(末尾文字)→ false', ftRE.test('Type somethings'), false)
+  assertEq('CA 正例 "Chat about this"', caRE.test('Chat about this'), true)
+  assertEq('CA 正例 "Chat about this."', caRE.test('Chat about this.'), true)
+  assertEq('CA 負例 "Chat about this proposal" → false', caRE.test('Chat about this proposal'), false)
 }
 
 // -------------------------------------------------------
