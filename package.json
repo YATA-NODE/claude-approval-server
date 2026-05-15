@@ -1,6 +1,6 @@
 {
   "name": "claude-approval-server",
-  "version": "1.11.1",
+  "version": "1.11.2",
   "description": "Claude Code の承認ダイアログをスマートフォンから承認・拒否できるツール",
   "main": "approval-server.js",
   "scripts": {
@@ -16,6 +16,7 @@
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
+    "@xterm/headless": "^6.0.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "node-pty": "^1.1.0"

@@ -45,10 +45,20 @@ app.set('trust proxy', 'loopback')
 
 app.use(cors())
 app.use(express.json({ limit: '64kb' }))
-app.use(express.static(__dirname))
+// v1.11.2: approval-ui.html / 静的アセットはキャッシュさせない。
+// スマホブラウザ(特に ngrok 経由)が古い UI をキャッシュし続けると、
+// UI 修正が反映されず実機検証がブロックされるため。
+app.use(
+  express.static(__dirname, {
+    etag: false,
+    lastModified: false,
+    setHeaders: (res) => res.set('Cache-Control', 'no-store, must-revalidate'),
+  })
+)
 
 // ルートアクセスで approval-ui.html を返す
 app.get('/', (req, res) => {
+  res.set('Cache-Control', 'no-store, must-revalidate')
   res.sendFile(path.join(__dirname, 'approval-ui.html'))
 })
 

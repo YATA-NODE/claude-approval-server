@@ -27,6 +27,11 @@
  */
 
 const pty = require('node-pty')
+// v1.11.2: PTY 出力を headless terminal に write して画面バッファを正確に再現する。
+// Claude Code TUI は CSI カーソル移動で in-place 差分再描画するため、ANSI を正規表現で
+// 除去する旧 stripAnsi 方式では描画順序が崩れ、スピナー混在時にダイアログを取りこぼす。
+// 必須依存(純 JS・native build 不要なので install 失敗リスクは低い)。
+const { Terminal } = require('@xterm/headless')
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
@@ -132,6 +137,39 @@ async function preflight() {
 // PTY 起動
 // -------------------------------------------------------
 let term
+// v1.11.2: PTY 出力を流し込む headless terminal。spawnClaude() で生成。
+let headlessTerm = null
+
+// getScreenText が表示領域より上に含めるスクロールバック行数。
+// ダイアログボックス + その上の `● Tool(args)` 行(スクロール退避しうる)を
+// カバーしつつ、過去ダイアログの古い "Esc to cancel" 混入を防ぐ妥協点。
+const SCREEN_SCROLLBACK_LINES = 40
+
+// headless terminal の画面バッファ(表示領域 + 指定行数のスクロールバック)を
+// テキスト化する純粋関数。getScreenText() と test-parse-dialog.js の両方から使う。
+// trimRight=true で行幅パディング(Claude TUI は cols 幅まで空白埋めする)を除去し、
+// \n 区切りにすることで parseDialog の改行アンカーがそのまま効く。
+function screenTextFromBuffer(buffer, rows, scrollbackLines) {
+  const startLine = Math.max(0, buffer.baseY - scrollbackLines)
+  const endLine = buffer.baseY + rows
+  const lines = []
+  for (let y = startLine; y < endLine && y < buffer.length; y++) {
+    const line = buffer.getLine(y)
+    if (line) lines.push(line.translateToString(true))
+  }
+  return lines.join('\n')
+}
+
+// 現在の画面状態をテキスト化して返す。headlessTerm 未生成時は空文字。
+function getScreenText() {
+  if (!headlessTerm) return ''
+  return screenTextFromBuffer(
+    headlessTerm.buffer.active,
+    headlessTerm.rows,
+    SCREEN_SCROLLBACK_LINES
+  )
+}
+
 function spawnClaude() {
   const shell = isWindows ? 'cmd.exe' : '/bin/bash'
   const userArgs = process.argv.slice(2)
@@ -149,6 +187,21 @@ function spawnClaude() {
     env: process.env,
   })
 
+  // v1.11.2: 画面バッファ再現用の headless terminal を pty と同じ cols/rows で生成。
+  // allowProposedApi は buffer API (proposed) アクセスに必須。
+  try {
+    headlessTerm = new Terminal({
+      cols,
+      rows,
+      scrollback: 1000,
+      allowProposedApi: true,
+    })
+  } catch (e) {
+    console.error(`\n❌ @xterm/headless の初期化に失敗しました: ${e.message}`)
+    console.error('   npm install を実行して依存を解決してください。\n')
+    process.exit(1)
+  }
+
   // PTY → 画面 ＋ 検出バッファ
   term.onData((data) => {
     process.stdout.write(data)
@@ -164,8 +217,17 @@ function spawnClaude() {
   process.stdin.on('data', (d) => pipeStdinToTerm(d.toString()))
 
   // リサイズ
+  // v1.11.2: headless terminal も同じ cols/rows に揃える。揃えないとグリッド再現が
+  // 実 TUI とズレて parseDialog の行構造が壊れる。
   process.stdout.on('resize', () => {
-    term.resize(process.stdout.columns || cols, process.stdout.rows || rows)
+    const newCols = process.stdout.columns || cols
+    const newRows = process.stdout.rows || rows
+    term.resize(newCols, newRows)
+    if (headlessTerm) {
+      try {
+        headlessTerm.resize(newCols, newRows)
+      } catch (_) {}
+    }
   })
 
   // 終了
@@ -177,6 +239,11 @@ function spawnClaude() {
     }
     if (logStream) logStream.end()
     if (wrapperLogStream) wrapperLogStream.end()
+    if (headlessTerm) {
+      try {
+        headlessTerm.dispose()
+      } catch (_) {}
+    }
     process.exit(exitCode)
   })
 }
@@ -211,12 +278,12 @@ function wlog(msg) {
 // -------------------------------------------------------
 // ダイアログ検出
 // -------------------------------------------------------
-// 直近 PTY 出力のスライディングウィンドウ（クリーン済み）
-// 800 文字あれば 1 ダイアログ分（~300 文字）+ 周辺コンテキストを十分保持できる。
-// バッファを大きく取りすぎると、ダイアログが画面から消えた後も古い "Esc to cancel" が
-// 残り続けて parseDialog が誤検出し、resolved-by-cli の検知が遅れる。
-let cleanBuf = ''
-const CLEAN_BUF_MAX = 800
+// v1.11.2: 検出は headless terminal の画面バッファ(getScreenText())ベースに移行。
+// 旧 cleanBuf スライディングウィンドウは廃止。
+// DIALOG_SEGMENT_MAX は parseDialog が END_MARKER 手前を「ダイアログ候補領域」と
+// して見る幅。getScreenText() はタブバー + prompt + options + フッタ + その上の
+// tool 行(スクロールバック退避しうる)を含むので、それ全体をカバーする値。
+const DIALOG_SEGMENT_MAX = 2000
 
 // 現在有効なダイアログ（approval-server に登録済み）
 // { id, options, tool, args, prompt, lastSeenAt }
@@ -270,6 +337,38 @@ function dialogShapeMatches(a, b, { exactPrompt = false } = {}) {
   return exactPrompt ? a.prompt === b.prompt : promptSimilar(a.prompt, b.prompt)
 }
 
+// v1.11.2: 解決済みダイアログの抑制機構(旧 `cleanBuf = ''` リセットの代替)。
+// 旧実装は cleanBuf を空にして「古いダイアログ本文を捨てる」ことで、回答済みなのに
+// parseDialog が同じダイアログを再検出するのを防いでいた。
+// headless terminal ベースでは画面が再描画されれば buffer は自然に最新化されるが、
+// 「回答注入直後〜次フレーム描画まで」「ダイアログがスクロールバックに残存」する
+// 一瞬は getScreenText() が解決済みダイアログを返しうる。そこで物理クリアではなく
+// 「解決済み prompt を一定時間 promptSimilar で無視する」論理抑制に置き換える。
+let suppressedPrompt = null
+let suppressedAt = 0
+const SUPPRESS_WINDOW_MS = 3000
+
+// replayMultiAnswers のタイミング値(実機 TUI の再描画速度に依存)
+const MULTI_TAB_STEP_MS = 150 // 数字キー入力 → タブ自動遷移 + 再描画の待ち
+const MULTI_SUBMIT_WAIT_MS = 250 // 最終回答 → Submit 確認画面の描画待ち
+
+function suppressCurrentDialog(prompt) {
+  if (typeof prompt !== 'string' || !prompt) return
+  suppressedPrompt = prompt
+  suppressedAt = Date.now()
+}
+
+// 純粋判定(副作用なし)。期限切れの suppressedPrompt は次の
+// suppressCurrentDialog で上書きされるか、false を返し続けるだけで実害なし。
+function isSuppressed(d) {
+  if (!d || suppressedPrompt === null) return false
+  if (Date.now() - suppressedAt > SUPPRESS_WINDOW_MS) return false
+  return promptSimilar(d.prompt, suppressedPrompt)
+}
+
+// v1.11.2: 本番検出経路は getScreenText()(headless terminal)に移行したため、
+// 本関数は実行時には使われない。test-parse-dialog.js の fixture 整形と後方互換
+// テスト用に定義・export を残している。
 function stripAnsi(s) {
   return s
     // Claude Code v2.1.x はダイアログ内の半角スペースを実文字ではなく
@@ -292,9 +391,18 @@ function stripAnsi(s) {
 }
 
 function onPtyData(chunk) {
-  cleanBuf += stripAnsi(chunk)
-  if (cleanBuf.length > CLEAN_BUF_MAX) cleanBuf = cleanBuf.slice(-CLEAN_BUF_MAX)
-  detectDialog().catch((e) => wlog(`detect error: ${e.message}`))
+  // v1.11.2: headless terminal にそのまま write し、ANSI 解釈はライブラリに任せる。
+  // write のコールバックはバッファ反映後に呼ばれるので、そこで検出を回す
+  // (中途半端な描画状態で parseDialog することがなくなる)。
+  // 画面透過(process.stdout.write)は本関数より前に実行済みなので、検出が失敗
+  // しても TUI 表示には影響しない。
+  try {
+    headlessTerm.write(chunk, () => {
+      detectDialog().catch((e) => wlog(`detect error: ${e.message}`))
+    })
+  } catch (e) {
+    wlog(`headless write error: ${e.message}`)
+  }
 }
 
 // ダイアログ構造パターン (Claude Code v2.1.x 以降):
@@ -326,10 +434,10 @@ function parseDialog(buf) {
   const endIdx = endMatches[endMatches.length - 1].index
 
   // 2. ダイアログ候補領域 (末尾マーカーの直前)
-  // cleanBuf 全体（最大 CLEAN_BUF_MAX 文字）が候補。
+  // END_MARKER の手前 DIALOG_SEGMENT_MAX 文字を候補とする。
   // ダイアログ自体は通常 ~300 文字程度だが、tool 行が画面上で
   // ボックスより少し上に描画されるケースに備えて広めに見る。
-  const segStart = Math.max(0, endIdx - CLEAN_BUF_MAX)
+  const segStart = Math.max(0, endIdx - DIALOG_SEGMENT_MAX)
   const segment = buf.slice(segStart, endIdx)
 
   // 3. 偽陽性除外: アクティブカーソル `❯` + 数字 1〜9 が必須
@@ -538,7 +646,14 @@ function validateMultiAnswer(answers, tabs) {
 
 // テスト用エクスポート (実行時には影響なし)
 if (typeof module !== 'undefined') {
-  module.exports = { parseDialog, stripAnsi, validateAnswer, isTabbedDialog, validateMultiAnswer }
+  module.exports = {
+    parseDialog,
+    stripAnsi,
+    validateAnswer,
+    isTabbedDialog,
+    validateMultiAnswer,
+    screenTextFromBuffer,
+  }
 }
 
 // -------------------------------------------------------
@@ -592,7 +707,7 @@ async function waitTabStable(
   let nullCount = 0
   while (Date.now() - t0 < timeoutMs) {
     await sleep(80)
-    const d = parseDialog(cleanBuf)
+    const d = parseDialog(getScreenText())
     if (!d) {
       nullCount++
       if (nullCount >= 3) return prev
@@ -649,7 +764,7 @@ async function sweepTabs() {
     // 戻し後の再描画が安定するまで待つ
     await waitTabStable(400)
 
-    const first = parseDialog(cleanBuf)
+    const first = parseDialog(getScreenText())
     if (!first) return null
     const tabs = [first]
     for (let i = 0; i < 9; i++) {
@@ -668,11 +783,8 @@ async function sweepTabs() {
     return tabs
   } finally {
     tabSweepInProgress = false
-    // cleanBuf は意図的にクリアしない。
-    // 巡回直後に空にすると registerMultiDialog の POST 完了前後で
-    // 定期 detectDialog (setInterval 400ms) が parseDialog=null を見て
-    // dismissalTimer を仕掛け、PTY 再描画が間に合わずに DISMISSAL_MS 後に
-    // resolveCurrentAsCli へ流れ、スマホ確認前にダイアログが消滅する。
+    // v1.11.2: getScreenText() はステートレス(常に「現在の画面」を返す)なので
+    // 巡回後の特別な後始末は不要。flushStdinBuffer のみ行う。
     flushStdinBuffer()
   }
 }
@@ -682,19 +794,21 @@ async function sweepTabs() {
 async function replayMultiAnswers(answers) {
   tabReplayInProgress = true
   try {
+    // AskUserQuestion-Multi のタブは、数字キーを押すと「選択肢を選択 + 自動で
+    // 次のタブへ移動」する(実機確認済 2026-05-14: 一番左のタブで 2 を押すと
+    // 2 番目のタブへ移動)。そのため Tab は挟まない。挟むと 1 回答ごとに
+    // 数字(1 タブ)+ Tab(1 タブ)で 2 タブ進み、タブが 1 つおきに飛ばされる。
     for (let i = 0; i < answers.length; i++) {
-      term.write(answers[i]) // 数字 1 文字、改行なし
-      await sleep(60)
-      if (i < answers.length - 1) {
-        term.write('\t')
-        await sleep(120)
-      }
+      term.write(answers[i]) // 数字 1 文字
+      await sleep(MULTI_TAB_STEP_MS)
     }
-    // 最後のタブで回答後、もう一度 Tab で Submit にフォーカス → Enter で全送信
-    term.write('\t')
-    await sleep(120)
-    term.write('\r')
-    cleanBuf = ''
+    // 最後のタブを回答すると自動で Submit タブ(「Review your answers」+
+    // 「❯ 1. Submit answers / 2. Cancel」の確認画面)へ遷移する。
+    // '1'(Submit answers)+ Enter で確定。
+    await sleep(MULTI_SUBMIT_WAIT_MS)
+    term.write('1\r')
+    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
   } finally {
     tabReplayInProgress = false
     flushStdinBuffer()
@@ -742,10 +856,14 @@ async function detectDialog() {
   // タブ巡回 / 再生中は通常検出をスキップ(dedup・誤登録を回避)
   if (tabSweepInProgress || tabReplayInProgress) return
 
+  // 画面バッファのテキストを 1 回取得し、detectDialogSingle にも引数で渡す
+  // (同一 onPtyData 内での二度取りを避ける)
+  const screen = getScreenText()
+
   // タブ式の判定: parseDialog が non-null かつ isTabbedDialog が真なら sweep に進む
   // ただし currentDialog が既にあって同じ複合質問が回答待ちなら通常パスに戻る
-  if (!currentDialog && isTabbedDialog(cleanBuf)) {
-    const probe = parseDialog(cleanBuf)
+  if (!currentDialog && isTabbedDialog(screen)) {
+    const probe = parseDialog(screen)
     if (probe) {
       const tabs = await sweepTabs()
       if (tabs && tabs.length >= 2) {
@@ -756,11 +874,15 @@ async function detectDialog() {
     }
   }
 
-  await detectDialogSingle()
+  await detectDialogSingle(screen)
 }
 
-async function detectDialogSingle() {
-  const d = parseDialog(cleanBuf)
+// screen は detectDialog から渡される。単独テスト等のため未指定なら自前取得。
+async function detectDialogSingle(screen = getScreenText()) {
+  const parsed = parseDialog(screen)
+  // v1.11.2: 解決済みダイアログ(suppressCurrentDialog で抑制中)は「見えていない」
+  // 扱いにする。これにより消失タイマー設定パスに落ち、回答後の自然な dismiss が進む。
+  const d = parsed && !isSuppressed(parsed) ? parsed : null
   if (d) {
     // ダイアログが見えている間は消失タイマーを止める。
     clearTimeout(dismissalTimer)
@@ -785,7 +907,7 @@ async function detectDialogSingle() {
       // resolveCurrentAsCli に直行してダイアログが消える。
       if (currentDialog.tabs && ago < DEDUP_WINDOW_MS) {
         const tabMatched = currentDialog.tabs.some((t) => dialogShapeMatches(t, d))
-        if (tabMatched || isTabbedDialog(cleanBuf)) {
+        if (tabMatched || isTabbedDialog(screen)) {
           currentDialog.lastSeenAt = Date.now()
           return
         }
@@ -876,10 +998,9 @@ async function pollForResponse(id) {
       )
     } else {
       term.write(key + '\r')
-      // 古いダイアログ本文を捨てておかないと、画面上は閉じても cleanBuf に
-      // "Esc to cancel" 等が残って parseDialog が「まだダイアログがある」と
-      // 誤判定し、次のダイアログ検出や dismissal 検知が遅れる。
-      cleanBuf = ''
+      // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
+      // (旧実装の cleanBuf='' の代替。詳細は suppressCurrentDialog のコメント参照)
+      suppressCurrentDialog(currentDialog.prompt)
       wlog(`injected "${key}" for dialog ${id}`)
     }
     // currentDialog は PTY 出力でダイアログが消えたら自然に消える
@@ -907,8 +1028,10 @@ function validateAnswer(answer, options) {
 async function onDialogDismissed() {
   dismissalTimer = null
   if (!currentDialog) return
-  // 発火時点で再度 parseDialog して、ウィンドウ内にまだダイアログがあればキャンセル
-  if (parseDialog(cleanBuf)) return
+  // 発火時点で再度 parseDialog して、画面にまだ(抑制対象でない)ダイアログが
+  // あればキャンセルしない
+  const d = parseDialog(getScreenText())
+  if (d && !isSuppressed(d)) return
   if (Date.now() - currentDialog.lastSeenAt < DISMISSAL_MS) return
   await resolveCurrentAsCli()
 }
@@ -916,9 +1039,9 @@ async function onDialogDismissed() {
 async function resolveCurrentAsCli() {
   const d = currentDialog
   currentDialog = null
-  // dismiss 確定時点で古いダイアログ本文を捨てる。残しておくと次のダイアログ
-  // 検出時に古い tool 行を拾って誤分類する原因になる。
-  cleanBuf = ''
+  // v1.11.2: dismiss 確定したダイアログを次フレーム描画まで再検出しないよう論理抑制。
+  // (旧実装の cleanBuf='' の代替。残しておくと次の検出で古い tool 行を拾う原因に)
+  if (d && d.prompt) suppressCurrentDialog(d.prompt)
   if (!d || !d.id) return
   try {
     await httpRequest('POST', `/resolve/${d.id}`, {
