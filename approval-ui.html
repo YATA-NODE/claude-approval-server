@@ -205,6 +205,10 @@
       [data-theme='dark'] .btn-bulk:active {
         background: #25a244;
       }
+      [data-theme='dark'] .btn-bulk:disabled {
+        background: #3a3a3c;
+        color: rgba(235, 235, 245, 0.3);
+      }
 
       /* 取得ボタン */
       .btn-fetch {
@@ -527,6 +531,61 @@
         margin-top: 2px;
         word-break: break-all;
       }
+      /* 展開可能な履歴カード(Multi / FreeText のみ、それ以外は cursor 変化なし) */
+      .hist-card.hist-expandable {
+        cursor: pointer;
+      }
+      /* iOS Safari は cursor: pointer のない要素タップで click event を発火しないため、
+         子要素にも継承させる。delegation listener が子要素タップに反応するための必須条件。 */
+      .hist-card.hist-expandable * {
+        cursor: pointer;
+      }
+      .hist-card .hist-toggle {
+        display: inline-block;
+        margin-left: 4px;
+        font-size: 10px;
+        color: var(--text-secondary);
+        transition: transform 0.15s;
+      }
+      .hist-card.expanded .hist-toggle {
+        transform: rotate(180deg);
+      }
+      .hist-detail {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--input-border);
+        font-size: 13px;
+      }
+      .hist-detail .tab-row {
+        margin-bottom: 8px;
+      }
+      .hist-detail .tab-row:last-child {
+        margin-bottom: 0;
+      }
+      .hist-detail .tab-question {
+        color: var(--text-secondary);
+        font-size: 12px;
+        margin-bottom: 2px;
+        word-break: break-word;
+      }
+      .hist-detail .tab-selected {
+        font-weight: 600;
+        color: var(--text-primary);
+        word-break: break-word;
+      }
+      .hist-detail .tab-text {
+        background: var(--input-bg);
+        border: 1px solid var(--input-border);
+        padding: 6px 8px;
+        border-radius: 6px;
+        margin-top: 4px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 12px;
+        color: var(--text-primary);
+        /* 本文 box は text 選択 UX を優先(上の .hist-expandable * を上書き) */
+        cursor: text;
+      }
       /* v1.12.0 フリーテキスト送信モーダル */
       .modal-overlay {
         position: fixed;
@@ -754,11 +813,13 @@
           freeTextSend: '送信',
           freeTextCancel: 'キャンセル',
           freeTextEmpty: 'テキストを入力してください',
-          // v1.12.0 (D2/W002): 履歴に本文を残さず長さのみ表示
-          // (スクリーン共有時の漏洩防止、server ログと同じ defense in depth)
+          // 履歴サマリは長さのみ。本文は展開時に details 経由で表示(漏洩防止)
           freeTextHistory: (opt, textLen) => `${opt}(${textLen} 文字)`,
           langToggle: 'EN',
           locale: 'ja-JP',
+          // 履歴展開時のラベル
+          tabLabel: (n) => `タブ ${n}`,
+          selectedLabel: '選択',
         },
         en: {
           tabTitle: 'Agent Approval Panel',
@@ -809,10 +870,13 @@
           freeTextSend: 'Send',
           freeTextCancel: 'Cancel',
           freeTextEmpty: 'Please enter some text',
-          // v1.12.0 (D2/W002): omit content from history (defense in depth)
+          // history summary shows length only; full body shown only on expand via details (leak prevention)
           freeTextHistory: (opt, textLen) => `${opt} (${textLen} chars)`,
           langToggle: '日本語',
           locale: 'en-US',
+          // history expansion labels
+          tabLabel: (n) => `Tab ${n}`,
+          selectedLabel: 'Selected',
         },
       }
 
@@ -832,6 +896,16 @@
       // v1.12.0: フリーテキストの長さ上限。approval-server.js / claude-wrapper.js
       // MAX_FREE_TEXT_LEN および textarea[maxlength] と同期(3 箇所 + HTML 属性)
       const MAX_FREE_TEXT_LEN = 2000
+
+      // 履歴は resolvedAt から 1 時間で自動消去(物理閲覧の露出時間制限)。
+      // localStorage 不使用 = タブ閉じで完全消滅、setInterval も page lifetime と同期で cleanup 不要。
+      const HISTORY_TTL_MS = 60 * 60 * 1000
+      setInterval(() => {
+        const cutoff = Date.now() - HISTORY_TTL_MS
+        const before = history.length
+        history = history.filter((h) => new Date(h.resolvedAt).getTime() >= cutoff)
+        if (history.length !== before) renderHistory()
+      }, 5 * 60 * 1000)
 
       function t(key, ...args) {
         const val = TRANSLATIONS[lang][key]
@@ -1218,16 +1292,21 @@
         await fetchQueue()
       })
 
-      const resolvedBy =
-        location.hostname === 'localhost' || location.hostname === '127.0.0.1' ? 'pc' : 'smartphone'
+      // 承認元の端末種別は User-Agent で判定(URL hostname だと PC レスポンシブモードで
+      // localhost に対して承認操作したとき常に 'pc' 扱いになる問題があった)。
+      // DevTools のスマホエミュレートで UA も切替えれば 'smartphone' 判定。
+      const resolvedBy = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+        ? 'smartphone'
+        : 'pc'
 
-      function pushHistory(description, answer) {
+      function pushHistory(description, answer, details) {
         history.unshift({
           histId:
             (crypto.randomUUID && crypto.randomUUID()) ||
             `${Date.now()}-${Math.random().toString(36).slice(2)}`,
           description,
           answer,
+          details,
           resolvedBy,
           resolvedAt: new Date().toISOString(),
         })
@@ -1276,20 +1355,32 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ answers, resolvedBy }),
           })
-          // 履歴サマリ: num のみ表示し、text 入りタブ数を末尾に併記
-          const summary = answers
-            .map((a) => (typeof a === 'string' ? a : a.num))
-            .join(',')
-          const textCount = answers.filter(
-            (a) => typeof a !== 'string' && a.text
-          ).length
+          // サマリ表示と展開用 details を answers 1 周回で同時組立
+          const nums = []
+          const detailTabs = []
+          let textCount = 0
+          answers.forEach((a, i) => {
+            const isStr = typeof a === 'string'
+            const num = isStr ? a : a.num
+            const text = isStr ? undefined : a.text
+            if (text) textCount++
+            nums.push(num)
+            const opts = item.tabs[i].options || []
+            detailTabs.push({
+              question: item.tabs[i].prompt || '',
+              selectedNum: num,
+              selectedLabel: opts[parseInt(num, 10) - 1] || '',
+              text,
+            })
+          })
           pushHistory(
             getDescription(id),
             t('multiHistory', item.tabs.length) +
               ' [' +
-              summary +
+              nums.join(',') +
               ']' +
-              (textCount > 0 ? ` (text×${textCount})` : '')
+              (textCount > 0 ? ` (text×${textCount})` : ''),
+            { kind: 'multi', tabs: detailTabs }
           )
           delete selectedAnswers[id]
           await fetchQueue()
@@ -1389,8 +1480,11 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ answer, text: clean, resolvedBy }),
           })
-          // v1.12.0 (D2/W002): 履歴に本文を残さず長さのみ
-          pushHistory(getDescription(id), t('freeTextHistory', answer, clean.length))
+          pushHistory(
+            getDescription(id),
+            t('freeTextHistory', answer, clean.length),
+            { kind: 'freeText', option: answer, text: clean }
+          )
           closeFreeTextModal()
           selectedId = null
           await fetchQueue()
@@ -1450,23 +1544,79 @@
             if (item.resolvedBy === 'pc') return t(isNo ? 'resolvedByPcDenied' : 'resolvedByPc')
             return t(isNo ? 'resolvedBySmartphoneDenied' : 'resolvedBySmartphone')
           })()
+          const hasDetail = item.details && typeof item.details === 'object'
+          if (hasDetail) div.classList.add('hist-expandable')
+          const toggle = hasDetail ? ' <span class="hist-toggle">▼</span>' : ''
           div.innerHTML = `
       <button class="btn-hist-del" type="button" aria-label="${t('histDeleteOne')}" title="${t('histDeleteOne')}">×</button>
-      <p class="hist-label" style="color:${color}">${byLabel} <span style="color:var(--text-secondary);font-weight:400;font-size:12px;">${fmt(item.resolvedAt)}</span></p>
+      <p class="hist-label" style="color:${color}">${byLabel} <span style="color:var(--text-secondary);font-weight:400;font-size:12px;">${fmt(item.resolvedAt)}</span>${toggle}</p>
       <p class="hist-desc">${escHtml(item.description)}</p>`
+          // 詳細部は createElement + textContent で構築。innerHTML 経路に混ぜると
+          // 1 箇所の escHtml 漏れで stored-like DOM XSS の表示面化となる(意図的分離)。
+          if (hasDetail) {
+            div.appendChild(buildHistDetail(item.details))
+          }
           el.appendChild(div)
         })
       }
 
-      // 履歴の個別「×」削除（ブラウザローカルの history のみ操作）
+      function buildHistDetail(details) {
+        const wrap = document.createElement('div')
+        wrap.className = 'hist-detail'
+        wrap.hidden = true
+        if (details.kind === 'multi' && Array.isArray(details.tabs)) {
+          details.tabs.forEach((tab, i) => {
+            const row = document.createElement('div')
+            row.className = 'tab-row'
+            const q = document.createElement('p')
+            q.className = 'tab-question'
+            q.textContent = `${t('tabLabel', i + 1)}: ${tab.question || ''}`
+            row.appendChild(q)
+            const sel = document.createElement('p')
+            sel.className = 'tab-selected'
+            sel.textContent = `${t('selectedLabel')}: ${tab.selectedNum}. ${tab.selectedLabel || ''}`
+            row.appendChild(sel)
+            if (tab.text) {
+              const txt = document.createElement('div')
+              txt.className = 'tab-text'
+              txt.textContent = tab.text
+              row.appendChild(txt)
+            }
+            wrap.appendChild(row)
+          })
+        } else if (details.kind === 'freeText') {
+          const sel = document.createElement('p')
+          sel.className = 'tab-selected'
+          sel.textContent = `${t('selectedLabel')}: ${details.option || ''}`
+          wrap.appendChild(sel)
+          if (details.text) {
+            const txt = document.createElement('div')
+            txt.className = 'tab-text'
+            txt.textContent = details.text
+            wrap.appendChild(txt)
+          }
+        }
+        return wrap
+      }
+
+      // 履歴の個別「×」削除 + カード全体タップで展開トグル
       document.getElementById('hist-list').addEventListener('click', (e) => {
         const btn = e.target.closest('.btn-hist-del')
-        if (!btn) return
-        const card = btn.closest('.hist-card')
-        const id = card?.dataset.histId
-        if (!id) return
-        history = history.filter((h) => h.histId !== id)
-        renderHistory()
+        if (btn) {
+          const card = btn.closest('.hist-card')
+          const id = card?.dataset.histId
+          if (!id) return
+          history = history.filter((h) => h.histId !== id)
+          renderHistory()
+          return
+        }
+        // 展開可能カードのトグル(× ボタン押下は上の早期 return で除外済)
+        const card = e.target.closest('.hist-card.hist-expandable')
+        if (card) {
+          card.classList.toggle('expanded')
+          const detail = card.querySelector('.hist-detail')
+          if (detail) detail.hidden = !card.classList.contains('expanded')
+        }
       })
 
       // 履歴「すべて削除」: ローカル history を空にし、サーバー側 resolved も掃除する。
