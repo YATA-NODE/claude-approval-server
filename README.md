@@ -260,11 +260,11 @@ doskey claude=node C:\Users\username\claude-approval-server\claude-wrapper.js $*
 - **option 種別検証**(v1.12.0+): text 添付は `Type something` option を選択した場合のみ許可。通常選択肢への text 添付は server / wrapper 両方で 400 reject(defense in depth)
 - **`Chat about this` 完全防御**(v1.12.0+): 遠隔不能仕様(数字キーで選べず、選ぶとダイアログ全体を抜けて通常チャットへ移行)のため、UI から除外 + サーバで 4 経路全て reject(options[idx] / answer 数字指定 / answer 文字列完全一致 / Multi `{num,text}`)。代替として「キャンセル」ボタンを提供
 - **静的配信の絞り込み**(v1.12.0+): 旧版で `express.static(__dirname)` がプロジェクトルート全ファイルを未認証配信していた問題を解消。`/` での `approval-ui.html` 配信のみ許可し、`approval-config.json` 等への直接アクセスは 404
-- **ログ非露出**: フリーテキストの本文は server コンソール / wrapper wlog / UI 履歴のいずれにも残さず、長さのみ記録
+- **ログ非露出**: フリーテキストの本文は server コンソール / wrapper wlog / UI 履歴サマリのいずれにも残さず、長さのみ記録。**v1.13.0 から履歴カードのタップ展開時のみ** ブラウザメモリ上の本文を再表示します(localStorage 不使用 = リロード or タブ閉じ or 1 時間 TTL で消失、server / wrapper 側の non-disclosure は v1.12.0 から不変)
 - **設定ファイル**: `approval-config.json` は `.gitignore` 済み + 上記の通り配信もされません
 - **ngrok URL 漏洩対策**: ngrok URL は毎セッション変わります。使用後はトンネルを閉じてください
 
-> ⚠️ **権限拡張の注記**(v1.12.0+): 上記の防御層により注入経路は厳格にホワイトリスト化されていますが、本ツールの認証トークン(`approval-config.json` 内の値)を保持している人は **`Type something` 経路を通じて Claude TUI に任意テキストを送信できます**。トークンの取り扱い(共有しない / セッション後の `approval-config.json` 削除)に注意してください。
+> ⚠️ **権限拡張の注記**(v1.12.0+): 上記の防御層により注入経路は厳格にホワイトリスト化されていますが、本ツールの認証トークン(`approval-config.json` 内の値)を保持している人は **`Type something` 経路を通じて Claude TUI に任意テキストを送信できます**。トークンの取り扱い(共有しない / セッション後の `approval-config.json` 削除)に注意してください。**v1.13.0 補足**: 送信した本文は同一ブラウザのメモリ内に最大 1 時間残ります(履歴展開で表示可能)。共有端末で使う場合は使用後にタブを閉じてください。
 
 ## スマートフォン UI の機能
 
@@ -274,7 +274,7 @@ doskey claude=node C:\Users\username\claude-approval-server\claude-wrapper.js $*
 - **複合質問のタブ式承認**(v1.11+): 1 ダイアログにまとめられた複数質問を各タブごとに回答 → 「すべて送信」で一括反映
 - **テキスト入力モーダル**(v1.12+): `Type something` を選ぶと textarea モーダルが開き、スマホからフリーテキストを送信。単一質問・複合質問の両方で対応(複合質問は各タブの回答揃い次第「すべて送信」で一括反映)
 - **キャンセルボタン**(v1.12+): 「すべて送信」横 / 単一質問のボタン群末尾に表示。押下で wrapper が PC TUI に Esc キーを注入してダイアログを破棄
-- 履歴表示（直近 20 件、承認元が `PC` / `スマホ` / `CLI` で識別可能。フリーテキストは本文を残さず長さのみ表示)
+- 履歴表示（直近 20 件、承認元が `PC` / `スマホ` / `CLI` で識別可能。判定根拠はブラウザの User-Agent = タブレットや DevTools のスマホエミュレートでは「スマホ」として記録。フリーテキストはサマリでは長さのみ表示、**v1.13.0 から複合質問 / フリーテキスト履歴のみ履歴カードをタップで展開して各タブの選択肢 / 入力本文をブラウザメモリから表示可能** = リロード or 1 時間 TTL で消失)
 - プロジェクト識別（`[プロジェクト名][ツール名] 引数 — プロンプト` 形式で表示）
 - 日本語 / 英語 切替
 - ダーク / ライト テーマ切替
@@ -613,11 +613,11 @@ After the one-time setup:
 - **Option-type validation** (v1.12.0+): attached `text` is only accepted when the selected option matches `Type something`. Attaching text to a normal option returns HTTP 400 on both the server and the wrapper (defense in depth).
 - **`Chat about this` blocked across all paths** (v1.12.0+): the built-in `Chat about this` option cannot be selected by a digit key alone and exits the dialog to plain chat when chosen, so it is not remotely controllable. The UI hides it and the server rejects all four entry paths (`options[idx]` / numeric `answer` / exact-match `answer` / multi `{num,text}`). Use the new **Cancel** button as the equivalent action.
 - **Restricted static serving** (v1.12.0+): earlier versions used `express.static(__dirname)`, which exposed every file in the project root (including `approval-config.json`) without authentication. The static middleware has been removed; only `/` serves `approval-ui.html` and other files return 404.
-- **No log leak**: free-text bodies are never written to the server console, wrapper wlog, or UI history — only the length is recorded.
+- **No log leak**: free-text bodies are never written to the server console, wrapper wlog, or the UI history summary — only the length is recorded. **As of v1.13.0**, expanding a history card on the browser surfaces the body from in-memory state only (no `localStorage`, cleared on reload, tab close, or after a 1-hour TTL; the server/wrapper non-disclosure guarantees from v1.12.0 are unchanged).
 - **Config file**: `approval-config.json` is gitignored and (as of v1.12.0) no longer served over HTTP.
 - **ngrok URL rotation**: the public URL changes each session. Close the tunnel when you're done.
 
-> ⚠️ **Authorization scope notice** (v1.12.0+): the defense layers above strictly whitelist what reaches the PTY, but anyone holding the auth token (value of `APPROVAL_TOKEN` in `approval-config.json`) **can now send arbitrary text to the Claude TUI via the `Type something` path**. Treat the token accordingly: do not share it, and remove `approval-config.json` once your session is over.
+> ⚠️ **Authorization scope notice** (v1.12.0+): the defense layers above strictly whitelist what reaches the PTY, but anyone holding the auth token (value of `APPROVAL_TOKEN` in `approval-config.json`) **can now send arbitrary text to the Claude TUI via the `Type something` path**. Treat the token accordingly: do not share it, and remove `approval-config.json` once your session is over. **v1.13.0 addendum**: the typed body stays in the same browser's memory for up to one hour (revealable via history expansion). Close the tab after use on shared devices.
 
 ## Smartphone UI features
 
@@ -627,7 +627,7 @@ After the one-time setup:
 - **Multi-tab questions** (v1.11+): each sub-question is answered per tab, then "Submit all" applies them in one go
 - **Free-text modal** (v1.12+): selecting `Type something` opens a textarea modal. Works for both single and multi-tab questions (in the multi case, all tabs must be filled before "Submit all")
 - **Cancel button** (v1.12+): next to "Submit all" (multi) or at the end of the option list (single). Pressing it asks the wrapper to inject an Esc key into the PC TUI to dismiss the dialog
-- History view (last 20 resolved items, labeled `PC` / `smartphone` / `CLI`. Free-text entries record only the length, not the body)
+- History view (last 20 resolved items, labeled `PC` / `smartphone` / `CLI`; the label is decided by the browser's User-Agent, so tablets and the DevTools mobile emulator are recorded as `smartphone`. The summary still records only the length for free-text entries; **v1.13.0 adds tap-to-expand on history cards for multi-tab and free-text entries only** to view each tab's selection and the typed body, read from in-memory state only — cleared on reload or after a 1-hour TTL)
 - Project identification (requests are rendered as `[projectName][toolName] args — prompt`)
 - Japanese / English toggle
 - Dark / light theme toggle
