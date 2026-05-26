@@ -22,6 +22,7 @@ PTY ラッパーが Claude Code の入出力を仲介し、ダイアログが出
   - **複合質問(Multi)**: 複数質問を 1 ダイアログにまとめたタブ式 AskUserQuestion(v1.11+)
   - **Type something のテキスト送信**(v1.12+): スマホからフリーテキストを Claude TUI に注入できる。単一質問・複合質問の両方で対応
   - **ダイアログのキャンセル**(v1.12+): スマホから Esc 相当の操作でダイアログを破棄して通常チャットに戻る
+  - **プラン承認(ExitPlanMode)対応**(v1.14+): 「Would you like to proceed?」のプラン承認プロンプトもスマホに転送。終端マーカーが `Esc to cancel` ではなく `shift+tab to approve` のため検出条件を拡張
 
 ![複合質問 + Type something の実例(v1.12.0+)。左: PC ターミナルのタブ式 AskUserQuestion / 中央 3 列: スマホ承認パネルの各タブで選択 + 一部タブで Type something を入力済み(✓ マーク)+ 「すべて送信」横にキャンセルボタン / 右: テキスト入力モーダル](docs/images/approval-panel-multi-text.png)
 
@@ -376,6 +377,7 @@ Whichever side responds first dismisses the other side automatically.
   - **Multi-tab questions**: multiple questions grouped into a single tabbed AskUserQuestion (v1.11+)
   - **Free-text via "Type something"** (v1.12+): send arbitrary text from the phone into the Claude TUI. Available for both single and multi-tab questions
   - **Dialog cancellation** (v1.12+): an Esc-equivalent button on the phone dismisses the current dialog and returns the TUI to normal chat
+  - **Plan approval (ExitPlanMode)** (v1.14+): the "Would you like to proceed?" plan-approval prompt is also forwarded to the phone. Its footer is `shift+tab to approve` instead of `Esc to cancel`, so the end-marker detection was extended
 
 ![Multi-tab AskUserQuestion + Type something in action (v1.12.0+). Left: tabbed dialog in the PC terminal / Center three columns: the smartphone approval panel with per-tab selection, one tab marked with a ✓ after submitting text, and the Cancel button beside Submit all / Right: the free-text input modal](docs/images/approval-panel-multi-text.png)
 
