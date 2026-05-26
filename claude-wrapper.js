@@ -61,14 +61,22 @@ const SECRET_TOKEN = config.token || process.env.APPROVAL_TOKEN || ''
 // ルート直下などで basename が空になった場合は 'unknown' を充てる。
 const PROJECT_NAME = path.basename(process.cwd()) || 'unknown'
 
-// ダイアログ検出: 終端マーカー (Esc to cancel) を主アンカーに使う。
+// ダイアログ検出: 終端マーカー (Esc to cancel 等) を主アンカーに使う。
 // 旧 v1.7.3 までは "Do you want to" を主トリガーにしていたが、Claude Code v2.1.x の
 // Write/Edit 系ダイアログは ANSI 部分再描画の副作用で "Do you want t creat ..."
 // のように 1〜2 文字単位で欠落するため、プロンプト本文ベースの検出が成立しなくなった。
 // 一方 "Esc to cancel" は別行に独立描画されるため空白崩れ ("Esctocancel") のみで済む。
+//
+// ExitPlanMode(プラン承認)プロンプトだけは例外で、フッタが "Esc to cancel" ではなく
+// "shift+tab to approve with this feedback" になり Esc to cancel が出ない。このため
+// 終端マーカーを OR で拡張して両方を主アンカーにする。"shift+tab to approve" は
+// ExitPlanMode 固有で通常ダイアログには出ないため誤検出しにくい。なお終端マーカーは
+// 検出領域(segment)の末尾アンカーなので、shift+tab 行で切れる結果フッタ2行
+// (shift+tab… / ctrl+g to edit…)は options に混入しない。
 // 必要なら approval-config.json の dialogDetection.endMarker で上書き可能。
 const END_MARKER_PATTERN =
-  (config.dialogDetection && config.dialogDetection.endMarker) || 'Esc\\s*to\\s*cancel'
+  (config.dialogDetection && config.dialogDetection.endMarker) ||
+  'Esc\\s*to\\s*cancel|shift\\+tab\\s+to\\s+approve'
 const END_MARKER_RE_G = new RegExp(END_MARKER_PATTERN, 'gi')
 
 const isWindows = os.platform() === 'win32'

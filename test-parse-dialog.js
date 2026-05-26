@@ -169,6 +169,45 @@ console.log('\n[6] parseDialog: AskUserQuestion 4 択')
 }
 
 // -------------------------------------------------------
+// 6b. parseDialog: ExitPlanMode(プラン承認)プロンプト
+//     フッタが "Esc to cancel" ではなく "shift+tab to approve with this feedback"。
+//     END_MARKER の OR 拡張で検出でき、フッタ行が options に混入しないことを確認。
+// -------------------------------------------------------
+console.log('\n[6b] parseDialog: ExitPlanMode プラン承認 4 択')
+{
+  const buf = [
+    '─────',
+    ' Claude has written up a plan and is ready to execute. Would you like to proceed?',
+    '',
+    ' ❯ 1. Yes, and use auto mode',
+    '   2. Yes, manually approve edits',
+    '   3. No, refine with Ultraplan on Claude Code on the web',
+    '   4. Tell Claude what to change',
+    '      shift+tab to approve with this feedback',
+    ' ctrl+g to edit in  VS Code',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq(
+    'prompt',
+    r && r.prompt,
+    'Claude has written up a plan and is ready to execute. Would you like to proceed?'
+  )
+  assertEq('options 数 = 4', r && r.options.length, 4)
+  assertEq('options 全文', r && r.options, [
+    'Yes, and use auto mode',
+    'Yes, manually approve edits',
+    'No, refine with Ultraplan on Claude Code on the web',
+    'Tell Claude what to change',
+  ])
+  assertEq(
+    'フッタ(shift+tab / ctrl+g)が option に混入しない',
+    r && r.options[3],
+    'Tell Claude what to change'
+  )
+}
+
+// -------------------------------------------------------
 // 7. parseDialog: 選択肢本文に「1 枚目」「2 枚目」を含むケース（誤検知防止）
 // -------------------------------------------------------
 console.log('\n[7] parseDialog: 本文中の数字を誤検知しない')
