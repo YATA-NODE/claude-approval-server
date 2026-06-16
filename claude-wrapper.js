@@ -440,6 +440,71 @@ function onPtyData(chunk) {
 //   5. オプション = "?" 以降から終端マーカーまでに並ぶ 1, 2, 3 の番号マーカー
 //   6. ツール行 = プロンプトより前にある最新の `● Tool(args)`
 
+// 行頭の数字 1-9 を option 番号マーカーとして歩き、{sortedMarks, options} を返す。
+// parseDialog から切り出した補助関数(肥大化した parseDialog の見通し改善)。
+// optionSegment = 「?」より後ろの領域。挙動は従来 parseDialog のインライン実装と同一。
+function extractOptions(optionSegment) {
+  const LINE_START_CHARS = '\n│╭╮╰╯─╌'
+  function isStrictMarkerStart(i) {
+    if (i === 0) return true
+    const prev = optionSegment[i - 1]
+    if (prev === '❯') return true
+    if (LINE_START_CHARS.includes(prev)) return true
+    if (/\s/.test(prev)) {
+      for (let j = i - 2; j >= 0; j--) {
+        const c = optionSegment[j]
+        if (c === '❯' || LINE_START_CHARS.includes(c)) return true
+        if (!/\s/.test(c)) return false
+      }
+      return true
+    }
+    return false
+  }
+  const found = new Map()
+  // 同一番号が strict マーカーとして 2 回以上出現 = 重畳/部分再描画フレーム(旧フレームの
+  // "1.2.3." に新フレームの "1.2.3." が重なる等)。連番ガードは dedupe 後の集合を見るため
+  // これを握り潰すと連番ガードを擦り抜けるため、duplicate を立てて呼び出し側で fail-closed。
+  let duplicate = false
+  for (let i = 0; i < optionSegment.length; i++) {
+    const ch = optionSegment[i]
+    if (ch < '1' || ch > '9') continue
+    const next = optionSegment[i + 1]
+    if (next && next >= '0' && next <= '9') continue // 連桁(行番号など)は除外
+    if (!isStrictMarkerStart(i)) continue
+    if (found.has(ch)) {
+      duplicate = true
+      continue
+    }
+    found.set(ch, { at: i, end: i + 1 })
+  }
+  // フォールバック: 厳格 0 件なら旧 regex で再試行(後方互換性)
+  if (found.size === 0) {
+    const fallbackRe = /(?<![A-Za-z0-9])([1-9])(?![0-9])/g
+    let mm
+    while ((mm = fallbackRe.exec(optionSegment)) !== null) {
+      if (!found.has(mm[1])) found.set(mm[1], { at: mm.index, end: mm.index + 1 })
+    }
+  }
+  const sortedMarks = [...found.entries()]
+    .map(([num, pos]) => ({ num: parseInt(num), at: pos.at, end: pos.end }))
+    .sort((a, b) => a.at - b.at)
+  const TUI_TAIL_HINT_RE =
+    /(?:Enter\s+to\s+select|Tab\s*\/\s*Arrow\s+keys|Esc\s+to\s+cancel)[\s\S]*$/i
+  const options = sortedMarks.map((mk, i) => {
+    const nextAt = i + 1 < sortedMarks.length ? sortedMarks[i + 1].at : optionSegment.length
+    return optionSegment
+      .slice(mk.end, nextAt)
+      .replace(/❯/g, '')
+      .replace(/[\r\n]/g, ' ')
+      .replace(/[─╌│╭╮╰╯]/g, '')
+      .replace(/^[.\s]+/, '')
+      .replace(/\s+/g, ' ')
+      .replace(TUI_TAIL_HINT_RE, '')
+      .trim()
+  })
+  return { sortedMarks, options, duplicate }
+}
+
 function parseDialog(buf) {
   // 1. 終端マーカーの最終出現を取得
   const endMatches = [...buf.matchAll(END_MARKER_RE_G)]
@@ -505,121 +570,79 @@ function parseDialog(buf) {
     .trim()
   if (!prompt) return null
 
-  // 5. オプション抽出
+  // 5. オプション抽出(共有関数 extractOptions に委譲)。抽出処理自体は従来のインライン実装と
+  //    同一(厳格行頭マーカー walk + 旧 regex フォールバック + tail hint 除去)。ただし
+  //    parseDialog 全体の受理条件は下記 5b で追加検証する(従来より厳格 = 安全側)。
   const optionSegment = segment.slice(qIdx + 1)
-  // 数字 1〜9 単体を番号マーカーとして検出する。
-  // 既定は厳格モード: 「行頭 / `❯` の直後 / 空白経由で行頭側」に位置するもののみ採用。
-  // 本文中の「1 枚目」「2 枚目」等を誤検知しないため。
-  // 厳格モードで 0 件のときは旧 regex(数字隣接のみで判定)にフォールバック =
-  // ANSI 部分再描画で行頭判定がズレた旧フォーマット互換も維持する。
-  const LINE_START_CHARS = '\n│╭╮╰╯─╌'
-  function isStrictMarkerStart(i) {
-    if (i === 0) return true
-    const prev = optionSegment[i - 1]
-    if (prev === '❯') return true
-    if (LINE_START_CHARS.includes(prev)) return true
-    if (/\s/.test(prev)) {
-      // 左にさかのぼり、空白だけを跨いで行頭/`❯`/区切り文字に到達するなら OK
-      for (let j = i - 2; j >= 0; j--) {
-        const c = optionSegment[j]
-        if (c === '❯' || LINE_START_CHARS.includes(c)) return true
-        if (!/\s/.test(c)) return false
-      }
-      return true
-    }
-    return false
-  }
-  const found = new Map()
-  // 厳格モード: 行頭限定で 1〜9 を歩く
-  for (let i = 0; i < optionSegment.length; i++) {
-    const ch = optionSegment[i]
-    if (ch < '1' || ch > '9') continue
-    const next = optionSegment[i + 1]
-    if (next && next >= '0' && next <= '9') continue // 連桁(行番号など)は除外
-    if (!isStrictMarkerStart(i)) continue
-    if (!found.has(ch)) found.set(ch, { at: i, end: i + 1 })
-  }
-  // フォールバック: 厳格 0 件なら旧 regex で再試行(後方互換性)
-  if (found.size === 0) {
-    const fallbackRe = /(?<![A-Za-z0-9])([1-9])(?![0-9])/g
-    let mm
-    while ((mm = fallbackRe.exec(optionSegment)) !== null) {
-      if (!found.has(mm[1])) found.set(mm[1], { at: mm.index, end: mm.index + 1 })
-    }
-  }
-  if (found.size === 0) return null
-
-  const sortedMarks = [...found.entries()]
-    .map(([num, pos]) => ({ num: parseInt(num), at: pos.at, end: pos.end }))
-    .sort((a, b) => a.at - b.at)
-  // 各 option 末尾には Claude TUI のキー操作ヒント
-  // ("Enter to select · Tab/Arrow keys to navigate · Esc to cancel" 等)が
-  // 文字列として混入することがあるので、抽出後に tail trim で除去する。
-  // ※ Claude TUI 組み込みの "Type something" / "Chat about this" 自体は v1.11.1
-  //   以降スマホ側に表示する(v1.12.0 でテキスト送信経路追加予定)。
-  const TUI_TAIL_HINT_RE =
-    /(?:Enter\s+to\s+select|Tab\s*\/\s*Arrow\s+keys|Esc\s+to\s+cancel)[\s\S]*$/i
-  const options = sortedMarks.map((mk, i) => {
-    const nextAt = i + 1 < sortedMarks.length ? sortedMarks[i + 1].at : optionSegment.length
-    return optionSegment
-      .slice(mk.end, nextAt)
-      .replace(/❯/g, '')
-      .replace(/[\r\n]/g, ' ')
-      .replace(/[─╌│╭╮╰╯]/g, '')
-      .replace(/^[.\s]+/, '')
-      .replace(/\s+/g, ' ')
-      .replace(TUI_TAIL_HINT_RE, '')
-      .trim()
-  })
+  const { sortedMarks, options, duplicate } = extractOptions(optionSegment)
+  if (sortedMarks.length === 0) return null
   if (options.length === 0 || options.every((o) => !o)) return null
 
-  // 6. ツール行: プロンプトより前にある最新の `● Tool(args)` を採用
-  const promptAbsStart = segStart + lineStart + 1
-  const beforeDialog = buf.slice(0, promptAbsStart)
-  const toolMatches = [...beforeDialog.matchAll(/●\s*([A-Za-z_]+)\s*\(([\s\S]*?)\)/g)]
-  const lastTool = toolMatches[toolMatches.length - 1]
-  let tool = lastTool ? lastTool[1] : 'Unknown'
-  let args = lastTool
-    ? lastTool[2].replace(/[\r\n]/g, ' ').replace(/\s+/g, ' ').trim()
-    : ''
+  // 5b. 内容完全性ガード(安全側 fail): 部分描画 / 重畳フレームを null で弾く(転送しない、
+  //   次フレームを待つ)。Claude Code v2.1.x の Agent View + スピナーが毎フレーム再描画し、
+  //   ダイアログが断片的にしか描画されない瞬間がある。
+  //   (i) duplicate: 同一番号が 2 回以上 = 旧フレームに新フレームが重なった重畳。
+  //   (ii) 番号が 1..N の完全集合でない: 途中(例 "2. 青")や先頭("1. 赤")の欠落 = 隣接
+  //        option への説明文融合 / 選択肢消失のシグナル。
+  //   どちらかに該当すれば承認対象の取り違え(融合・消失・混在した選択肢の転送)を防ぐため棄却。
+  //   1-9 の相異なる整数で max===個数 ⟺ ちょうど {1..N}(先頭 1 始まりも同時に要求)。
+  if (duplicate) return null
+  const optNums = sortedMarks.map((mk) => mk.num)
+  const completeFromOne =
+    new Set(optNums).size === optNums.length && Math.max(...optNums) === optNums.length
+  if (!completeFromOne) return null
 
-  // 6b. tool が拾えなかった場合の fallback: ダイアログボックス内のアクションラベルから推測。
-  // 新フォーマットでは初回ダイアログ時に `● Tool(args)` 行がまだ描画されていないことがあり、
-  // その場合でもスマホ側に何のツールか伝わるようにする。
-  if (tool === 'Unknown') {
-    const boxText = segment.slice(0, qIdx)
-    const labelTable = [
-      [/Bash\s*command|Run\s*command/i, 'Bash'],
-      [/Create\s*file/i, 'Write'],
-      [/Update|Edit/i, 'Edit'],
-      [/Delete/i, 'Bash'],
-      [/Read\s*file/i, 'Read'],
-      [/Search|Grep/i, 'Grep'],
-    ]
-    for (const [re, t] of labelTable) {
-      if (re.test(boxText)) {
-        tool = t
-        // ラベルの直後にある対象パスっぽい文字列を args として拾う
-        const m = boxText.match(
-          /(?:Bash\s*command|Create\s*file|Update|Edit|Delete|Read\s*file|Search|Grep)[\s│╭╮╰╯─╌:]*([^\n│╭╮╰╯─╌?]{2,80})/i
-        )
-        if (m && !args) args = m[1].replace(/\s+/g, ' ').trim()
-        break
+  // 6. ツール判定。AUQ 判定を tool 継承より先に行う(単一真実源)。
+  // AskUserQuestion は専用の ●AskUserQuestion() 行を持たず、上方スクロールバックに前ターンの
+  // ●Bash() 等が残るため、先に ●Tool() を継承すると誤ツール名(例「Bash uname -a」)を
+  // AUQ に転送してしまう(実機で観測)。判定シグナル: shift+tab ヒント不在 ∧ prompt が
+  // "Do you want to …?"(ツール承認 / ExitPlanMode の定型句)で始まらない。
+  // ※ 旧実装の「選択肢 4 個以上 ∨ 平均長 25 以上」の OR 条件は削除。これは 4 択以上で
+  //   shift+tab を伴わないツール承認まで AUQ と誤分類し、tool 継承が走らず args(危険な
+  //   コマンド引数等)がスマホ側で空欄になる(承認内容の秘匿)。"Do you want to"
+  //   + shift+tab を欠くツール承認は実在しないため、本 2 条件で十分かつ安全側。
+  // ※ 旧 6a の「●Tool と ? の間にタブ署名☐があれば継承しない」も Write/Edit プレビュー内の
+  //   ☐✔(markdown チェックリスト等)で誤爆するため廃止し、本 AUQ 判定に一本化した。
+  const hasShiftTab = /shift\s*\+\s*tab/i.test(optionSegment)
+  const looksLikeAUQ = !hasShiftTab && !/Do you want to/i.test(prompt)
+
+  let tool = 'Unknown'
+  let args = ''
+  if (looksLikeAUQ) {
+    tool = 'AskUserQuestion'
+  } else {
+    // 6b. ツール承認: プロンプトより前にある最新の `● Tool(args)` を採用。
+    const promptAbsStart = segStart + lineStart + 1
+    const beforeDialog = buf.slice(0, promptAbsStart)
+    const toolMatches = [...beforeDialog.matchAll(/●\s*([A-Za-z_]+)\s*\(([\s\S]*?)\)/g)]
+    const lastTool = toolMatches[toolMatches.length - 1]
+    if (lastTool) {
+      tool = lastTool[1]
+      args = lastTool[2].replace(/[\r\n]/g, ' ').replace(/\s+/g, ' ').trim()
+    }
+    // 6c. `● Tool()` 行が未描画の初回フレーム fallback: ボックス内アクションラベルから推測。
+    if (tool === 'Unknown') {
+      const boxText = segment.slice(0, qIdx)
+      const labelTable = [
+        [/Bash\s*command|Run\s*command/i, 'Bash'],
+        [/Create\s*file/i, 'Write'],
+        [/Update|Edit/i, 'Edit'],
+        [/Delete/i, 'Bash'],
+        [/Read\s*file/i, 'Read'],
+        [/Search|Grep/i, 'Grep'],
+      ]
+      for (const [re, t] of labelTable) {
+        if (re.test(boxText)) {
+          tool = t
+          // ラベルの直後にある対象パスっぽい文字列を args として拾う
+          const m = boxText.match(
+            /(?:Bash\s*command|Create\s*file|Update|Edit|Delete|Read\s*file|Search|Grep)[\s│╭╮╰╯─╌:]*([^\n│╭╮╰╯─╌?]{2,80})/i
+          )
+          if (m && !args) args = m[1].replace(/\s+/g, ' ').trim()
+          break
+        }
       }
     }
-  }
-
-  // 6c. それでも tool が Unknown のままなら AskUserQuestion 型ダイアログと推定する。
-  // 判定シグナル: shift+tab ヒント不在 ∧ (選択肢 4 個以上 ∨ 平均長 25 文字以上 ∨ prompt が "Do you want to" で始まらない)。
-  // 既存ツール系を AskUserQuestion と誤判定しないよう、必ず fallback テーブル不一致時のみ評価する。
-  if (tool === 'Unknown') {
-    const hasShiftTab = /shift\s*\+\s*tab/i.test(optionSegment)
-    const avgLen =
-      options.reduce((s, o) => s + o.length, 0) / Math.max(options.length, 1)
-    const looksLikeAUQ =
-      !hasShiftTab &&
-      (options.length >= 4 || avgLen >= 25 || !/Do you want to/i.test(prompt))
-    if (looksLikeAUQ) tool = 'AskUserQuestion'
   }
 
   return { prompt, options, tool, args }
@@ -698,6 +721,7 @@ if (typeof module !== 'undefined') {
     validateMultiAnswer,
     screenTextFromBuffer,
     validateFreeText,
+    extractOptions,
   }
 }
 
