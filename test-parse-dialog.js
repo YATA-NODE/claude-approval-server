@@ -19,6 +19,7 @@ const {
   validateMultiAnswer,
   screenTextFromBuffer,
   validateFreeText,
+  extractOptions,
 } = require('./claude-wrapper.js')
 
 let failed = 0
@@ -205,6 +206,120 @@ console.log('\n[6b] parseDialog: ExitPlanMode プラン承認 4 択')
     r && r.options[3],
     'Tell Claude what to change'
   )
+}
+
+// -------------------------------------------------------
+// 6c. parseDialog: AskUserQuestion の上方に前ターンの `● Bash(...)` が残っているケース。
+//     実機(Agent View 下、v2.1.178)で観測した「スマホに [Bash] uname -a と誤ツール名が
+//     出る」回帰の再現。AUQ は専用の ●AskUserQuestion() 行を持たないため、古い ●Bash() を
+//     継承してはならない。完全フレーム(1..6 連番)なら tool=AskUserQuestion + 選択肢正常。
+// -------------------------------------------------------
+console.log('\n[6c] parseDialog: AUQ の上に古い ●Bash() が残っても継承しない')
+{
+  const buf = [
+    '● Bash(uname -a)',
+    '   Linux DESKTOP-SKSREPJ 6.6.87.2-microsoft-standard-WSL2 x86_64 GNU/Linux',
+    '● それぞれ別々に実行しました。',
+    '─────',
+    ' ☐ 好きな色',
+    ' 好きな色は?',
+    ' ❯ 1. 赤',
+    '      情熱的で力強い色',
+    '   2. 青',
+    '      冷静で落ち着いた色',
+    '   3. 緑',
+    '      自然を感じる安らぎの色',
+    '   4. 黄',
+    '      明るく元気な色',
+    '   5. Type something.',
+    '   6. Chat about this',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=AskUserQuestion(古い Bash を継承しない)', r && r.tool, 'AskUserQuestion')
+  assertEq('prompt', r && r.prompt, '好きな色は?')
+  assertEq('options 数 = 6', r && r.options.length, 6)
+  assertEq('options[0] = 赤', r && r.options[0].startsWith('赤'), true)
+  assertEq('options[1] = 青(完全フレームで青が欠けない)', r && r.options[1].startsWith('青'), true)
+}
+
+// -------------------------------------------------------
+// 6d. parseDialog: 部分描画フレーム(option 2 の番号欠落で 1,3,4,5,6)は転送しない。
+//     5b 内容完全性ガード = 1..N の完全集合でなければ null(青消失・融合の転送を防ぐ)。
+// -------------------------------------------------------
+console.log('\n[6d] parseDialog: 部分描画(先頭/中間欠落)は null で弾く')
+{
+  // option 2 (青) の番号行が描画されず 1,3,4,5,6 のみ = 部分フレーム
+  const partial = [
+    '─────',
+    ' 好きな色は?',
+    ' ❯ 1. 赤',
+    '      情熱的で力強い色',
+    '      冷静で落ち着いた色',
+    '   3. 緑',
+    '   4. 黄',
+    '   5. Type something.',
+    '   6. Chat about this',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('番号歯抜け(2 欠落)は null', parseDialog(partial), null)
+  // 先頭 1 が欠落して 3,4,5 のみ = やはり部分フレーム
+  const headMissing = [
+    '─────',
+    ' 好きな色は?',
+    ' ❯ 3. 緑',
+    '   4. 黄',
+    '   5. Type something.',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('先頭欠落(1 始まりでない)は null', parseDialog(headMissing), null)
+}
+
+// -------------------------------------------------------
+// 6e. parseDialog: 実在する ●Tool() を持つツール承認は、4 択・shift+tab 欠落でも
+//     AskUserQuestion と誤分類しない(反例)。誤分類すると tool 継承が走らず
+//     args(危険なコマンド引数)がスマホ側で空欄になる。
+// -------------------------------------------------------
+console.log('\n[6e] parseDialog: 4 択ツール承認を AUQ と誤判定しない(args 秘匿防止)')
+{
+  const buf = [
+    '● Bash(rm -rf /tmp/x)',
+    '─────',
+    ' Run command',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. Yes, for this session',
+    '   3. No',
+    '   4. No, and tell Claude what to do differently',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=Bash(AUQ に化けない)', r && r.tool, 'Bash')
+  assertEq('args に危険コマンドが残る', r && /rm -rf \/tmp\/x/.test(r.args), true)
+}
+
+// -------------------------------------------------------
+// 6f. parseDialog: 重畳フレーム(同一番号が 2 回 = 旧+新フレーム重なり)は null で弾く。
+//     Map dedupe で握り潰すと 1..N 連番として擦り抜けるため、重複検出で fail-closed。
+// -------------------------------------------------------
+console.log('\n[6f] parseDialog: 重複番号の重畳フレームは null で弾く')
+{
+  const buf = [
+    '─────',
+    ' 好きな色は?',
+    ' ❯ 1. 赤',
+    '   2. 青',
+    '   3. 緑',
+    '   1. 赤(旧フレーム残り)',
+    '   2. 青(旧フレーム残り)',
+    '   3. 緑(旧フレーム残り)',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('重複番号フレームは null', parseDialog(buf), null)
+  const { duplicate } = extractOptions(' ❯ 1. A\n   2. B\n   1. A2\n   2. B2')
+  assertEq('extractOptions が duplicate を立てる', duplicate, true)
 }
 
 // -------------------------------------------------------
