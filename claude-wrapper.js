@@ -73,10 +73,15 @@ const PROJECT_NAME = path.basename(process.cwd()) || 'unknown'
 // ExitPlanMode 固有で通常ダイアログには出ないため誤検出しにくい。なお終端マーカーは
 // 検出領域(segment)の末尾アンカーなので、shift+tab 行で切れる結果フッタ2行
 // (shift+tab… / ctrl+g to edit…)は options に混入しない。
-// 必要なら approval-config.json の dialogDetection.endMarker で上書き可能。
+// 必要なら approval-config.json の dialogDetection.endMarker で上書き可能(完全置換のため、
+// 上書き時は "shift+tab to approve" を含めないと ExitPlanMode の検出・分類が効かなくなる)。
+// ExitPlanMode 固有の終端マーカー。END_MARKER のデフォルト値とツール分類の両方で
+// 同じ定数を使い、検出条件と分類条件が乖離しないようにする(単一ソース)。
+const EXIT_PLAN_END_PATTERN = 'shift\\+tab\\s+to\\s+approve'
+const EXIT_PLAN_END_RE = new RegExp(EXIT_PLAN_END_PATTERN, 'i')
 const END_MARKER_PATTERN =
   (config.dialogDetection && config.dialogDetection.endMarker) ||
-  'Esc\\s*to\\s*cancel|shift\\+tab\\s+to\\s+approve'
+  `Esc\\s*to\\s*cancel|${EXIT_PLAN_END_PATTERN}`
 const END_MARKER_RE_G = new RegExp(END_MARKER_PATTERN, 'gi')
 
 const isWindows = os.platform() === 'win32'
@@ -606,9 +611,18 @@ function parseDialog(buf) {
   const hasShiftTab = /shift\s*\+\s*tab/i.test(optionSegment)
   const looksLikeAUQ = !hasShiftTab && !/Do you want to/i.test(prompt)
 
+  // ExitPlanMode は終端マーカーが "shift+tab to approve"(Esc to cancel ではない)。
+  // 終端マーカーは segment の外で消費されるため optionSegment に shift+tab が残らず
+  // hasShiftTab=false、prompt も "Do you want to" を含まないため AUQ と誤判定される。
+  // よって終端マーカー種別を最優先で分類する。args は持たない(対象ファイル/コマンドなし)。
+  const endMarkerText = endMatches[endMatches.length - 1][0]
+  const isExitPlanMode = EXIT_PLAN_END_RE.test(endMarkerText)
+
   let tool = 'Unknown'
   let args = ''
-  if (looksLikeAUQ) {
+  if (isExitPlanMode) {
+    tool = 'ExitPlanMode'
+  } else if (looksLikeAUQ) {
     tool = 'AskUserQuestion'
   } else {
     // 6b. ツール承認: プロンプトより前にある最新の `● Tool(args)` を採用。
