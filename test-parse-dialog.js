@@ -347,6 +347,61 @@ console.log('\n[6g] parseDialog: option 内 shift+tab を ExitPlanMode と誤判
 }
 
 // -------------------------------------------------------
+// 6h. parseDialog: ExitPlanMode の prompt が端末幅で hard-wrap(実改行込み)され 2 行に
+//     なっても、1 段落に連結してフル復元する(実機 cols=69 で観測した「like to proceed?」欠け)。
+// -------------------------------------------------------
+console.log('\n[6h] parseDialog: ExitPlanMode prompt の hard-wrap 複数行を連結')
+{
+  const buf = [
+    '─────────────────────────────────────',
+    ' Claude has written up a plan and is ready to execute. Would you',
+    ' like to proceed?',
+    '',
+    ' ❯ 1. Yes, and use auto mode',
+    '   2. Yes, manually approve edits',
+    '   3. No, refine with Ultraplan on Claude Code on the web',
+    '   4. Tell Claude what to change',
+    '      shift+tab to approve with this feedback',
+    ' ctrl+g to edit in  VS Code',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=ExitPlanMode', r && r.tool, 'ExitPlanMode')
+  assertEq(
+    'prompt が hard-wrap 2 行を連結してフル復元',
+    r && r.prompt,
+    'Claude has written up a plan and is ready to execute. Would you like to proceed?'
+  )
+  assertEq('options 数 = 4', r && r.options.length, 4)
+}
+
+// -------------------------------------------------------
+// 6i. parseDialog: ExitPlanMode で prompt 段落の上端は「? に最も近い罫線」を採用し、
+//     その上の別段落(複数罫線の上)は連結しない。1 行 prompt は過剰連結しない。
+// -------------------------------------------------------
+console.log('\n[6i] parseDialog: ExitPlanMode は直近罫線境界を採用(上の別段落を含めない)')
+{
+  const buf = [
+    '──────────────────────────',
+    ' これは上の説明段落です。',
+    '──────────────────────────',
+    ' Would you like to proceed?',
+    '',
+    ' ❯ 1. Yes, and use auto mode',
+    '   2. No',
+    '      shift+tab to approve with this feedback',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=ExitPlanMode', r && r.tool, 'ExitPlanMode')
+  assertEq(
+    'prompt は直近罫線の下のみ(上の説明段落を含めない)',
+    r && r.prompt,
+    'Would you like to proceed?'
+  )
+}
+
+// -------------------------------------------------------
 // 7. parseDialog: 選択肢本文に「1 枚目」「2 枚目」を含むケース（誤検知防止）
 // -------------------------------------------------------
 console.log('\n[7] parseDialog: 本文中の数字を誤検知しない')

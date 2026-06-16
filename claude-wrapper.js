@@ -510,11 +510,38 @@ function extractOptions(optionSegment) {
   return { sortedMarks, options, duplicate }
 }
 
+// ExitPlanMode 専用: prompt が端末幅で hard-wrap(実改行込み)され複数行になる場合に、
+// prompt 段落の開始位置(改行 index)を求める。startNl(? を含む行の直前の改行)から上方へ
+// 走査し、直近の構造境界に当たったら停止する(境界行自体は段落に含めない)。
+// 境界 = 空行 / 罫線行(行全体が罫線文字+空白かつ連続 10 文字以上)/ タブバー(☐✔□✓→)/ 選択肢(❯)。
+// MAX_LINES で暴走を防ぐ(超過時は startNl のまま = 現行同等の単一行抽出に倒れる)。
+function expandExitPlanPromptStart(beforeQ, startNl) {
+  const MAX_LINES = 5
+  let lineStart = startNl
+  for (let i = 0; i < MAX_LINES; i++) {
+    const prevNl = beforeQ.lastIndexOf('\n', lineStart - 1)
+    const line = beforeQ.slice(prevNl + 1, lineStart).trim()
+    const isRule = /^[─╌\s]+$/.test(line) && line.replace(/\s/g, '').length >= 10
+    const isTabBar = /[☐✔□✓→]/.test(line)
+    const isOption = line.includes('❯')
+    if (line === '' || isRule || isTabBar || isOption) break
+    lineStart = prevNl
+    if (prevNl < 0) break
+  }
+  return lineStart
+}
+
 function parseDialog(buf) {
   // 1. 終端マーカーの最終出現を取得
   const endMatches = [...buf.matchAll(END_MARKER_RE_G)]
   if (endMatches.length === 0) return null
   const endIdx = endMatches[endMatches.length - 1].index
+
+  // ExitPlanMode は終端マーカーが "shift+tab to approve"(Esc to cancel ではない)。
+  // 終端マーカー種別で分類し、かつ prompt が端末幅で hard-wrap(実改行込み)されても
+  // 複数行を 1 段落に連結するため、prompt 抽出より前に判定する。
+  const endMarkerText = endMatches[endMatches.length - 1][0]
+  const isExitPlanMode = EXIT_PLAN_END_RE.test(endMarkerText)
 
   // 2. ダイアログ候補領域 (末尾マーカーの直前)
   // END_MARKER の手前 DIALOG_SEGMENT_MAX 文字を候補とする。
@@ -568,8 +595,13 @@ function parseDialog(buf) {
   )
   const fallbackIdx = arrowIdx >= 0 ? arrowIdx : boxCharIdx
   const lineStart = nlIdx >= 0 ? nlIdx : fallbackIdx
+  // ExitPlanMode のときだけ、hard-wrap で複数行になった prompt を 1 段落に連結する。
+  // それ以外(AUQ / ツール承認 / タブ式)は現行の単一行抽出のまま(回帰なし)。
+  // promptStart は prompt 抽出と tool 継承の beforeDialog 切り出し(下記 6b)で共用し、整合させる。
+  const promptStart =
+    isExitPlanMode && nlIdx >= 0 ? expandExitPlanPromptStart(beforeQ, nlIdx) : lineStart
   const prompt = segment
-    .slice(lineStart + 1, qIdx + 1)
+    .slice(promptStart + 1, qIdx + 1)
     .replace(/[│╭╮╰╯─╌\r\n]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -611,13 +643,9 @@ function parseDialog(buf) {
   const hasShiftTab = /shift\s*\+\s*tab/i.test(optionSegment)
   const looksLikeAUQ = !hasShiftTab && !/Do you want to/i.test(prompt)
 
-  // ExitPlanMode は終端マーカーが "shift+tab to approve"(Esc to cancel ではない)。
-  // 終端マーカーは segment の外で消費されるため optionSegment に shift+tab が残らず
-  // hasShiftTab=false、prompt も "Do you want to" を含まないため AUQ と誤判定される。
-  // よって終端マーカー種別を最優先で分類する。args は持たない(対象ファイル/コマンドなし)。
-  const endMarkerText = endMatches[endMatches.length - 1][0]
-  const isExitPlanMode = EXIT_PLAN_END_RE.test(endMarkerText)
-
+  // isExitPlanMode(上で判定済み)は終端マーカーが segment 外で消費され optionSegment に
+  // shift+tab が残らず hasShiftTab=false、prompt も "Do you want to" を含まないため AUQ と
+  // 誤判定される。よって終端マーカー種別を最優先で分類する(args は持たない)。
   let tool = 'Unknown'
   let args = ''
   if (isExitPlanMode) {
@@ -626,7 +654,7 @@ function parseDialog(buf) {
     tool = 'AskUserQuestion'
   } else {
     // 6b. ツール承認: プロンプトより前にある最新の `● Tool(args)` を採用。
-    const promptAbsStart = segStart + lineStart + 1
+    const promptAbsStart = segStart + promptStart + 1
     const beforeDialog = buf.slice(0, promptAbsStart)
     const toolMatches = [...beforeDialog.matchAll(/●\s*([A-Za-z_]+)\s*\(([\s\S]*?)\)/g)]
     const lastTool = toolMatches[toolMatches.length - 1]
