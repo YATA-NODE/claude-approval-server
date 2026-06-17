@@ -377,6 +377,20 @@ const LABEL_ARGS_RE = new RegExp(
   'i'
 )
 
+// ツール承認分類シグナル(W002 = AUQ 文言依存の解消)。
+// ●Tool() 行のマーカー。AUQ は専用 ●AskUserQuestion() 行を持たない。
+const TOOL_LINE_RE = /●\s*([A-Za-z_]+)\s*\(([\s\S]*?)\)/g
+// 既知のツール承認 / ExitPlanMode 定型句(弱シグナル)。文言追加はここ 1 箇所で。
+const APPROVAL_PHRASE_RE = /Do you want to/i
+// ●Tool 行未描画フレームでも承認に倒すための box 内 multi-word アクションラベル。
+// 汎用 1 語(Edit/Update/Delete/Search)は AUQ 本文で誤爆するため multi-word 限定。
+const ACTION_LABEL_RE = /\b(?:Bash command|Run command|Create file|Read file)\b/i
+// hasActionLabel の走査窓(prompt 直上のみ。scrollback 混入による誤爆を抑える)。
+const ACTION_LABEL_WINDOW = 200
+// glued 判定: ツール行の直後が(空白を除き)ボックス上端の罫線で始まるか。出力行を挟むと
+// 不成立 = scrollback の古い ●Tool が AUQ を承認に化けさせる経路を断つ。
+const TOOL_GLUE_BORDER_RE = new RegExp(`^\\s*[${BOX_CHARS}]`)
+
 // 文字集合のいずれかの文字の最終出現 index(全て不在なら -1)。
 // 旧 Math.max(s.lastIndexOf(a), s.lastIndexOf(b), ..., -1) と等価。
 function lastIndexOfAnyChar(s, chars) {
@@ -688,23 +702,41 @@ function parseDialog(buf) {
     new Set(optNums).size === optNums.length && Math.max(...optNums) === optNums.length
   if (!completeFromOne) return null
 
-  // 6. ツール判定。AUQ 判定を tool 継承より先に行う(単一真実源)。
-  // AskUserQuestion は専用の ●AskUserQuestion() 行を持たず、上方スクロールバックに前ターンの
-  // ●Bash() 等が残るため、先に ●Tool() を継承すると誤ツール名(例「Bash uname -a」)を
-  // AUQ に転送してしまう(実機で観測)。判定シグナル: shift+tab ヒント不在 ∧ prompt が
-  // "Do you want to …?"(ツール承認 / ExitPlanMode の定型句)で始まらない。
-  // ※ 旧実装の「選択肢 4 個以上 ∨ 平均長 25 以上」の OR 条件は削除。これは 4 択以上で
-  //   shift+tab を伴わないツール承認まで AUQ と誤分類し、tool 継承が走らず args(危険な
-  //   コマンド引数等)がスマホ側で空欄になる(承認内容の秘匿)。"Do you want to"
-  //   + shift+tab を欠くツール承認は実在しないため、本 2 条件で十分かつ安全側。
-  // ※ 旧 6a の「●Tool と ? の間にタブ署名☐があれば継承しない」も Write/Edit プレビュー内の
-  //   ☐✔(markdown チェックリスト等)で誤爆するため廃止し、本 AUQ 判定に一本化した。
-  const hasShiftTab = /shift\s*\+\s*tab/i.test(optionSegment)
-  const looksLikeAUQ = !hasShiftTab && !/Do you want to/i.test(prompt)
+  // 6. ツール判定。AUQ を「ツール承認シグナルがどれも立たない」と定義する合成判定(W002)。
+  //   AskUserQuestion は専用の ●AskUserQuestion() 行を持たず、上方スクロールバックに前ターンの
+  //   ●Bash() 等が残る。先に ●Tool() を継承すると誤ツール名(例「Bash uname -a」)を AUQ に
+  //   転送してしまう(実機で観測)。一方、prompt 文言("Do you want to")単独依存は Claude Code の
+  //   UI 文言変更に脆く、ツール承認を AUQ と誤分類 → args(危険コマンド)がスマホ側で空欄=承認
+  //   内容の秘匿の恐れ。よって以下を OR で合成し、どれかが立てばツール承認に
+  //   倒す(各シグナルは AUQ から外す方向のみ = 安全側):
+  //     - hasShiftTab       : option 領域に shift+tab ヒント
+  //     - promptIsApproval  : 既知定型句 "Do you want to"(弱シグナル。多層防御として残す)
+  //     - hasGluedToolLine  : ●Tool 行とこのダイアログの間に別の生 ● が無い(直前注釈=同フレーム)
+  //     - hasActionLabel    : ●Tool 行未描画でも box 直上の multi-word ラベルで承認に倒す
+  //   ※ box 描画文字(│╭╮╰╯─╌❯☐✔→)に ● は含まれないため、区間内の生 ● は Claude の
+  //     tool/message 行に限る = ターン境界の指標(glued 判定の前提)。
+  const promptAbsStart = segStart + promptStart + 1
+  const beforeDialog = buf.slice(0, promptAbsStart)
+  const toolMatches = [...beforeDialog.matchAll(TOOL_LINE_RE)]
+  const lastTool = toolMatches[toolMatches.length - 1]
 
-  // isExitPlanMode(上で判定済み)は終端マーカーが segment 外で消費され optionSegment に
-  // shift+tab が残らず hasShiftTab=false、prompt も "Do you want to" を含まないため AUQ と
-  // 誤判定される。よって終端マーカー種別を最優先で分類する(args は持たない)。
+  const hasShiftTab = /shift\s*\+\s*tab/i.test(optionSegment)
+  const promptIsApproval = APPROVAL_PHRASE_RE.test(prompt)
+  let hasGluedToolLine = false
+  if (lastTool) {
+    const toolEnd = lastTool.index + lastTool[0].length
+    const between = buf.slice(toolEnd, promptAbsStart)
+    // glued = (a) ツール行とこのダイアログの間に別の生 ● が無い(ターン境界なし)かつ
+    //   (b) ツール行の直後が空白を除いてボックス上端の罫線で始まる(出力行を挟まず box に密着)。
+    //   (b) を欠くと scrollback の古い ●Tool が出力行越しに継承され AUQ を承認に化けさせる。
+    hasGluedToolLine = !between.includes('●') && TOOL_GLUE_BORDER_RE.test(between)
+  }
+  const hasActionLabel = ACTION_LABEL_RE.test(beforeQ.slice(-ACTION_LABEL_WINDOW))
+  const looksLikeAUQ =
+    !hasShiftTab && !promptIsApproval && !hasGluedToolLine && !hasActionLabel
+
+  // 終端マーカー種別を最優先(ExitPlanMode は optionSegment に shift+tab が残らず、prompt も
+  // "Do you want to" 非含のため、合成判定だけだと AUQ と誤判定される。args は持たない)。
   let tool = 'Unknown'
   let args = ''
   if (isExitPlanMode) {
@@ -712,11 +744,7 @@ function parseDialog(buf) {
   } else if (looksLikeAUQ) {
     tool = 'AskUserQuestion'
   } else {
-    // 6b. ツール承認: プロンプトより前にある最新の `● Tool(args)` を採用。
-    const promptAbsStart = segStart + promptStart + 1
-    const beforeDialog = buf.slice(0, promptAbsStart)
-    const toolMatches = [...beforeDialog.matchAll(/●\s*([A-Za-z_]+)\s*\(([\s\S]*?)\)/g)]
-    const lastTool = toolMatches[toolMatches.length - 1]
+    // 6b. ツール承認: プロンプトより前にある最新の `● Tool(args)`(hoist 済 lastTool)を採用。
     if (lastTool) {
       tool = lastTool[1]
       args = lastTool[2].replace(/[\r\n]/g, ' ').replace(/\s+/g, ' ').trim()
