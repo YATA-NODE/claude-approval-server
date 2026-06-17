@@ -20,6 +20,17 @@ const {
   screenTextFromBuffer,
   validateFreeText,
   extractOptions,
+  composeEndMarkerPattern,
+  BOX_CHARS,
+  RULE_CHARS,
+  PROMPT_BOX_ANCHOR_CHARS,
+  TAB_MARK_CHARS,
+  TAB_ARROW_CHAR,
+  CURSOR_CHAR,
+  LINE_START_CHARS,
+  TAB_NAV_RE,
+  EXIT_PLAN_END_PATTERN,
+  DEFAULT_END_MARKER,
 } = require('./claude-wrapper.js')
 
 let failed = 0
@@ -1067,6 +1078,69 @@ console.log('\n[21] 定数 / 正規表現の 3 ファイル同期')
   assertEq('CA 正例 "Chat about this"', caRE.test('Chat about this'), true)
   assertEq('CA 正例 "Chat about this."', caRE.test('Chat about this.'), true)
   assertEq('CA 負例 "Chat about this proposal" → false', caRE.test('Chat about this proposal'), false)
+}
+
+// -------------------------------------------------------
+// 22. 境界文字定数の membership 固定(drift ガード)
+// claude-wrapper.js の境界文字を単一ソース化したため、集合のメンバーが
+// 不用意に変わると検出挙動が変わる。集合を凍結して回帰を検知する。
+// -------------------------------------------------------
+console.log('\n[22] 境界文字定数の membership')
+{
+  assertEq('BOX_CHARS', BOX_CHARS, '│╭╮╰╯─╌')
+  assertEq('RULE_CHARS', RULE_CHARS, '─╌')
+  assertEq('PROMPT_BOX_ANCHOR_CHARS', PROMPT_BOX_ANCHOR_CHARS, '│─╌')
+  assertEq('TAB_MARK_CHARS', TAB_MARK_CHARS, '☐✔□✓')
+  assertEq('TAB_ARROW_CHAR', TAB_ARROW_CHAR, '→')
+  assertEq('CURSOR_CHAR', CURSOR_CHAR, '❯')
+  // 構造不変条件: LINE_START_CHARS = '\n' + BOX_CHARS、サブセットは BOX_CHARS に内包。
+  assertEq('LINE_START_CHARS = \\n + BOX_CHARS', LINE_START_CHARS, '\n' + BOX_CHARS)
+  const subsetOfBox = (s) => [...s].every((c) => BOX_CHARS.includes(c))
+  assertEq('RULE_CHARS ⊂ BOX_CHARS', subsetOfBox(RULE_CHARS), true)
+  assertEq('PROMPT_BOX_ANCHOR_CHARS ⊂ BOX_CHARS', subsetOfBox(PROMPT_BOX_ANCHOR_CHARS), true)
+  assertEq('PROMPT_BOX_ANCHOR は ╭╮╰╯ を含まない', /[╭╮╰╯]/.test(PROMPT_BOX_ANCHOR_CHARS), false)
+  // タブ印系派生 RegExp はすべて単一ソース由来(凍結カバレッジを TAB_NAV_RE まで対称化)。
+  assertEq('TAB_NAV_RE は → を含む', TAB_NAV_RE.test(TAB_ARROW_CHAR), true)
+  // char class 直挿入の前提: BOX_CHARS に正規表現メタ文字(- ^ ] \)を入れない(混入すると派生 RE が silent 破損)。
+  assertEq('BOX_CHARS にメタ文字なし', /[-^\]\\]/.test(BOX_CHARS), false)
+}
+
+// -------------------------------------------------------
+// 23. composeEndMarkerPattern: 型付き化 + 後方互換 + footgun 解消
+// -------------------------------------------------------
+console.log('\n[23] composeEndMarkerPattern')
+{
+  const DEFAULT_COMPOSED = `${DEFAULT_END_MARKER}|${EXIT_PLAN_END_PATTERN}`
+  // config 無し → 現行既定値と完全一致(回帰なし)
+  assertEq('config 無し → 既定 pattern', composeEndMarkerPattern(undefined), DEFAULT_COMPOSED)
+  assertEq('空オブジェクト → 既定 pattern', composeEndMarkerPattern({}), DEFAULT_COMPOSED)
+  // 型付き endMarkers → 両方を OR
+  assertEq(
+    '型付き {default, exitPlan}',
+    composeEndMarkerPattern({ endMarkers: { default: 'AAA', exitPlan: 'BBB' } }),
+    'AAA|BBB'
+  )
+  // 型付き default のみ → exitPlan は既定で補完
+  assertEq(
+    '型付き default のみ → exitPlan 補完',
+    composeEndMarkerPattern({ endMarkers: { default: 'AAA' } }),
+    `AAA|${EXIT_PLAN_END_PATTERN}`
+  )
+  // legacy endMarker → ExitPlan を常に OR(footgun 解消の核心)
+  const legacy = composeEndMarkerPattern({ endMarker: 'Esc\\s*to\\s*cancel' })
+  assertEq('legacy endMarker に ExitPlan が含まれる', legacy.includes(EXIT_PLAN_END_PATTERN), true)
+  // legacy が shift+tab を含めなくても ExitPlanMode フッタを検出できる
+  assertEq(
+    'legacy でも shift+tab to approve を検出',
+    new RegExp(legacy, 'gi').test('shift+tab to approve with this feedback'),
+    true
+  )
+  // 既定 pattern は従来どおり Esc to cancel も検出
+  assertEq(
+    '既定 pattern は Esc to cancel を検出',
+    new RegExp(DEFAULT_COMPOSED, 'gi').test('Esc to cancel'),
+    true
+  )
 }
 
 // -------------------------------------------------------

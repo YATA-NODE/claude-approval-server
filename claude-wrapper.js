@@ -73,15 +73,45 @@ const PROJECT_NAME = path.basename(process.cwd()) || 'unknown'
 // ExitPlanMode 固有で通常ダイアログには出ないため誤検出しにくい。なお終端マーカーは
 // 検出領域(segment)の末尾アンカーなので、shift+tab 行で切れる結果フッタ2行
 // (shift+tab… / ctrl+g to edit…)は options に混入しない。
-// 必要なら approval-config.json の dialogDetection.endMarker で上書き可能(完全置換のため、
-// 上書き時は "shift+tab to approve" を含めないと ExitPlanMode の検出・分類が効かなくなる)。
-// ExitPlanMode 固有の終端マーカー。END_MARKER のデフォルト値とツール分類の両方で
-// 同じ定数を使い、検出条件と分類条件が乖離しないようにする(単一ソース)。
+// 必要なら approval-config.json の dialogDetection で終端マーカーを調整できる:
+//   - 推奨: dialogDetection.endMarkers = { default, exitPlan }(型付き)。default は通常
+//     ダイアログ用("Esc to cancel" 相当)、exitPlan は ExitPlanMode 用。省略時は各既定値。
+//   - 互換: dialogDetection.endMarker(文字列)は default 部分として扱い、ExitPlanMode
+//     マーカーは常に OR される(旧仕様の「shift+tab を含め忘れると ExitPlanMode 検出が死ぬ」
+//     footgun を構造的に解消)。非推奨のため load 時に warn。
+// ExitPlanMode 固有の終端マーカー。endMarkers の既定値とツール分類(EXIT_PLAN_END_RE)の
+// 両方で同じ定数を使い、検出条件と分類条件が乖離しないようにする(単一ソース)。
 const EXIT_PLAN_END_PATTERN = 'shift\\+tab\\s+to\\s+approve'
 const EXIT_PLAN_END_RE = new RegExp(EXIT_PLAN_END_PATTERN, 'i')
-const END_MARKER_PATTERN =
-  (config.dialogDetection && config.dialogDetection.endMarker) ||
-  `Esc\\s*to\\s*cancel|${EXIT_PLAN_END_PATTERN}`
+const DEFAULT_END_MARKER = 'Esc\\s*to\\s*cancel'
+
+// 終端マーカー正規表現パターンを組み立てる純関数(テスト seam)。ExitPlanMode マーカーが
+// 構成から脱落しないよう常に OR-in する。優先順: 型付き endMarkers > legacy endMarker > 既定。
+function composeEndMarkerPattern(dialogDetection) {
+  const dd = dialogDetection || {}
+  if (dd.endMarkers && typeof dd.endMarkers === 'object') {
+    const def = dd.endMarkers.default || DEFAULT_END_MARKER
+    const exit = dd.endMarkers.exitPlan || EXIT_PLAN_END_PATTERN
+    return `${def}|${exit}`
+  }
+  if (typeof dd.endMarker === 'string' && dd.endMarker) {
+    return `${dd.endMarker}|${EXIT_PLAN_END_PATTERN}`
+  }
+  return `${DEFAULT_END_MARKER}|${EXIT_PLAN_END_PATTERN}`
+}
+const _dialogDetection = config && config.dialogDetection
+if (
+  _dialogDetection &&
+  typeof _dialogDetection.endMarker === 'string' &&
+  _dialogDetection.endMarker &&
+  !_dialogDetection.endMarkers
+) {
+  console.warn(
+    '[claude-wrapper] dialogDetection.endMarker は非推奨です。dialogDetection.endMarkers.default を' +
+      '使ってください(ExitPlanMode マーカーは自動で OR されます)。'
+  )
+}
+const END_MARKER_PATTERN = composeEndMarkerPattern(_dialogDetection)
 const END_MARKER_RE_G = new RegExp(END_MARKER_PATTERN, 'gi')
 
 const isWindows = os.platform() === 'win32'
@@ -317,6 +347,47 @@ const DISMISSAL_MS = 2000
 // 「直前に検出していた」かつ「オプション数が一致」かつ「prompt が類似」なら同じ扱い。
 const DEDUP_WINDOW_MS = 15000
 
+// -------------------------------------------------------
+// 境界文字集合(罫線 / ボックス枠 / タブ印 / カーソル)の単一ソース。
+// 各検出箇所でリテラル直書きすると、片方だけ直し忘れて検出が drift する。
+// ※ メンバーを変えると検出挙動が変わる。test-parse-dialog.js [22] が membership を固定する。
+// -------------------------------------------------------
+const BOX_CHARS = '│╭╮╰╯─╌' // ボックス枠 + 罫線(7文字)
+const RULE_CHARS = '─╌' // 横罫線のみ
+const PROMPT_BOX_ANCHOR_CHARS = '│─╌' // prompt 行頭アンカー探索用の意図的サブセット(╭╮╰╯ を含まない)
+const TAB_MARK_CHARS = '☐✔□✓' // タブバーのチェック印(U+2610/U+2714 と □/✓ フォールバック)
+const TAB_ARROW_CHAR = '→'
+const CURSOR_CHAR = '❯' // アクティブ選択カーソル
+const LINE_START_CHARS = '\n' + BOX_CHARS // 行頭とみなす文字(改行 + ボックス枠)
+
+// 派生 RegExp(上記集合に正規表現メタ文字 `- ^ ] \` は含まれないため char class 直挿入で安全)。
+const BOX_CHARS_G = new RegExp(`[${BOX_CHARS}]`, 'g')
+const BOX_OR_NEWLINE_G = new RegExp(`[${BOX_CHARS}\\r\\n]`, 'g')
+const PROMPT_NORMALIZE_STRIP_RE = new RegExp(`[\\s　${BOX_CHARS}\\r\\n]+`, 'g')
+const RULE_LINE_RE = new RegExp(`^[${RULE_CHARS}\\s]+$`)
+const TAB_BAR_RE = new RegExp(`[${TAB_MARK_CHARS}${TAB_ARROW_CHAR}]`)
+const CURSOR_G = new RegExp(CURSOR_CHAR, 'g')
+const CURSOR_NUM_RE = new RegExp(`${CURSOR_CHAR}\\s*[1-9]`)
+const TAB_MARK_G = new RegExp(`[${TAB_MARK_CHARS}]`, 'g') // チェック印のみ(→ を含まない)
+const TAB_NAV_RE = new RegExp(`${TAB_ARROW_CHAR}|Tab\\s*/\\s*Arrow\\s+keys`, 'i')
+// ●Tool() 行未描画時のラベル推測 fallback。ラベル直後の対象パスを args に拾う。
+const LABEL_ARGS_RE = new RegExp(
+  `(?:Bash\\s*command|Create\\s*file|Update|Edit|Delete|Read\\s*file|Search|Grep)` +
+    `[\\s${BOX_CHARS}:]*([^\\n${BOX_CHARS}?]{2,80})`,
+  'i'
+)
+
+// 文字集合のいずれかの文字の最終出現 index(全て不在なら -1)。
+// 旧 Math.max(s.lastIndexOf(a), s.lastIndexOf(b), ..., -1) と等価。
+function lastIndexOfAnyChar(s, chars) {
+  let idx = -1
+  for (const ch of chars) {
+    const at = s.lastIndexOf(ch)
+    if (at > idx) idx = at
+  }
+  return idx
+}
+
 // prompt 類似度: 文字落ち（"Do you want to create" → "Do you want t creat"）に
 // 耐性を持たせるため、正規化後に subsequence 一致率で判定する。
 // 日本語(ひらがな/カタカナ/漢字)も比較対象にするため、空白・罫線・制御文字のみ
@@ -325,7 +396,7 @@ const DEDUP_WINDOW_MS = 15000
 function normalizePrompt(s) {
   return s
     .toLowerCase()
-    .replace(/[\s　│╭╮╰╯─╌\r\n]+/g, '')
+    .replace(PROMPT_NORMALIZE_STRIP_RE, '')
 }
 function promptSimilar(a, b) {
   const na = normalizePrompt(a)
@@ -449,16 +520,15 @@ function onPtyData(chunk) {
 // parseDialog から切り出した補助関数(肥大化した parseDialog の見通し改善)。
 // optionSegment = 「?」より後ろの領域。挙動は従来 parseDialog のインライン実装と同一。
 function extractOptions(optionSegment) {
-  const LINE_START_CHARS = '\n│╭╮╰╯─╌'
   function isStrictMarkerStart(i) {
     if (i === 0) return true
     const prev = optionSegment[i - 1]
-    if (prev === '❯') return true
+    if (prev === CURSOR_CHAR) return true
     if (LINE_START_CHARS.includes(prev)) return true
     if (/\s/.test(prev)) {
       for (let j = i - 2; j >= 0; j--) {
         const c = optionSegment[j]
-        if (c === '❯' || LINE_START_CHARS.includes(c)) return true
+        if (c === CURSOR_CHAR || LINE_START_CHARS.includes(c)) return true
         if (!/\s/.test(c)) return false
       }
       return true
@@ -499,9 +569,9 @@ function extractOptions(optionSegment) {
     const nextAt = i + 1 < sortedMarks.length ? sortedMarks[i + 1].at : optionSegment.length
     return optionSegment
       .slice(mk.end, nextAt)
-      .replace(/❯/g, '')
+      .replace(CURSOR_G, '')
       .replace(/[\r\n]/g, ' ')
-      .replace(/[─╌│╭╮╰╯]/g, '')
+      .replace(BOX_CHARS_G, '')
       .replace(/^[.\s]+/, '')
       .replace(/\s+/g, ' ')
       .replace(TUI_TAIL_HINT_RE, '')
@@ -521,9 +591,9 @@ function expandExitPlanPromptStart(beforeQ, startNl) {
   for (let i = 0; i < MAX_LINES; i++) {
     const prevNl = beforeQ.lastIndexOf('\n', lineStart - 1)
     const line = beforeQ.slice(prevNl + 1, lineStart).trim()
-    const isRule = /^[─╌\s]+$/.test(line) && line.replace(/\s/g, '').length >= 10
-    const isTabBar = /[☐✔□✓→]/.test(line)
-    const isOption = line.includes('❯')
+    const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 10
+    const isTabBar = TAB_BAR_RE.test(line)
+    const isOption = line.includes(CURSOR_CHAR)
     if (line === '' || isRule || isTabBar || isOption) break
     lineStart = prevNl
     if (prevNl < 0) break
@@ -552,7 +622,7 @@ function parseDialog(buf) {
 
   // 3. 偽陽性除外: アクティブカーソル `❯` + 数字 1〜9 が必須
   // AskUserQuestion 型は選択肢が 4 個以上になることがあるため 1〜9 を許容。
-  if (!/❯\s*[1-9]/.test(segment)) return null
+  if (!CURSOR_NUM_RE.test(segment)) return null
 
   // 4. プロンプト抽出
   const qIdx = segment.lastIndexOf('?')
@@ -577,22 +647,11 @@ function parseDialog(buf) {
     if (submitIdx >= 0) {
       arrowIdx = submitIdx + 'Submit'.length - 1
     } else {
-      arrowIdx = Math.max(
-        beforeQ.lastIndexOf('☐'),
-        beforeQ.lastIndexOf('✔'),
-        beforeQ.lastIndexOf('□'),
-        beforeQ.lastIndexOf('✓'),
-        beforeQ.lastIndexOf('→')
-      )
+      arrowIdx = lastIndexOfAnyChar(beforeQ, TAB_MARK_CHARS + TAB_ARROW_CHAR)
     }
   }
   // 行頭アンカーの優先順: 改行 > タブバー右端(arrowIdx) > ボックス文字
-  const boxCharIdx = Math.max(
-    beforeQ.lastIndexOf('│'),
-    beforeQ.lastIndexOf('─'),
-    beforeQ.lastIndexOf('╌'),
-    -1
-  )
+  const boxCharIdx = lastIndexOfAnyChar(beforeQ, PROMPT_BOX_ANCHOR_CHARS)
   const fallbackIdx = arrowIdx >= 0 ? arrowIdx : boxCharIdx
   const lineStart = nlIdx >= 0 ? nlIdx : fallbackIdx
   // ExitPlanMode のときだけ、hard-wrap で複数行になった prompt を 1 段落に連結する。
@@ -602,7 +661,7 @@ function parseDialog(buf) {
     isExitPlanMode && nlIdx >= 0 ? expandExitPlanPromptStart(beforeQ, nlIdx) : lineStart
   const prompt = segment
     .slice(promptStart + 1, qIdx + 1)
-    .replace(/[│╭╮╰╯─╌\r\n]/g, ' ')
+    .replace(BOX_OR_NEWLINE_G, ' ')
     .replace(/\s+/g, ' ')
     .trim()
   if (!prompt) return null
@@ -677,9 +736,7 @@ function parseDialog(buf) {
         if (re.test(boxText)) {
           tool = t
           // ラベルの直後にある対象パスっぽい文字列を args として拾う
-          const m = boxText.match(
-            /(?:Bash\s*command|Create\s*file|Update|Edit|Delete|Read\s*file|Search|Grep)[\s│╭╮╰╯─╌:]*([^\n│╭╮╰╯─╌?]{2,80})/i
-          )
+          const m = boxText.match(LABEL_ARGS_RE)
           if (m && !args) args = m[1].replace(/\s+/g, ' ').trim()
           break
         }
@@ -698,8 +755,8 @@ function parseDialog(buf) {
 function isTabbedDialog(buf) {
   // Claude TUI は U+2610 (☐) / U+2714 (✔) を使う環境が多いが、フォント未対応の
   // 環境で U+25A1 (□) / U+2713 (✓) にフォールバックされる場合もあるため両方拾う。
-  const boxMarks = (buf.match(/[□☐✓✔]/g) || []).length
-  const hasNav = /→|Tab\s*\/\s*Arrow\s+keys/i.test(buf)
+  const boxMarks = (buf.match(TAB_MARK_G) || []).length
+  const hasNav = TAB_NAV_RE.test(buf)
   return boxMarks >= 2 && hasNav
 }
 
@@ -764,6 +821,18 @@ if (typeof module !== 'undefined') {
     screenTextFromBuffer,
     validateFreeText,
     extractOptions,
+    composeEndMarkerPattern,
+    // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
+    BOX_CHARS,
+    RULE_CHARS,
+    PROMPT_BOX_ANCHOR_CHARS,
+    TAB_MARK_CHARS,
+    TAB_ARROW_CHAR,
+    CURSOR_CHAR,
+    LINE_START_CHARS,
+    TAB_NAV_RE,
+    EXIT_PLAN_END_PATTERN,
+    DEFAULT_END_MARKER,
   }
 }
 
