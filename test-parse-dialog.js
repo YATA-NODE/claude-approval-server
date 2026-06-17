@@ -502,6 +502,84 @@ console.log('\n[6m] parseDialog: 出力行を挟む古い ●Tool を AUQ に継
 }
 
 // -------------------------------------------------------
+// 6n. parseDialog: AUQ の prompt が端末幅で hard-wrap(実改行)して 2 行になっても連結する (課題4)。
+//     現状の単一行抽出なら末尾行のみ = 先頭欠け。構造境界(罫線)まで上方連結してフル復元する。
+// -------------------------------------------------------
+console.log('\n[6n] parseDialog: AUQ prompt の hard-wrap 複数行を連結 (課題4)')
+{
+  const buf = [
+    '────────────────────────────────────────',
+    ' Which auto-switch mode do you prefer for short',
+    ' tasks?',
+    ' ❯ 1. Skip auto-switch',
+    '   2. Enable for short tasks',
+    '   3. Decide each time',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=AskUserQuestion', r && r.tool, 'AskUserQuestion')
+  assertEq(
+    'prompt が 2 行連結でフル復元',
+    r && r.prompt,
+    'Which auto-switch mode do you prefer for short tasks?'
+  )
+  // 存在証明: 旧単一行抽出なら末尾行 "tasks?" のみ(先頭欠け)だった。
+  assertEq('旧単一行なら先頭欠けだった(課題4 存在証明)', r && r.prompt !== 'tasks?', true)
+}
+
+// -------------------------------------------------------
+// 6o. parseDialog: ツール承認の prompt が hard-wrap して 2 行になっても連結する (課題4、現実構造)。
+//     box 構造 = 罫線 / ラベル / 引数エコー / ╌╌╌╌ 区切り / prompt。連結は ╌╌╌╌ で停止し、
+//     ラベル・エコーを prompt に巻き込まない。tool/args は ●Bash から継承。
+// -------------------------------------------------------
+console.log('\n[6o] parseDialog: ツール承認 prompt の hard-wrap 複数行を連結 (課題4)')
+{
+  const buf = [
+    '● Bash(curl -X POST https://api.example.com/deploy)',
+    '────────────────────────────────────────',
+    ' Bash command',
+    ' curl -X POST https://api.example.com/deploy',
+    '╌╌╌╌',
+    ' Do you want to run this command against the production',
+    ' endpoint?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('tool=Bash', r && r.tool, 'Bash')
+  assertEq('args に curl が継承される', r && /curl -X POST/.test(r.args), true)
+  assertEq(
+    'prompt が 2 行連結でフル復元(ラベル・エコー非混入)',
+    r && r.prompt,
+    'Do you want to run this command against the production endpoint?'
+  )
+  assertEq('prompt にラベル Bash command が混入しない', r && /Bash command/.test(r.prompt), false)
+}
+
+// -------------------------------------------------------
+// 6p. parseDialog: 罫線未描画の断片フレームでも ●Tool 行を prompt に巻き込まない (課題4 安全側)。
+//     box 上端罫線が未描画で ●Bash 行が prompt 直上に来ても、● 境界で連結が止まり、
+//     args エコー(秘匿対象になりうる)がスマホ承認表示文に前置混入しない。
+// -------------------------------------------------------
+console.log('\n[6p] parseDialog: 罫線未描画でも ●Tool 行を prompt に混入させない (課題4)')
+{
+  const buf = [
+    '● Bash(curl -H "Authorization: Bearer SECRET" https://x)',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('prompt は質問のみ(●Tool 行非混入)', r && r.prompt, 'Do you want to proceed?')
+  assertEq('prompt に Authorization が混入しない', r && /Authorization/.test(r.prompt), false)
+}
+
+// -------------------------------------------------------
 // 7. parseDialog: 選択肢本文に「1 枚目」「2 枚目」を含むケース（誤検知防止）
 // -------------------------------------------------------
 console.log('\n[7] parseDialog: 本文中の数字を誤検知しない')
