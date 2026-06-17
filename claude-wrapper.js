@@ -594,21 +594,28 @@ function extractOptions(optionSegment) {
   return { sortedMarks, options, duplicate }
 }
 
-// ExitPlanMode 専用: prompt が端末幅で hard-wrap(実改行込み)され複数行になる場合に、
-// prompt 段落の開始位置(改行 index)を求める。startNl(? を含む行の直前の改行)から上方へ
-// 走査し、直近の構造境界に当たったら停止する(境界行自体は段落に含めない)。
-// 境界 = 空行 / 罫線行(行全体が罫線文字+空白かつ連続 10 文字以上)/ タブバー(☐✔□✓→)/ 選択肢(❯)。
+// 全ダイアログ種別(ExitPlanMode / AUQ / ツール承認)対応: prompt が端末幅で hard-wrap
+// (実改行込み)され複数行になる場合に、prompt 段落の開始位置(改行 index)を求める。
+// startNl(? を含む行の直前の改行)から上方へ走査し、直近の構造境界に当たったら停止する
+// (境界行自体は段落に含めない)。
+// 境界 = 空行 / 罫線行(行全体が罫線文字+空白)/ タブバー(☐✔□✓→)/ 選択肢(❯)/
+//        ツール承認ラベル(Bash command 等 = prompt の上に来るので段落に含めない)/
+//        ● を含む行(Claude の tool/message 行 = ターン境界。罫線未描画の断片フレームでも
+//        ●Tool 行〔args エコー含む〕を prompt に巻き込まない)。
+// 罫線は実機では端末幅で長いが、短い区切り(╌╌╌╌ 等)も境界として扱う(>= 3)。
 // MAX_LINES で暴走を防ぐ(超過時は startNl のまま = 現行同等の単一行抽出に倒れる)。
-function expandExitPlanPromptStart(beforeQ, startNl) {
+function expandPromptStart(beforeQ, startNl) {
   const MAX_LINES = 5
   let lineStart = startNl
   for (let i = 0; i < MAX_LINES; i++) {
     const prevNl = beforeQ.lastIndexOf('\n', lineStart - 1)
     const line = beforeQ.slice(prevNl + 1, lineStart).trim()
-    const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 10
+    const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
     const isTabBar = TAB_BAR_RE.test(line)
     const isOption = line.includes(CURSOR_CHAR)
-    if (line === '' || isRule || isTabBar || isOption) break
+    const isActionLabel = ACTION_LABEL_RE.test(line)
+    const isBullet = line.includes('●')
+    if (line === '' || isRule || isTabBar || isOption || isActionLabel || isBullet) break
     lineStart = prevNl
     if (prevNl < 0) break
   }
@@ -668,11 +675,11 @@ function parseDialog(buf) {
   const boxCharIdx = lastIndexOfAnyChar(beforeQ, PROMPT_BOX_ANCHOR_CHARS)
   const fallbackIdx = arrowIdx >= 0 ? arrowIdx : boxCharIdx
   const lineStart = nlIdx >= 0 ? nlIdx : fallbackIdx
-  // ExitPlanMode のときだけ、hard-wrap で複数行になった prompt を 1 段落に連結する。
-  // それ以外(AUQ / ツール承認 / タブ式)は現行の単一行抽出のまま(回帰なし)。
+  // hard-wrap で複数行になった prompt を 1 段落に連結する(全種別: ExitPlanMode / AUQ / ツール承認)。
+  // 構造境界(罫線 / タブバー / ❯ / ラベル)で停止するため、prompt 1 行のみのときは即停止 = 不変。
+  // タブ式(nlIdx < 0)は連結対象外(fallback アンカーのまま)。
   // promptStart は prompt 抽出と tool 継承の beforeDialog 切り出し(下記 6b)で共用し、整合させる。
-  const promptStart =
-    isExitPlanMode && nlIdx >= 0 ? expandExitPlanPromptStart(beforeQ, nlIdx) : lineStart
+  const promptStart = nlIdx >= 0 ? expandPromptStart(beforeQ, nlIdx) : lineStart
   const prompt = segment
     .slice(promptStart + 1, qIdx + 1)
     .replace(BOX_OR_NEWLINE_G, ' ')
