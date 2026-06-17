@@ -580,6 +580,48 @@ console.log('\n[6p] parseDialog: 罫線未描画でも ●Tool 行を prompt に
 }
 
 // -------------------------------------------------------
+// 6q. parseDialog: hard-wrap した ●Tool 行の args 続き行(● を含まない)を prompt に混入させない
+//     (課題4 安全側 / 罫線未描画フレーム)。box 上端罫線が無く ●Bash 行が 2 行に折返した
+//     2 行目(Authorization 等の args 続き)が prompt 直上に来ても、box 境界に当たらないため
+//     連結を破棄して単一行に倒す = prompt は質問のみ。
+// -------------------------------------------------------
+console.log('\n[6q] parseDialog: hard-wrap した ●Tool 行の args 続き行を prompt に混入させない (課題4)')
+{
+  const buf = [
+    '● Bash(curl -X POST https://api.example.com/deploy -H',
+    'Authorization: Bearer DUMMY_TEST_TOKEN)',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('prompt は質問のみ(args 続き行非混入)', r && r.prompt, 'Do you want to proceed?')
+  assertEq('prompt に Authorization が混入しない', r && /Authorization/.test(r.prompt), false)
+}
+
+// -------------------------------------------------------
+// 6r. parseDialog: hard-wrap した ●Tool 行が box 境界文字(→/❯/罫線)を含んでも turn 境界優先
+//     (課題4 / 順序回帰)。● 行末の → を box 境界と誤判定して args 続き行を連結しないこと。
+// -------------------------------------------------------
+console.log('\n[6r] parseDialog: ●Tool 行が →/❯ を含んでも args 続き行を prompt に混入させない (課題4)')
+{
+  const buf = [
+    '● Bash(curl https://api.example.com -X POST →',
+    'Authorization: Bearer DUMMY_TEST_TOKEN)',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる', !!r, true)
+  assertEq('prompt は質問のみ(→ を含む ●行でも非混入)', r && r.prompt, 'Do you want to proceed?')
+  assertEq('prompt に Authorization が混入しない', r && /Authorization/.test(r.prompt), false)
+}
+
+// -------------------------------------------------------
 // 7. parseDialog: 選択肢本文に「1 枚目」「2 枚目」を含むケース（誤検知防止）
 // -------------------------------------------------------
 console.log('\n[7] parseDialog: 本文中の数字を誤検知しない')
