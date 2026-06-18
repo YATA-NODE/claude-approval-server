@@ -247,6 +247,30 @@
         color: #ff453a;
       }
 
+      /* 正常系の一時通知トースト(エラーの赤と区別、画面下中央に出て自動で消える) */
+      .toast {
+        position: fixed;
+        left: 50%;
+        bottom: 24px;
+        transform: translateX(-50%) translateY(8px);
+        max-width: 90%;
+        background: var(--badge-online-bg);
+        color: var(--badge-online-text);
+        padding: 10px 16px;
+        border-radius: 20px;
+        font-size: 14px;
+        font-weight: 600;
+        box-shadow: 0 2px 10px var(--shadow);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.25s, transform 0.25s;
+        z-index: 1000;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+      }
+
       /* セクションラベル */
       .section-label {
         font-size: 15px;
@@ -719,6 +743,8 @@
         <button class="btn-fetch" id="btn-fetch">📥 承認依頼を取得</button>
         <p class="last-fetch" id="last-fetch"></p>
         <p class="err" id="main-err"></p>
+        <!-- 正常系の一時通知(他端末で処理済み 等)。エラー(赤)と区別し自動で消える。 -->
+        <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
         <!-- 承認待ち一覧 -->
         <p class="section-label">
@@ -787,6 +813,7 @@
           errNetwork: (msg) => `通信エラー: ${msg}`,
           errBulk: (msg) => `一括承認エラー: ${msg}`,
           errOp: (msg) => `操作失敗: ${msg}`,
+          alreadyHandled: 'この依頼は既に他の端末で処理されました',
           emptyInitial: '「承認依頼を取得」を押してください',
           emptyQueue: '承認待ちの依頼はありません',
           pending: '承認待ち',
@@ -844,6 +871,7 @@
           errNetwork: (msg) => `Network error: ${msg}`,
           errBulk: (msg) => `Bulk approve error: ${msg}`,
           errOp: (msg) => `Operation failed: ${msg}`,
+          alreadyHandled: 'This request was already handled on another device',
           emptyInitial: 'Press "Fetch Requests" to load',
           emptyQueue: 'No pending requests',
           pending: 'Pending',
@@ -1020,7 +1048,11 @@
           ...(options.headers || {}),
         }
         const res = await fetch(serverUrl + path, { ...options, headers })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        if (!res.ok) {
+          const err = new Error(`HTTP ${res.status}`)
+          err.status = res.status // 409(状態競合)等を呼び出し側で判別するため
+          throw err
+        }
         return res.json()
       }
 
@@ -1081,6 +1113,42 @@
         } catch (e) {
           document.getElementById('main-err').textContent = t('errNetwork', e.message)
         }
+      }
+
+      // 前面復帰時のみ最新化(非ポーリング)。タブ可視化 / bfcache 復帰 / window focus で
+      // fetchQueue を 1 回だけ呼ぶ = ユーザがパネルを見た瞬間に新規出現 + resolved 消滅を反映。
+      // 見ていない間は通信ゼロ(省電力)。二重発火は lastFetchAt で ~1 秒スロットルして回避。
+      function refreshOnForeground() {
+        if (!serverUrl || !token) return
+        if (document.visibilityState !== 'visible') return
+        const mainView = document.getElementById('main-view')
+        if (!mainView || mainView.style.display === 'none') return
+        if (lastFetchAt && Date.now() - new Date(lastFetchAt).getTime() < 1000) return
+        fetchQueue()
+      }
+      document.addEventListener('visibilitychange', refreshOnForeground)
+      window.addEventListener('pageshow', refreshOnForeground)
+      window.addEventListener('focus', refreshOnForeground)
+
+      // 正常系の一時通知(エラーの赤と区別)。画面下中央に出て自動で消える。
+      let toastTimer = null
+      function showToast(msg) {
+        const el = document.getElementById('toast')
+        el.textContent = msg
+        el.classList.add('show')
+        if (toastTimer) clearTimeout(toastTimer)
+        toastTimer = setTimeout(() => el.classList.remove('show'), 4000)
+      }
+
+      // 409 = 状態競合の正常系(他端末で既に処理済み = PC 直接応答後の stale カード操作 等)。
+      // エラー表示でなく該当カード除去(fetchQueue)+ 一時通知(トースト)で自己修復する。処理したら true。
+      async function handleResolveConflict(e, before) {
+        if (!e || e.status !== 409) return false
+        if (before) before() // freetext 等の固有後始末(モーダルを閉じる等)
+        selectedId = null
+        await fetchQueue()
+        showToast(t('alreadyHandled'))
+        return true
       }
 
       function btnClass(opt, allOptions) {
@@ -1330,6 +1398,7 @@
           selectedId = null
           await fetchQueue()
         } catch (e) {
+          if (await handleResolveConflict(e)) return
           document.getElementById('main-err').textContent = t('errOp', e.message)
           btn.disabled = false
           btn.textContent = t('btnCancelDialog')
@@ -1385,6 +1454,7 @@
           delete selectedAnswers[id]
           await fetchQueue()
         } catch (e) {
+          if (await handleResolveConflict(e)) return
           document.getElementById('main-err').textContent = t('errOp', e.message)
           submitBtn.disabled = false
           submitBtn.textContent = t('submitAll')
@@ -1489,6 +1559,7 @@
           selectedId = null
           await fetchQueue()
         } catch (e) {
+          if (await handleResolveConflict(e, closeFreeTextModal)) return
           err.textContent = t('errOp', e.message)
           sendBtn.disabled = false
         }
@@ -1513,6 +1584,7 @@
             await fetchQueue()
           }
         } catch (e) {
+          if (await handleResolveConflict(e)) return
           document.getElementById('main-err').textContent = t('errOp', e.message)
           if (btnArea) btnArea.querySelectorAll('button').forEach((b) => (b.disabled = false))
         }
