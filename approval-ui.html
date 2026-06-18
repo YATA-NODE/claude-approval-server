@@ -787,6 +787,7 @@
           errNetwork: (msg) => `通信エラー: ${msg}`,
           errBulk: (msg) => `一括承認エラー: ${msg}`,
           errOp: (msg) => `操作失敗: ${msg}`,
+          alreadyHandled: 'この依頼は既に他の端末で処理されました',
           emptyInitial: '「承認依頼を取得」を押してください',
           emptyQueue: '承認待ちの依頼はありません',
           pending: '承認待ち',
@@ -844,6 +845,7 @@
           errNetwork: (msg) => `Network error: ${msg}`,
           errBulk: (msg) => `Bulk approve error: ${msg}`,
           errOp: (msg) => `Operation failed: ${msg}`,
+          alreadyHandled: 'This request was already handled on another device',
           emptyInitial: 'Press "Fetch Requests" to load',
           emptyQueue: 'No pending requests',
           pending: 'Pending',
@@ -1020,7 +1022,11 @@
           ...(options.headers || {}),
         }
         const res = await fetch(serverUrl + path, { ...options, headers })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        if (!res.ok) {
+          const err = new Error(`HTTP ${res.status}`)
+          err.status = res.status // 409(状態競合)等を呼び出し側で判別するため
+          throw err
+        }
         return res.json()
       }
 
@@ -1081,6 +1087,33 @@
         } catch (e) {
           document.getElementById('main-err').textContent = t('errNetwork', e.message)
         }
+      }
+
+      // 前面復帰時のみ最新化(非ポーリング)。タブ可視化 / bfcache 復帰 / window focus で
+      // fetchQueue を 1 回だけ呼ぶ = ユーザがパネルを見た瞬間に新規出現 + resolved 消滅を反映。
+      // 見ていない間は通信ゼロ(省電力)。二重発火は lastFetchAt で ~1 秒スロットルして回避。
+      function refreshOnForeground() {
+        if (!serverUrl || !token) return
+        if (document.visibilityState !== 'visible') return
+        const mainView = document.getElementById('main-view')
+        if (!mainView || mainView.style.display === 'none') return
+        if (lastFetchAt && Date.now() - new Date(lastFetchAt).getTime() < 1000) return
+        fetchQueue()
+      }
+      document.addEventListener('visibilitychange', refreshOnForeground)
+      window.addEventListener('pageshow', refreshOnForeground)
+      window.addEventListener('focus', refreshOnForeground)
+
+      // 409 = 状態競合の正常系(他端末で既に処理済み = PC 直接応答後の stale カード操作 等)。
+      // エラー表示でなく該当カード除去(fetchQueue)+ 短い通知で自己修復する。処理したら true。
+      async function handleResolveConflict(e, before) {
+        if (!e || e.status !== 409) return false
+        if (before) before() // freetext 等の固有後始末(モーダルを閉じる等)
+        selectedId = null
+        await fetchQueue()
+        // 通知は fetchQueue の後にセットする(fetchQueue は成功時に main-err を空へクリアするため)
+        document.getElementById('main-err').textContent = t('alreadyHandled')
+        return true
       }
 
       function btnClass(opt, allOptions) {
@@ -1330,6 +1363,7 @@
           selectedId = null
           await fetchQueue()
         } catch (e) {
+          if (await handleResolveConflict(e)) return
           document.getElementById('main-err').textContent = t('errOp', e.message)
           btn.disabled = false
           btn.textContent = t('btnCancelDialog')
@@ -1385,6 +1419,7 @@
           delete selectedAnswers[id]
           await fetchQueue()
         } catch (e) {
+          if (await handleResolveConflict(e)) return
           document.getElementById('main-err').textContent = t('errOp', e.message)
           submitBtn.disabled = false
           submitBtn.textContent = t('submitAll')
@@ -1489,6 +1524,7 @@
           selectedId = null
           await fetchQueue()
         } catch (e) {
+          if (await handleResolveConflict(e, closeFreeTextModal)) return
           err.textContent = t('errOp', e.message)
           sendBtn.disabled = false
         }
@@ -1513,6 +1549,7 @@
             await fetchQueue()
           }
         } catch (e) {
+          if (await handleResolveConflict(e)) return
           document.getElementById('main-err').textContent = t('errOp', e.message)
           if (btnArea) btnArea.querySelectorAll('button').forEach((b) => (b.disabled = false))
         }
