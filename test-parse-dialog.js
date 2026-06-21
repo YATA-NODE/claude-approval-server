@@ -21,6 +21,7 @@ const {
   validateFreeText,
   extractOptions,
   composeEndMarkerPattern,
+  isLostRegistration,
   BOX_CHARS,
   RULE_CHARS,
   PROMPT_BOX_ANCHOR_CHARS,
@@ -1350,6 +1351,34 @@ console.log('\n[23] composeEndMarkerPattern')
     new RegExp(DEFAULT_COMPOSED, 'gi').test('Esc to cancel'),
     true
   )
+}
+
+// -------------------------------------------------------
+// 24. isLostRegistration: サーバーが id を失った(404)時の再登録判定
+//     真因 = サーバー再起動でメモリキュー揮発 → 旧 id が 404 → 再登録すべき
+// -------------------------------------------------------
+console.log('[24] isLostRegistration (404 = 登録喪失 → 再登録)')
+{
+  const e404 = Object.assign(new Error('HTTP 404: Not found'), { statusCode: 404 })
+  const e500 = Object.assign(new Error('HTTP 500'), { statusCode: 500 })
+  const eNet = new Error('socket hang up') // statusCode 無し(接続断)
+  const dlg = { id: 'abc', prompt: 'p' }
+
+  assertEq('404 + 自分の id → 再登録する', isLostRegistration(e404, dlg, 'abc'), true)
+  assertEq('500 は再登録しない(従来の sleep 再試行)', isLostRegistration(e500, dlg, 'abc'), false)
+  assertEq('接続断(statusCode 無し)は再登録しない', isLostRegistration(eNet, dlg, 'abc'), false)
+  assertEq(
+    '404 でも別ダイアログに切替後(id 不一致)は再登録しない',
+    isLostRegistration(e404, dlg, 'xyz'),
+    false
+  )
+  assertEq('currentDialog 無し → 再登録しない', isLostRegistration(e404, null, 'abc'), false)
+  assertEq(
+    'id 未採番(null)の dialog には誤適用しない',
+    isLostRegistration(e404, { id: null }, 'abc'),
+    false
+  )
+  assertEq('err 無し → false(防御)', isLostRegistration(null, dlg, 'abc'), false)
 }
 
 // -------------------------------------------------------

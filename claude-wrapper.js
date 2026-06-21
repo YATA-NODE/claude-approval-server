@@ -140,7 +140,10 @@ function httpRequest(method, urlPath, body, timeoutMs = 70000) {
         res.on('data', (d) => (buf += d))
         res.on('end', () => {
           if (res.statusCode >= 400) {
-            return reject(new Error(`HTTP ${res.statusCode}: ${buf}`))
+            // statusCode を error に持たせ、呼び出し側で 404(登録喪失)等を判別可能にする。
+            const err = new Error(`HTTP ${res.statusCode}: ${buf}`)
+            err.statusCode = res.statusCode
+            return reject(err)
           }
           try {
             resolve(JSON.parse(buf))
@@ -862,6 +865,7 @@ if (typeof module !== 'undefined') {
     validateFreeText,
     extractOptions,
     composeEndMarkerPattern,
+    isLostRegistration,
     // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
     BOX_CHARS,
     RULE_CHARS,
@@ -1204,12 +1208,41 @@ async function registerDialog(d) {
   }
 }
 
+// サーバー応答エラーが「登録喪失」(= サーバーがこの id を失った, 主に再起動/クラッシュで
+// メモリキューが揮発したケース)を表すかの純判定。404 かつ、現在追跡中のダイアログが
+// まさにこの id のときだけ真 = 別ダイアログに切り替わった後の遅延 404 で誤再登録しない。
+function isLostRegistration(err, dialog, id) {
+  return !!(err && err.statusCode === 404 && dialog && dialog.id === id)
+}
+
 async function pollForResponse(id) {
   while (currentDialog && currentDialog.id === id) {
     let resp
     try {
       resp = await httpRequest('GET', `/status/${id}?wait=60`, null, 70000)
     } catch (e) {
+      // サーバーが当該 id を失った(プロセス再起動・クラッシュでメモリキューが揮発した等)
+      // 場合は 404 が返る。同じ死んだ id を回し続けても依頼はスマホへ二度と出ないため、
+      // まだ画面に出ている現ダイアログを即時に再登録して新しい id を採番し直す。
+      // これがオーファン化(PC にダイアログ残存・サーバー queue 空・スマホ不可視)の解消点。
+      if (isLostRegistration(e, currentDialog, id)) {
+        const d = currentDialog
+        currentDialog = null // register 系が自前でスロット予約するため一旦解放する
+        wlog(`status 404 (server lost id=${id}); re-registering dialog`)
+        // tabs の有無 = 複合スナップショットか否かの不変条件で振り分ける。
+        // 複合 currentDialog は registerMultiDialog 経由(tabs.length>=2 保証)でのみ作られ
+        // args を持たない一方、単一 currentDialog は args を持ち tabs を持たない。
+        // よって length>=2 でなく Array.isArray で判定する(length 条件に変えると複合を
+        // registerDialog へ誤送し d.args 参照でクラッシュする)。
+        if (Array.isArray(d.tabs)) {
+          await registerMultiDialog(d.tabs, PROJECT_NAME)
+        } else {
+          await registerDialog(d)
+        }
+        // 再登録側が新しい pollForResponse を起動する(or POST 失敗時は currentDialog を
+        // null に戻し、400ms 定期検出が同頻度でリトライする)。本ループはここで終了。
+        return
+      }
       // 接続断・一時エラー。少し待って再試行
       await sleep(3000)
       continue
