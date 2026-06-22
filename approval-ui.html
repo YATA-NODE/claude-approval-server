@@ -1212,11 +1212,13 @@
 
         const btnHtml = isSelected
           ? `<div class="btn-area">${item.options
-              .filter((opt) => !CHAT_ABOUT_RE.test(opt))
-              .map(
-                (opt) =>
-                  `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-answer="${escHtml(opt)}">${escHtml(opt)}</button>`
-              )
+              .map((opt, oi) => {
+                // Chat about this は遠隔不能なので UI で非表示。num は元の oi+1 を
+                // 保持し wrapper / サーバーへの番号と整合させる(複合質問と同方式)。
+                if (CHAT_ABOUT_RE.test(opt)) return ''
+                const num = String(oi + 1)
+                return `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-num="${num}" data-answer="${escHtml(opt)}">${escHtml(opt)}</button>`
+              })
               .join('')}<button class="btn-cancel-dialog" data-cancel-id="${item.id}">${t('btnCancelDialog')}</button></div>`
           : ''
 
@@ -1327,12 +1329,16 @@
         // 単一質問の通常ボタン
         const btn = e.target.closest('button[data-id]')
         if (btn) {
+          const label = btn.dataset.answer
+          const num = btn.dataset.num
           // v1.12.0: Type something / Chat about this はテキスト入力モーダルを開く
-          if (FREE_TEXT_OPTION_RE.test(btn.dataset.answer)) {
-            openFreeTextModal(btn.dataset.id, btn.dataset.answer)
+          if (FREE_TEXT_OPTION_RE.test(label)) {
+            openFreeTextModal(btn.dataset.id, label, null, num)
             return
           }
-          await resolveItem(btn.dataset.id, btn.dataset.answer, btn.closest('.btn-area'))
+          // v1.15.6: 送信は番号(num)、表示・履歴はラベル(label)。option 本文の
+          // 折返し揺れに依存しない安定キーで照合させる(複合質問と同方式)。
+          await resolveItem(btn.dataset.id, num, btn.closest('.btn-area'), false, label)
           return
         }
         // 単一質問カード選択(複合質問カードはトグル不要なので除外)
@@ -1474,11 +1480,14 @@
       let activeFreeTextAnswer = null
       // v1.12.0: Multi タブから開いた場合のみ { tab, num }、single なら null
       let activeFreeTextMulti = null
+      // v1.15.6: single 経路でサーバーへ送る番号(Multi 経路では null)
+      let activeFreeTextNum = null
 
-      function openFreeTextModal(itemId, answer, multiOpts) {
+      function openFreeTextModal(itemId, answer, multiOpts, singleNum) {
         activeFreeTextItemId = itemId
         activeFreeTextAnswer = answer
         activeFreeTextMulti = multiOpts || null
+        activeFreeTextNum = singleNum != null ? singleNum : null
         const modal = document.getElementById('freetext-modal')
         const title = document.getElementById('freetext-title')
         const desc = document.getElementById('freetext-desc')
@@ -1505,6 +1514,7 @@
         activeFreeTextItemId = null
         activeFreeTextAnswer = null
         activeFreeTextMulti = null
+        activeFreeTextNum = null
       }
 
       document.getElementById('freetext-cancel').addEventListener('click', () => {
@@ -1545,10 +1555,12 @@
           return
         }
         try {
+          // v1.15.6: 送信は番号(activeFreeTextNum)、表示は option ラベル(answer)。
+          // option 本文の折返し揺れに依存しない安定キーで照合させる。
           await apiFetch(`/resolve/${id}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ answer, text: clean, resolvedBy }),
+            body: JSON.stringify({ answer: activeFreeTextNum, text: clean, resolvedBy }),
           })
           pushHistory(
             getDescription(id),
@@ -1570,7 +1582,7 @@
         if (e.target.id === 'freetext-modal') closeFreeTextModal()
       })
 
-      async function resolveItem(id, answer, btnArea, isBulk = false) {
+      async function resolveItem(id, answer, btnArea, isBulk = false, label = null) {
         if (btnArea) btnArea.querySelectorAll('button').forEach((b) => (b.disabled = true))
         try {
           await apiFetch(`/resolve/${id}`, {
@@ -1578,7 +1590,9 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ answer, resolvedBy }),
           })
-          pushHistory(getDescription(id), answer)
+          // v1.15.6: answer は送信値(単一質問は番号)。履歴表示は label(ラベル)を
+          // 優先し、未指定(一括承認 'Yes' 等)は従来通り answer を表示。
+          pushHistory(getDescription(id), label != null ? label : answer)
           if (!isBulk) {
             selectedId = null
             await fetchQueue()
