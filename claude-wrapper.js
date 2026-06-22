@@ -1215,6 +1215,35 @@ function isLostRegistration(err, dialog, id) {
   return !!(err && err.statusCode === 404 && dialog && dialog.id === id)
 }
 
+// v1.15.6: server-resolved な応答を wrapper が注入できない場合の永続オーファン対策。
+// 単一質問の answer がこの currentDialog.options に一致しない(= サーバー側と wrapper
+// 側で別々の parse 瞬間に凍結した options スナップショットが食い違う等)とき、サーバーは
+// 既に当該 id を resolved 化しキューから除外している(スマホ不可視)一方、PC にはダイアログ
+// が残るため、何もしなければ恒久オーファンになる(404 経路 isLostRegistration と同型の症状
+// だがトリガが異なる)。まだ画面に出ている現ダイアログを再登録して新しい id を採番し直し、
+// スマホへ再提示できるようにする。ただし不正 answer が繰り返されると無限ループになるため、
+// 再登録回数を MAX_ORPHAN_REREGISTER で制限し、超過時は再登録せず現状(PC 残存)のまま
+// 放置する(= 従来動作にフォールバック)。本 helper は単一質問経路からのみ呼ばれる
+// (複合質問は番号送信で不一致が起きないため)。
+const MAX_ORPHAN_REREGISTER = 2
+async function reRegisterUninjectableDialog(id, reason) {
+  if (!currentDialog || currentDialog.id !== id) return
+  const prevCount = currentDialog.reRegisterCount || 0
+  if (prevCount >= MAX_ORPHAN_REREGISTER) {
+    wlog(`uninjectable dialog id=${id} (${reason}); 再登録上限到達につき放置`)
+    return
+  }
+  const d = currentDialog
+  d.reRegisterCount = prevCount + 1 // registerDialog の {...d} 経由で新スロットへ引継ぐ
+  currentDialog = null // register 系が自前でスロット予約するため一旦解放する
+  wlog(`uninjectable dialog id=${id} (${reason}); 再登録 (#${prevCount + 1})`)
+  if (Array.isArray(d.tabs)) {
+    await registerMultiDialog(d.tabs, PROJECT_NAME)
+  } else {
+    await registerDialog(d)
+  }
+}
+
 async function pollForResponse(id) {
   while (currentDialog && currentDialog.id === id) {
     let resp
@@ -1287,6 +1316,9 @@ async function pollForResponse(id) {
       wlog(
         `answer "${String(resp.answer).slice(0, 40)}" は許可された値ではない。注入スキップ。`
       )
+      // v1.15.6: サーバーは resolved 済(スマホ不可視)だが wrapper は注入不能。
+      // 永続オーファンを避けるため現ダイアログを再登録してスマホへ再提示する。
+      await reRegisterUninjectableDialog(id, 'answer 不一致')
       return
     }
 
