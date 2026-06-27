@@ -233,10 +233,25 @@ function resolveTargetCommand() {
   return raw
 }
 
+// v1.16.0 (Phase 3a): 起動対象 CLI をモジュールロード時に 1 回だけ解決して保持する。
+// 注入関数(pollForResponse 等)は spawnClaude のローカルスコープ外で動くため、
+// codex 向けのキー注入分岐に必要な「いま codex を相手にしているか」をここで確定させる。
+// IS_CODEX は basename 一致(パス付き起動・実行ファイル拡張子を許容)。claude では
+// false で既存経路が完全不変。判定漏れ(例 Windows の codex.cmd / codex.exe)は危険:
+// IS_CODEX=false で番号 + Enter 経路に落ち、codex の既定 option1(承認)を誤確定しうる
+// (拒否のはずが承認 = failure #Z 同型)ため、起動形態の揺れを広めに codex と判定する。
+// resolveTargetCommand が許可するのは英数 . _ - / のみ(バックスラッシュは exit(1) 拒否)
+// なので path.basename は / 区切りで安定。純関数化してテストで判定境界を固定する。
+function isCodexCommand(cmd) {
+  return /^codex(?:\.(?:exe|cmd))?$/i.test(path.basename(String(cmd)))
+}
+const TARGET_CMD = resolveTargetCommand()
+const IS_CODEX = isCodexCommand(TARGET_CMD)
+
 function spawnClaude() {
   const shell = isWindows ? 'cmd.exe' : '/bin/bash'
   const userArgs = process.argv.slice(2)
-  const targetCmd = resolveTargetCommand()
+  const targetCmd = TARGET_CMD
   const args = isWindows
     ? ['/c', targetCmd, ...userArgs]
     : ['-c', [targetCmd, ...userArgs].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')]
@@ -837,6 +852,37 @@ function isTabbedDialog(buf) {
 const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
 const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
 
+// v1.16.0 (Phase 3a): codex のコマンド承認 option ラベル末尾に内包されるショートカット
+// 文字を抽出する純関数。codex の承認 TUI は claude と異なり「番号 + Enter」型でなく
+// カーソル(›)+ Enter / ショートカットキー(y/p/esc)型のため、番号を送ると末尾 Enter が
+// 既定 option1(承認)を誤確定する(拒否のはずが承認 = failure #Z 同型)。これを避け、
+// ラベル `Yes, proceed (y)` / `...(p)` / `No, ... (esc)` の末尾括弧からキーを取り出す。
+//   入力例: "Yes, proceed (y)" → { kind: 'char', char: 'y' }
+//           "No, and tell Codex... (esc)" → { kind: 'esc' }
+//           "春 (Recommended)" / 括弧なし → null(= 安全側。注入しない判断に倒す)
+// 末尾アンカー (\s*$) なのでラベル本文中の括弧は無視し、末尾の 1 個だけを見る。
+// esc は特例、それ以外は単一英数字(y/p/1 等)のみ受理。複数文字や記号は null。
+function extractCodexShortcut(optionLabel) {
+  const m = String(optionLabel).match(/\(([^)]+)\)\s*$/)
+  if (!m) return null
+  const tok = m[1].trim().toLowerCase()
+  if (tok === 'esc') return { kind: 'esc' }
+  if (/^[a-z0-9]$/.test(tok)) return { kind: 'char', char: tok }
+  return null
+}
+
+// v1.16.0 (Phase 3a): 抽出したショートカットを実際に PTY へ書き込むバイト列へ変換する純関数。
+// esc → ESC(\x1b)、char → その文字そのもの。**末尾 \r は付けない**(char 自体が確定
+// ショートカットのため。E2E で「Enter 必須」が判明したときに限り char にだけ \r を足す)。
+// 抽出失敗(null)時は null を返し、呼び出し側は番号 + Enter にフォールバックせず注入を
+// 行わない(reRegister に倒す)= #Z 再発防止の中核。
+function resolveCodexInjection(optionLabel) {
+  const sc = extractCodexShortcut(optionLabel)
+  if (!sc) return null
+  if (sc.kind === 'esc') return { bytes: '\x1b' }
+  return { bytes: sc.char }
+}
+
 // 複合質問の回答配列バリデータ。
 // answers は次の要素を含む配列(長さは tabs.length と一致):
 //   - 文字列 "1"〜"9"(=数字キーのみ送信、Type something 以外のオプション)
@@ -894,6 +940,9 @@ if (typeof module !== 'undefined') {
     extractOptions,
     composeEndMarkerPattern,
     isLostRegistration,
+    extractCodexShortcut,
+    resolveCodexInjection,
+    isCodexCommand,
     // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
     BOX_CHARS,
     RULE_CHARS,
@@ -1384,6 +1433,14 @@ async function pollForResponse(id) {
       return
     }
 
+    // v1.16.0 (Phase 3a): codex 起動時はコマンド承認の注入方式が異なる(番号 + Enter では
+    // 誤確定する)。番号 → option ラベルのショートカット(y/p/esc)に変換して注入する。
+    // claude(IS_CODEX=false)では本分岐に入らず、以降の既存経路が完全不変。
+    if (IS_CODEX) {
+      await replayCodexApproval(key, currentDialog.options, id)
+      return
+    }
+
     term.write(key + '\r')
     // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
     // (旧実装の cleanBuf='' の代替。詳細は suppressCurrentDialog のコメント参照)
@@ -1456,6 +1513,31 @@ async function replayFreeText(key, text) {
     term.write('\r')
     // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
+}
+
+// v1.16.0 (Phase 3a): codex のコマンド承認(Yes/proceed・don't-ask・No の 3 択)を注入する。
+// key(番号 "1"〜"9")を option ラベルへ写し、末尾括弧のショートカット(y/p/esc)を抽出して
+// そのキーだけを送る(番号 + Enter は送らない = 既定 option 誤確定を構造的に回避)。
+// 抽出失敗時(option 構成が想定外でショートカットを取れない等)は注入せず、現ダイアログを
+// 再登録(reRegisterUninjectableDialog、404 経路と対称)してスマホ/PC の手動処理に倒す。
+// fail-safe = 承認にも拒否にも勝手に倒さない。これが failure #Z(承認取り違え)再発防止の核。
+async function replayCodexApproval(key, options, id) {
+  const inj = resolveCodexInjection(options[parseInt(key, 10) - 1])
+  if (!inj) {
+    wlog(`codex shortcut 抽出失敗(key="${key}")。注入スキップ + 再登録。`)
+    await reRegisterUninjectableDialog(id, 'codex shortcut 不明')
+    return
+  }
+  tabReplayInProgress = true
+  try {
+    term.write(inj.bytes)
+    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+    wlog(`injected codex shortcut for key="${key}" dialog ${id}`)
   } finally {
     tabReplayInProgress = false
     flushStdinBuffer()
