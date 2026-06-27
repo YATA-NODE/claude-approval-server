@@ -22,6 +22,9 @@ const {
   extractOptions,
   composeEndMarkerPattern,
   isLostRegistration,
+  extractCodexShortcut,
+  resolveCodexInjection,
+  isCodexCommand,
   BOX_CHARS,
   RULE_CHARS,
   PROMPT_BOX_ANCHOR_CHARS,
@@ -1414,6 +1417,90 @@ console.log('[25] 単一質問の照合キー安定性(番号 vs テキスト)')
   assertEq('番号 "3" は drift に不変で有効', validateAnswer('3', snapB), '3')
   // 範囲外番号は拒否(bounds check が効く)
   assertEq('範囲外番号 "4" は拒否', validateAnswer('4', snapB), null)
+}
+
+// -------------------------------------------------------
+// 26. extractCodexShortcut / resolveCodexInjection(Phase 3a)
+//     codex のコマンド承認は「番号 + Enter」でなくショートカット(y/p/esc)型。
+//     番号を送ると末尾 Enter が既定 option1(承認)を誤確定する(拒否のはずが承認 =
+//     failure #Z 同型)。option ラベル末尾の (y)/(p)/(esc) を抽出して注入する純関数。
+//     最重要アサート = 抽出失敗(null)時に「番号 + Enter にフォールバックしない」固定。
+// -------------------------------------------------------
+console.log('[26] extractCodexShortcut / resolveCodexInjection')
+{
+  // 抽出: codex コマンド承認の 3 択ラベル
+  assertEq('(y) → char y', extractCodexShortcut('Yes, proceed (y)'), { kind: 'char', char: 'y' })
+  assertEq(
+    "(p) → char p(ラベル内に別の括弧 `touch...` があっても末尾優先)",
+    extractCodexShortcut("Yes, and don't ask again for commands that start with `touch` (p)"),
+    { kind: 'char', char: 'p' }
+  )
+  assertEq(
+    '(esc) → esc',
+    extractCodexShortcut('No, and tell Codex what to do differently (esc)'),
+    { kind: 'esc' }
+  )
+  // 安全側 null: プランモード選択肢(Recommended 等)・括弧なし・複数文字・記号
+  assertEq('(Recommended) → null(安全側)', extractCodexShortcut('春 (Recommended)'), null)
+  assertEq('括弧なし → null', extractCodexShortcut('Yes, proceed'), null)
+  assertEq('複数文字トークン → null', extractCodexShortcut('foo (yes)'), null)
+  assertEq('空ラベル → null', extractCodexShortcut(''), null)
+  assertEq('非文字列 → null(防御)', extractCodexShortcut(null), null)
+  assertEq('末尾以外の括弧は無視 → null', extractCodexShortcut('Yes (y) proceed'), null)
+
+  // 注入バイト列: char はその文字のみ(末尾 \r を付けない=誤確定回避)、esc は ESC
+  assertEq('char y → bytes "y"(\\r なし)', resolveCodexInjection('Yes, proceed (y)'), {
+    bytes: 'y',
+  })
+  assertEq('esc → bytes ESC(\\x1b)', resolveCodexInjection('No... (esc)'), { bytes: '\x1b' })
+  // ★中核: 抽出不能ラベルは null → 呼び出し側は番号 + Enter に倒さず注入しない(#Z 防止)
+  assertEq('抽出不能 → null(番号+Enter にフォールバックしない)', resolveCodexInjection('春 (Recommended)'), null)
+}
+
+// -------------------------------------------------------
+// 27. codex コマンド承認 fixture(parseDialog 本番経路、実ログ由来の合成画面)
+//     codex 0.142.2 実測 TUI:カーソル › (U+203A)、本体は罫線なしインライン、
+//     フッタ "Press enter to confirm or esc to cancel"(既定マーカー esc to cancel に一致)。
+//     検出され、options が末尾ショートカット (y)/(p)/(esc) を保持することを固定する。
+// -------------------------------------------------------
+console.log('[27] codex コマンド承認 fixture(parseDialog)')
+{
+  const buf = [
+    '  Would you like to run the following command?',
+    '  $ touch hello.txt',
+    '› 1. Yes, proceed (y)',
+    '  2. Yes, and don\'t ask again for commands that start with `touch hello.txt` (p)',
+    '  3. No, and tell Codex what to do differently (esc)',
+    '  Press enter to confirm or esc to cancel',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('検出できる(カーソル › を認識)', !!r, true)
+  assertEq('options 数 = 3', r && r.options.length, 3)
+  assertEq('options[0] が (y) を保持', r && /\(y\)\s*$/.test(r.options[0]), true)
+  assertEq('options[2] が (esc) を保持', r && /\(esc\)\s*$/.test(r.options[2]), true)
+  // 抽出 → 注入の往復(detection と injection の整合を本番ラベルで固定)
+  assertEq('option1 → char y', r && resolveCodexInjection(r.options[0]), { bytes: 'y' })
+  assertEq('option3 → esc', r && resolveCodexInjection(r.options[2]), { bytes: '\x1b' })
+}
+
+// -------------------------------------------------------
+// 28. isCodexCommand(Phase 3a / B8 codex-review B001 反映)
+//     IS_CODEX 判定漏れは危険(false なら番号 + Enter 経路に落ち codex 既定 option1 を
+//     誤確定 = #Z 同型)。basename 正規化 + .exe/.cmd 許容で起動形態の揺れを広く拾い、
+//     かつ codex 以外(mycodex / codex-cli 等)は拾わないことを固定する。
+// -------------------------------------------------------
+console.log('[28] isCodexCommand(起動コマンド判定)')
+{
+  assertEq('codex → true', isCodexCommand('codex'), true)
+  assertEq('絶対パス /usr/bin/codex → true', isCodexCommand('/usr/bin/codex'), true)
+  assertEq('相対パス ./codex → true', isCodexCommand('./codex'), true)
+  assertEq('codex.exe → true(Windows)', isCodexCommand('codex.exe'), true)
+  assertEq('codex.cmd → true(Windows shim)', isCodexCommand('codex.cmd'), true)
+  assertEq('大文字 CODEX → true(case-insensitive)', isCodexCommand('CODEX'), true)
+  assertEq('claude → false(既存経路維持)', isCodexCommand('claude'), false)
+  assertEq('mycodex → false', isCodexCommand('mycodex'), false)
+  assertEq('codex-cli → false', isCodexCommand('codex-cli'), false)
+  assertEq('codex.sh → false(未許可拡張子)', isCodexCommand('codex.sh'), false)
 }
 
 // -------------------------------------------------------

@@ -42,7 +42,10 @@ const crypto = require('crypto')
 // 設定読み込み
 // -------------------------------------------------------
 function loadConfig() {
-  const configPath = path.join(__dirname, 'approval-config.json')
+  // APPROVAL_CONFIG で別の設定ファイルを指定できる(既定は同梱の approval-config.json)。
+  // 例: codex 用に APPROVAL_CONFIG=approval-config.codex.json を渡し、claude 用と
+  //     port / token / 検出マーカーを分離して同時併用する。
+  const configPath = process.env.APPROVAL_CONFIG || path.join(__dirname, 'approval-config.json')
   try {
     return JSON.parse(fs.readFileSync(configPath, 'utf8'))
   } catch (_) {
@@ -216,12 +219,42 @@ function getScreenText() {
   )
 }
 
+// 起動対象 CLI コマンドの解決。既定は 'claude'。codex 等へ切り替える場合は
+// approval-config.json の target.command か 環境変数 APPROVAL_TARGET_CMD で指定する。
+// この値は下の shell 引数文字列('-c' / '/c')に挿入されるため、シェルメタ文字を含む
+// 値は拒否して任意コマンド注入(踏み台化)を防ぐ。許可は英数と . _ - / のみ。
+function resolveTargetCommand() {
+  const raw =
+    process.env.APPROVAL_TARGET_CMD || (config.target && config.target.command) || 'claude'
+  if (typeof raw !== 'string' || !/^[A-Za-z0-9._\/-]+$/.test(raw)) {
+    console.error(`\n❌ 不正な起動コマンドです: ${JSON.stringify(raw)}(許可文字: 英数 . _ - /)\n`)
+    process.exit(1)
+  }
+  return raw
+}
+
+// v1.16.0 (Phase 3a): 起動対象 CLI をモジュールロード時に 1 回だけ解決して保持する。
+// 注入関数(pollForResponse 等)は spawnClaude のローカルスコープ外で動くため、
+// codex 向けのキー注入分岐に必要な「いま codex を相手にしているか」をここで確定させる。
+// IS_CODEX は basename 一致(パス付き起動・実行ファイル拡張子を許容)。claude では
+// false で既存経路が完全不変。判定漏れ(例 Windows の codex.cmd / codex.exe)は危険:
+// IS_CODEX=false で番号 + Enter 経路に落ち、codex の既定 option1(承認)を誤確定しうる
+// (拒否のはずが承認 = failure #Z 同型)ため、起動形態の揺れを広めに codex と判定する。
+// resolveTargetCommand が許可するのは英数 . _ - / のみ(バックスラッシュは exit(1) 拒否)
+// なので path.basename は / 区切りで安定。純関数化してテストで判定境界を固定する。
+function isCodexCommand(cmd) {
+  return /^codex(?:\.(?:exe|cmd))?$/i.test(path.basename(String(cmd)))
+}
+const TARGET_CMD = resolveTargetCommand()
+const IS_CODEX = isCodexCommand(TARGET_CMD)
+
 function spawnClaude() {
   const shell = isWindows ? 'cmd.exe' : '/bin/bash'
   const userArgs = process.argv.slice(2)
+  const targetCmd = TARGET_CMD
   const args = isWindows
-    ? ['/c', 'claude', ...userArgs]
-    : ['-c', ['claude', ...userArgs].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')]
+    ? ['/c', targetCmd, ...userArgs]
+    : ['-c', [targetCmd, ...userArgs].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')]
   const cols = process.stdout.columns || 120
   const rows = process.stdout.rows || 30
 
@@ -360,7 +393,11 @@ const RULE_CHARS = '─╌' // 横罫線のみ
 const PROMPT_BOX_ANCHOR_CHARS = '│─╌' // prompt 行頭アンカー探索用の意図的サブセット(╭╮╰╯ を含まない)
 const TAB_MARK_CHARS = '☐✔□✓' // タブバーのチェック印(U+2610/U+2714 と □/✓ フォールバック)
 const TAB_ARROW_CHAR = '→'
-const CURSOR_CHAR = '❯' // アクティブ選択カーソル
+const CURSOR_CHAR = '❯' // アクティブ選択カーソル(claude)
+// 起動対象 CLI でカーソル記号が異なる(claude=❯ U+276F / codex=› U+203A)。検出は
+// この集合のいずれかをカーソルとして扱う。新しい CLI のカーソルはここに足す。
+// char class へ直挿入するため、正規表現メタ文字(- ^ ] \)は含めないこと。
+const CURSOR_CHARS = CURSOR_CHAR + '›'
 const BULLET_CHAR = '●' // Claude の tool/message 行の行頭マーカー = ターン境界(box 描画文字に含まれない)
 const LINE_START_CHARS = '\n' + BOX_CHARS // 行頭とみなす文字(改行 + ボックス枠)
 
@@ -370,8 +407,9 @@ const BOX_OR_NEWLINE_G = new RegExp(`[${BOX_CHARS}\\r\\n]`, 'g')
 const PROMPT_NORMALIZE_STRIP_RE = new RegExp(`[\\s　${BOX_CHARS}\\r\\n]+`, 'g')
 const RULE_LINE_RE = new RegExp(`^[${RULE_CHARS}\\s]+$`)
 const TAB_BAR_RE = new RegExp(`[${TAB_MARK_CHARS}${TAB_ARROW_CHAR}]`)
-const CURSOR_G = new RegExp(CURSOR_CHAR, 'g')
-const CURSOR_NUM_RE = new RegExp(`${CURSOR_CHAR}\\s*[1-9]`)
+const CURSOR_G = new RegExp(`[${CURSOR_CHARS}]`, 'g')
+const CURSOR_NUM_RE = new RegExp(`[${CURSOR_CHARS}]\\s*[1-9]`)
+const CURSOR_ANY_RE = new RegExp(`[${CURSOR_CHARS}]`) // 行内カーソル有無(非 global の membership 判定)
 const TAB_MARK_G = new RegExp(`[${TAB_MARK_CHARS}]`, 'g') // チェック印のみ(→ を含まない)
 const TAB_NAV_RE = new RegExp(`${TAB_ARROW_CHAR}|Tab\\s*/\\s*Arrow\\s+keys`, 'i')
 // ●Tool() 行未描画時のラベル推測 fallback。ラベル直後の対象パスを args に拾う。
@@ -541,12 +579,12 @@ function extractOptions(optionSegment) {
   function isStrictMarkerStart(i) {
     if (i === 0) return true
     const prev = optionSegment[i - 1]
-    if (prev === CURSOR_CHAR) return true
+    if (CURSOR_CHARS.includes(prev)) return true
     if (LINE_START_CHARS.includes(prev)) return true
     if (/\s/.test(prev)) {
       for (let j = i - 2; j >= 0; j--) {
         const c = optionSegment[j]
-        if (c === CURSOR_CHAR || LINE_START_CHARS.includes(c)) return true
+        if (CURSOR_CHARS.includes(c) || LINE_START_CHARS.includes(c)) return true
         if (!/\s/.test(c)) return false
       }
       return true
@@ -581,8 +619,12 @@ function extractOptions(optionSegment) {
   const sortedMarks = [...found.entries()]
     .map(([num, pos]) => ({ num: parseInt(num), at: pos.at, end: pos.end }))
     .sort((a, b) => a.at - b.at)
+  // 最後の選択肢に紛れ込む TUI フッタヒントを末尾から除去する。
+  // claude: "Enter to select" / "Tab/Arrow keys" / "Esc to cancel"
+  // codex : "Press enter to confirm"(承認型フッタの前置き)/ 選択肢質問型の
+  //         "enter to submit answer" / "tab to add notes" / "esc to interrupt"
   const TUI_TAIL_HINT_RE =
-    /(?:Enter\s+to\s+select|Tab\s*\/\s*Arrow\s+keys|Esc\s+to\s+cancel)[\s\S]*$/i
+    /(?:Enter\s+to\s+select|Tab\s*\/\s*Arrow\s+keys|Esc\s+to\s+cancel|Press\s+enter\s+to\s+confirm|enter\s+to\s+submit\s+answer|tab\s+to\s+add\s+notes|esc\s+to\s+interrupt)[\s\S]*$/i
   const options = sortedMarks.map((mk, i) => {
     const nextAt = i + 1 < sortedMarks.length ? sortedMarks[i + 1].at : optionSegment.length
     return optionSegment
@@ -621,7 +663,7 @@ function expandPromptStart(beforeQ, startNl) {
     if (line.includes(BULLET_CHAR) || ACTION_LABEL_RE.test(line)) return startNl
     const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
     const isTabBar = TAB_BAR_RE.test(line)
-    const isOption = line.includes(CURSOR_CHAR)
+    const isOption = CURSOR_ANY_RE.test(line)
     // box 内部境界 = ここまでを 1 段落として連結採用。
     if (line === '' || isRule || isTabBar || isOption) return lineStart
     lineStart = prevNl
@@ -654,7 +696,8 @@ function parseDialog(buf) {
   if (!CURSOR_NUM_RE.test(segment)) return null
 
   // 4. プロンプト抽出
-  const qIdx = segment.lastIndexOf('?')
+  // 質問末尾は claude/codex 承認 = ASCII '?'、codex 選択肢質問 = 全角 '？'(U+FF1F)。両方探す。
+  const qIdx = Math.max(segment.lastIndexOf('?'), segment.lastIndexOf('？'))
   if (qIdx < 0) return null
   const beforeQ = segment.slice(0, qIdx)
   // 改行を最優先で行頭とみなす。改行が見つからない場合のみボックス文字へフォールバック。
@@ -809,6 +852,37 @@ function isTabbedDialog(buf) {
 const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
 const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
 
+// v1.16.0 (Phase 3a): codex のコマンド承認 option ラベル末尾に内包されるショートカット
+// 文字を抽出する純関数。codex の承認 TUI は claude と異なり「番号 + Enter」型でなく
+// カーソル(›)+ Enter / ショートカットキー(y/p/esc)型のため、番号を送ると末尾 Enter が
+// 既定 option1(承認)を誤確定する(拒否のはずが承認 = failure #Z 同型)。これを避け、
+// ラベル `Yes, proceed (y)` / `...(p)` / `No, ... (esc)` の末尾括弧からキーを取り出す。
+//   入力例: "Yes, proceed (y)" → { kind: 'char', char: 'y' }
+//           "No, and tell Codex... (esc)" → { kind: 'esc' }
+//           "春 (Recommended)" / 括弧なし → null(= 安全側。注入しない判断に倒す)
+// 末尾アンカー (\s*$) なのでラベル本文中の括弧は無視し、末尾の 1 個だけを見る。
+// esc は特例、それ以外は単一英数字(y/p/1 等)のみ受理。複数文字や記号は null。
+function extractCodexShortcut(optionLabel) {
+  const m = String(optionLabel).match(/\(([^)]+)\)\s*$/)
+  if (!m) return null
+  const tok = m[1].trim().toLowerCase()
+  if (tok === 'esc') return { kind: 'esc' }
+  if (/^[a-z0-9]$/.test(tok)) return { kind: 'char', char: tok }
+  return null
+}
+
+// v1.16.0 (Phase 3a): 抽出したショートカットを実際に PTY へ書き込むバイト列へ変換する純関数。
+// esc → ESC(\x1b)、char → その文字そのもの。**末尾 \r は付けない**(char 自体が確定
+// ショートカットのため。E2E で「Enter 必須」が判明したときに限り char にだけ \r を足す)。
+// 抽出失敗(null)時は null を返し、呼び出し側は番号 + Enter にフォールバックせず注入を
+// 行わない(reRegister に倒す)= #Z 再発防止の中核。
+function resolveCodexInjection(optionLabel) {
+  const sc = extractCodexShortcut(optionLabel)
+  if (!sc) return null
+  if (sc.kind === 'esc') return { bytes: '\x1b' }
+  return { bytes: sc.char }
+}
+
 // 複合質問の回答配列バリデータ。
 // answers は次の要素を含む配列(長さは tabs.length と一致):
 //   - 文字列 "1"〜"9"(=数字キーのみ送信、Type something 以外のオプション)
@@ -866,6 +940,9 @@ if (typeof module !== 'undefined') {
     extractOptions,
     composeEndMarkerPattern,
     isLostRegistration,
+    extractCodexShortcut,
+    resolveCodexInjection,
+    isCodexCommand,
     // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
     BOX_CHARS,
     RULE_CHARS,
@@ -873,6 +950,7 @@ if (typeof module !== 'undefined') {
     TAB_MARK_CHARS,
     TAB_ARROW_CHAR,
     CURSOR_CHAR,
+    CURSOR_CHARS,
     LINE_START_CHARS,
     TAB_NAV_RE,
     EXIT_PLAN_END_PATTERN,
@@ -1355,6 +1433,14 @@ async function pollForResponse(id) {
       return
     }
 
+    // v1.16.0 (Phase 3a): codex 起動時はコマンド承認の注入方式が異なる(番号 + Enter では
+    // 誤確定する)。番号 → option ラベルのショートカット(y/p/esc)に変換して注入する。
+    // claude(IS_CODEX=false)では本分岐に入らず、以降の既存経路が完全不変。
+    if (IS_CODEX) {
+      await replayCodexApproval(key, currentDialog.options, id)
+      return
+    }
+
     term.write(key + '\r')
     // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
     // (旧実装の cleanBuf='' の代替。詳細は suppressCurrentDialog のコメント参照)
@@ -1427,6 +1513,31 @@ async function replayFreeText(key, text) {
     term.write('\r')
     // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
+}
+
+// v1.16.0 (Phase 3a): codex のコマンド承認(Yes/proceed・don't-ask・No の 3 択)を注入する。
+// key(番号 "1"〜"9")を option ラベルへ写し、末尾括弧のショートカット(y/p/esc)を抽出して
+// そのキーだけを送る(番号 + Enter は送らない = 既定 option 誤確定を構造的に回避)。
+// 抽出失敗時(option 構成が想定外でショートカットを取れない等)は注入せず、現ダイアログを
+// 再登録(reRegisterUninjectableDialog、404 経路と対称)してスマホ/PC の手動処理に倒す。
+// fail-safe = 承認にも拒否にも勝手に倒さない。これが failure #Z(承認取り違え)再発防止の核。
+async function replayCodexApproval(key, options, id) {
+  const inj = resolveCodexInjection(options[parseInt(key, 10) - 1])
+  if (!inj) {
+    wlog(`codex shortcut 抽出失敗(key="${key}")。注入スキップ + 再登録。`)
+    await reRegisterUninjectableDialog(id, 'codex shortcut 不明')
+    return
+  }
+  tabReplayInProgress = true
+  try {
+    term.write(inj.bytes)
+    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+    wlog(`injected codex shortcut for key="${key}" dialog ${id}`)
   } finally {
     tabReplayInProgress = false
     flushStdinBuffer()
