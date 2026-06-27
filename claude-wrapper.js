@@ -42,7 +42,10 @@ const crypto = require('crypto')
 // 設定読み込み
 // -------------------------------------------------------
 function loadConfig() {
-  const configPath = path.join(__dirname, 'approval-config.json')
+  // APPROVAL_CONFIG で別の設定ファイルを指定できる(既定は同梱の approval-config.json)。
+  // 例: codex 用に APPROVAL_CONFIG=approval-config.codex.json を渡し、claude 用と
+  //     port / token / 検出マーカーを分離して同時併用する。
+  const configPath = process.env.APPROVAL_CONFIG || path.join(__dirname, 'approval-config.json')
   try {
     return JSON.parse(fs.readFileSync(configPath, 'utf8'))
   } catch (_) {
@@ -216,12 +219,27 @@ function getScreenText() {
   )
 }
 
+// 起動対象 CLI コマンドの解決。既定は 'claude'。codex 等へ切り替える場合は
+// approval-config.json の target.command か 環境変数 APPROVAL_TARGET_CMD で指定する。
+// この値は下の shell 引数文字列('-c' / '/c')に挿入されるため、シェルメタ文字を含む
+// 値は拒否して任意コマンド注入(踏み台化)を防ぐ。許可は英数と . _ - / のみ。
+function resolveTargetCommand() {
+  const raw =
+    process.env.APPROVAL_TARGET_CMD || (config.target && config.target.command) || 'claude'
+  if (typeof raw !== 'string' || !/^[A-Za-z0-9._\/-]+$/.test(raw)) {
+    console.error(`\n❌ 不正な起動コマンドです: ${JSON.stringify(raw)}(許可文字: 英数 . _ - /)\n`)
+    process.exit(1)
+  }
+  return raw
+}
+
 function spawnClaude() {
   const shell = isWindows ? 'cmd.exe' : '/bin/bash'
   const userArgs = process.argv.slice(2)
+  const targetCmd = resolveTargetCommand()
   const args = isWindows
-    ? ['/c', 'claude', ...userArgs]
-    : ['-c', ['claude', ...userArgs].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')]
+    ? ['/c', targetCmd, ...userArgs]
+    : ['-c', [targetCmd, ...userArgs].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(' ')]
   const cols = process.stdout.columns || 120
   const rows = process.stdout.rows || 30
 
@@ -360,7 +378,11 @@ const RULE_CHARS = '─╌' // 横罫線のみ
 const PROMPT_BOX_ANCHOR_CHARS = '│─╌' // prompt 行頭アンカー探索用の意図的サブセット(╭╮╰╯ を含まない)
 const TAB_MARK_CHARS = '☐✔□✓' // タブバーのチェック印(U+2610/U+2714 と □/✓ フォールバック)
 const TAB_ARROW_CHAR = '→'
-const CURSOR_CHAR = '❯' // アクティブ選択カーソル
+const CURSOR_CHAR = '❯' // アクティブ選択カーソル(claude)
+// 起動対象 CLI でカーソル記号が異なる(claude=❯ U+276F / codex=› U+203A)。検出は
+// この集合のいずれかをカーソルとして扱う。新しい CLI のカーソルはここに足す。
+// char class へ直挿入するため、正規表現メタ文字(- ^ ] \)は含めないこと。
+const CURSOR_CHARS = CURSOR_CHAR + '›'
 const BULLET_CHAR = '●' // Claude の tool/message 行の行頭マーカー = ターン境界(box 描画文字に含まれない)
 const LINE_START_CHARS = '\n' + BOX_CHARS // 行頭とみなす文字(改行 + ボックス枠)
 
@@ -370,8 +392,9 @@ const BOX_OR_NEWLINE_G = new RegExp(`[${BOX_CHARS}\\r\\n]`, 'g')
 const PROMPT_NORMALIZE_STRIP_RE = new RegExp(`[\\s　${BOX_CHARS}\\r\\n]+`, 'g')
 const RULE_LINE_RE = new RegExp(`^[${RULE_CHARS}\\s]+$`)
 const TAB_BAR_RE = new RegExp(`[${TAB_MARK_CHARS}${TAB_ARROW_CHAR}]`)
-const CURSOR_G = new RegExp(CURSOR_CHAR, 'g')
-const CURSOR_NUM_RE = new RegExp(`${CURSOR_CHAR}\\s*[1-9]`)
+const CURSOR_G = new RegExp(`[${CURSOR_CHARS}]`, 'g')
+const CURSOR_NUM_RE = new RegExp(`[${CURSOR_CHARS}]\\s*[1-9]`)
+const CURSOR_ANY_RE = new RegExp(`[${CURSOR_CHARS}]`) // 行内カーソル有無(非 global の membership 判定)
 const TAB_MARK_G = new RegExp(`[${TAB_MARK_CHARS}]`, 'g') // チェック印のみ(→ を含まない)
 const TAB_NAV_RE = new RegExp(`${TAB_ARROW_CHAR}|Tab\\s*/\\s*Arrow\\s+keys`, 'i')
 // ●Tool() 行未描画時のラベル推測 fallback。ラベル直後の対象パスを args に拾う。
@@ -541,12 +564,12 @@ function extractOptions(optionSegment) {
   function isStrictMarkerStart(i) {
     if (i === 0) return true
     const prev = optionSegment[i - 1]
-    if (prev === CURSOR_CHAR) return true
+    if (CURSOR_CHARS.includes(prev)) return true
     if (LINE_START_CHARS.includes(prev)) return true
     if (/\s/.test(prev)) {
       for (let j = i - 2; j >= 0; j--) {
         const c = optionSegment[j]
-        if (c === CURSOR_CHAR || LINE_START_CHARS.includes(c)) return true
+        if (CURSOR_CHARS.includes(c) || LINE_START_CHARS.includes(c)) return true
         if (!/\s/.test(c)) return false
       }
       return true
@@ -581,8 +604,12 @@ function extractOptions(optionSegment) {
   const sortedMarks = [...found.entries()]
     .map(([num, pos]) => ({ num: parseInt(num), at: pos.at, end: pos.end }))
     .sort((a, b) => a.at - b.at)
+  // 最後の選択肢に紛れ込む TUI フッタヒントを末尾から除去する。
+  // claude: "Enter to select" / "Tab/Arrow keys" / "Esc to cancel"
+  // codex : "Press enter to confirm"(承認型フッタの前置き)/ 選択肢質問型の
+  //         "enter to submit answer" / "tab to add notes" / "esc to interrupt"
   const TUI_TAIL_HINT_RE =
-    /(?:Enter\s+to\s+select|Tab\s*\/\s*Arrow\s+keys|Esc\s+to\s+cancel)[\s\S]*$/i
+    /(?:Enter\s+to\s+select|Tab\s*\/\s*Arrow\s+keys|Esc\s+to\s+cancel|Press\s+enter\s+to\s+confirm|enter\s+to\s+submit\s+answer|tab\s+to\s+add\s+notes|esc\s+to\s+interrupt)[\s\S]*$/i
   const options = sortedMarks.map((mk, i) => {
     const nextAt = i + 1 < sortedMarks.length ? sortedMarks[i + 1].at : optionSegment.length
     return optionSegment
@@ -621,7 +648,7 @@ function expandPromptStart(beforeQ, startNl) {
     if (line.includes(BULLET_CHAR) || ACTION_LABEL_RE.test(line)) return startNl
     const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
     const isTabBar = TAB_BAR_RE.test(line)
-    const isOption = line.includes(CURSOR_CHAR)
+    const isOption = CURSOR_ANY_RE.test(line)
     // box 内部境界 = ここまでを 1 段落として連結採用。
     if (line === '' || isRule || isTabBar || isOption) return lineStart
     lineStart = prevNl
@@ -654,7 +681,8 @@ function parseDialog(buf) {
   if (!CURSOR_NUM_RE.test(segment)) return null
 
   // 4. プロンプト抽出
-  const qIdx = segment.lastIndexOf('?')
+  // 質問末尾は claude/codex 承認 = ASCII '?'、codex 選択肢質問 = 全角 '？'(U+FF1F)。両方探す。
+  const qIdx = Math.max(segment.lastIndexOf('?'), segment.lastIndexOf('？'))
   if (qIdx < 0) return null
   const beforeQ = segment.slice(0, qIdx)
   // 改行を最優先で行頭とみなす。改行が見つからない場合のみボックス文字へフォールバック。
@@ -873,6 +901,7 @@ if (typeof module !== 'undefined') {
     TAB_MARK_CHARS,
     TAB_ARROW_CHAR,
     CURSOR_CHAR,
+    CURSOR_CHARS,
     LINE_START_CHARS,
     TAB_NAV_RE,
     EXIT_PLAN_END_PATTERN,
