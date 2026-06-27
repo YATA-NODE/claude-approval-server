@@ -1,5 +1,6 @@
 node_modules/
 approval-config.json
+approval-config.codex.json
 
 # Claude Code 内部設定 全体除外(PUBLIC OSS リポへの内部 path / 内部設計 / agent 設定の混入防止、2026-05-16 統合)
 .claude/

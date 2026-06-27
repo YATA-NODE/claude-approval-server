@@ -258,6 +258,7 @@ doskey claude=node C:\Users\username\claude-approval-server\claude-wrapper.js $*
   - `options` の完全一致文字列
   - `Type something` 経路の text(制御文字 C0+DEL+C1 を 3 層 reject、最大 2000 文字)
   - cancel 経路の `\x1b`(Esc キー、wrapper 内部生成のみ)
+  - codex 起動時(v1.16.0+)のコマンド承認確定キー(option ラベル末尾の `(y)`/`(p)`/`(esc)` から抽出した単一英数字 1 文字 or `\x1b`)。抽出不能なら注入せず再登録(誤確定防止)
 - **option 種別検証**(v1.12.0+): text 添付は `Type something` option を選択した場合のみ許可。通常選択肢への text 添付は server / wrapper 両方で 400 reject(defense in depth)
 - **`Chat about this` 完全防御**(v1.12.0+): 遠隔不能仕様(数字キーで選べず、選ぶとダイアログ全体を抜けて通常チャットへ移行)のため、UI から除外 + サーバで 4 経路全て reject(options[idx] / answer 数字指定 / answer 文字列完全一致 / Multi `{num,text}`)。代替として「キャンセル」ボタンを提供
 - **静的配信の絞り込み**(v1.12.0+): 旧版で `express.static(__dirname)` がプロジェクトルート全ファイルを未認証配信していた問題を解消。`/` での `approval-ui.html` 配信のみ許可し、`approval-config.json` 等への直接アクセスは 404
@@ -292,6 +293,21 @@ doskey claude=node C:\Users\username\claude-approval-server\claude-wrapper.js $*
 ```
 
 依頼はすべて同じ承認パネルに集まり、`[project-a][Bash] ...` / `[project-b][Write] ...` のようにプロジェクト名で識別できます。プロジェクト名はラッパーの cwd（`process.cwd()` の basename）から自動取得されます。
+
+## codex CLI に対応（v1.16.0+）
+
+OpenAI の **codex CLI** もラッパー経由で起動でき、codex の **コマンド承認**（`Would you like to run the following command?`）をスマホから承認 / 拒否できます。
+
+```bash
+cd /path/to/my-project
+APPROVAL_TARGET_CMD=codex node /path/to/claude-approval-server/claude-wrapper.js --ask-for-approval untrusted
+```
+
+- `APPROVAL_TARGET_CMD=codex` で起動対象を codex に切り替えます（既定は `claude`）。`--ask-for-approval untrusted` など、codex 側に承認を要求させるフラグが必要です（素の codex は自動実行で承認ダイアログが出ません）。
+- **サーバーと ngrok は claude と共有**できます（同じ `port` / `token`）。複数の wrapper（claude / codex）が 1 つの承認パネルに集まり、`[projectName]` で識別されます。2 台目のサーバー / ngrok は不要です。
+- 承認の注入は codex 流のショートカットキー（option ラベル末尾の `(y)` / `(p)` / `(esc)`）で行います。番号ではなくキーで確定するため、claude の「番号 + Enter」とは別経路です。
+- 設定ファイルで固定したい場合は `approval-config.codex.example.json` を参考にしてください（`target.command` に `codex` を指定）。
+- **対象範囲**: 現状はコマンド承認（通常モードで出るもの）に対応。codex のプランモードで出る選択肢質問（AskUserQuestion 相当）は今後対応予定です。
 
 ## トラブルシューティング
 
@@ -612,6 +628,7 @@ After the one-time setup:
   - exact match of an `options` entry
   - text via the `Type something` path (C0 + DEL + C1 controls rejected in 3 layers, max 2000 chars)
   - `\x1b` (Esc) for the cancel path, generated internally by the wrapper
+  - when launched against codex (v1.16.0+), the command-approval confirm key: a single alphanumeric char extracted from the option label's trailing `(y)`/`(p)`/`(esc)`, or `\x1b`. If none can be extracted the wrapper re-registers instead of injecting (misconfirmation guard)
 - **Option-type validation** (v1.12.0+): attached `text` is only accepted when the selected option matches `Type something`. Attaching text to a normal option returns HTTP 400 on both the server and the wrapper (defense in depth).
 - **`Chat about this` blocked across all paths** (v1.12.0+): the built-in `Chat about this` option cannot be selected by a digit key alone and exits the dialog to plain chat when chosen, so it is not remotely controllable. The UI hides it and the server rejects all four entry paths (`options[idx]` / numeric `answer` / exact-match `answer` / multi `{num,text}`). Use the new **Cancel** button as the equivalent action.
 - **Restricted static serving** (v1.12.0+): earlier versions used `express.static(__dirname)`, which exposed every file in the project root (including `approval-config.json`) without authentication. The static middleware has been removed; only `/` serves `approval-ui.html` and other files return 404.
@@ -646,6 +663,21 @@ Terminal D: cd /path/to/project-b && claude
 ```
 
 All requests land in the same panel, tagged like `[project-a][Bash] ...` / `[project-b][Write] ...`. The project name is derived automatically from the wrapper's cwd (the `basename` of `process.cwd()`).
+
+## codex CLI support (v1.16.0+)
+
+OpenAI's **codex CLI** can also be launched through the wrapper, so codex **command approvals** (`Would you like to run the following command?`) can be approved / rejected from your phone.
+
+```bash
+cd /path/to/my-project
+APPROVAL_TARGET_CMD=codex node /path/to/claude-approval-server/claude-wrapper.js --ask-for-approval untrusted
+```
+
+- `APPROVAL_TARGET_CMD=codex` switches the launch target to codex (default is `claude`). You need a flag that makes codex ask for approval (e.g. `--ask-for-approval untrusted`); plain codex auto-runs and never shows an approval dialog.
+- **Share the same server and ngrok with claude** (same `port` / `token`). Multiple wrappers (claude / codex) land in one approval panel, distinguished by `[projectName]`. No second server / ngrok needed.
+- Approvals are injected using codex's shortcut keys (the `(y)` / `(p)` / `(esc)` at the end of each option label), not the option number — a separate path from claude's "number + Enter".
+- To pin it in a config file, see `approval-config.codex.example.json` (set `target.command` to `codex`).
+- **Scope**: command approvals (shown in normal mode) are supported today. codex's plan-mode choice questions (the AskUserQuestion equivalent) are planned for a future release.
 
 ## Troubleshooting
 
