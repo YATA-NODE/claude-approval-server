@@ -306,8 +306,19 @@ APPROVAL_TARGET_CMD=codex node /path/to/claude-approval-server/claude-wrapper.js
 - `APPROVAL_TARGET_CMD=codex` で起動対象を codex に切り替えます（既定は `claude`）。`--ask-for-approval untrusted` など、codex 側に承認を要求させるフラグが必要です（素の codex は自動実行で承認ダイアログが出ません）。
 - **サーバーと ngrok は claude と共有**できます（同じ `port` / `token`）。複数の wrapper（claude / codex）が 1 つの承認パネルに集まり、`[projectName]` で識別されます。2 台目のサーバー / ngrok は不要です。
 - 承認の注入は codex 流のショートカットキー（option ラベル末尾の `(y)` / `(p)` / `(esc)`）で行います。番号ではなくキーで確定するため、claude の「番号 + Enter」とは別経路です。
+- コマンド承認はスマホ上で `[projectName][Bash] <コマンド本文> — Would you like to run…?` のように、実行されるコマンド本文付きで表示されます（v1.17.0+）。本文を確証できない描画途中フレームは承認可能化されず、完全に描画されてから表示されます。
 - 設定ファイルで固定したい場合は `approval-config.codex.example.json` を参考にしてください（`target.command` に `codex` を指定）。
-- **対象範囲**: 現状はコマンド承認（通常モードで出るもの）に対応。codex のプランモードで出る選択肢質問（AskUserQuestion 相当）は今後対応予定です。
+
+### プランモードの選択肢質問に対応（v1.17.0+）
+
+codex の **プランモードで出る選択肢質問**（`Question 1/1` … = claude の AskUserQuestion 相当）もスマホから回答できます。スマホで選択肢をタップすると、番号で選択 → Enter で確定します。終端マーカー（`enter to submit answer`）を既定で検出するため、追加設定は不要です。
+
+- **対応**:
+  - 単一質問（`Question 1/1`）の選択肢回答。
+  - **複数質問フロー**（`Question 1/N` … = codex が複数問に分割した場合。`←/→` で巡回し最後に `enter to submit all`）。スマホに全問がタブ表示され、全問回答 → 「すべて送信」で一括確定します（v1.17.0+）。先頭 1 問だけ中途半端に確定する事故は構造的に防いでいます。
+- **未対応（今後対応予定）**:
+  - **自由記入（Tab notes）**: 選択肢の `add details in notes (tab)` 経由のテキスト入力。
+- **補足（codex のラウンド分割）**: codex は 1 つの依頼を複数ラウンドに分割することがあります（例: 4 つの選択を「3 問バッチ + 後から 1 問」に分ける）。各ラウンドは順にスマホへ送られるので、ラウンドごとに承認してください（スマホで「📥 承認依頼を取得」すると次のラウンドが現れます）。
 
 ## トラブルシューティング
 
@@ -677,7 +688,9 @@ APPROVAL_TARGET_CMD=codex node /path/to/claude-approval-server/claude-wrapper.js
 - **Share the same server and ngrok with claude** (same `port` / `token`). Multiple wrappers (claude / codex) land in one approval panel, distinguished by `[projectName]`. No second server / ngrok needed.
 - Approvals are injected using codex's shortcut keys (the `(y)` / `(p)` / `(esc)` at the end of each option label), not the option number — a separate path from claude's "number + Enter".
 - To pin it in a config file, see `approval-config.codex.example.json` (set `target.command` to `codex`).
-- **Scope**: command approvals (shown in normal mode) are supported today. codex's plan-mode choice questions (the AskUserQuestion equivalent) are planned for a future release.
+- **Plan-mode choice questions (v1.17.0+)**: codex's plan-mode choice questions (the AskUserQuestion equivalent) are also forwarded. Both a **single question** (`Question 1/1`) and a **multi-question flow** (`Question 1/N`, navigated with `←/→` and submitted with `enter to submit all`) are supported — the phone shows every question as a tab; answer them all and tap "Submit all" to confirm in one shot. The end marker (`enter to submit answer` / `submit all`) is detected by default, so no extra config is needed.
+- **codex splits into rounds**: codex may split one request into several rounds (e.g. four choices asked as "a batch of 3, then 1 more"). Each round is forwarded to the phone in turn — approve them round by round (tap "📥 Fetch requests" to pull the next round).
+- **Still pending**: free-text entry via an option's `add details in notes (tab)` is planned for a future release.
 
 ## Troubleshooting
 
