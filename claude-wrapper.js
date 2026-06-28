@@ -651,7 +651,11 @@ function parseDialog(buf) {
   if (!CURSOR_NUM_RE.test(segment)) return null
 
   // 4. プロンプト抽出
-  const qIdx = segment.lastIndexOf('?')
+  // 日本語の AUQ プロンプトは全角「？」(U+FF1F) で終わることが多い。半角 '?' のみを
+  // 探すと全角プロンプトで qIdx=-1 → 即 return null となり、ダイアログがスマホへ
+  // 一切転送されない(=「反応しない」)。両方を質問終端アンカーとして許容する。
+  // '？'(U+FF1F) は BMP の単一 UTF-16 単位なので、以降の slice(qIdx ±1) もそのまま整合する。
+  const qIdx = lastIndexOfAnyChar(segment, '?？')
   if (qIdx < 0) return null
   const beforeQ = segment.slice(0, qIdx)
   // 改行を最優先で行頭とみなす。改行が見つからない場合のみボックス文字へフォールバック。
