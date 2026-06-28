@@ -25,6 +25,8 @@ const {
   extractCodexShortcut,
   resolveCodexInjection,
   isCodexCommand,
+  isCodexCommandApprovalOptions,
+  extractCodexCommand,
   BOX_CHARS,
   RULE_CHARS,
   PROMPT_BOX_ANCHOR_CHARS,
@@ -35,6 +37,7 @@ const {
   TAB_NAV_RE,
   EXIT_PLAN_END_PATTERN,
   DEFAULT_END_MARKER,
+  CODEX_QUESTION_END_PATTERN,
 } = require('./claude-wrapper.js')
 
 let failed = 0
@@ -1323,21 +1326,22 @@ console.log('\n[22] 境界文字定数の membership')
 // -------------------------------------------------------
 console.log('\n[23] composeEndMarkerPattern')
 {
-  const DEFAULT_COMPOSED = `${DEFAULT_END_MARKER}|${EXIT_PLAN_END_PATTERN}`
+  // v1.17.0 (Phase 3b): codex 質問型マーカーも ExitPlan と同様に常時 OR-in される。
+  const DEFAULT_COMPOSED = `${DEFAULT_END_MARKER}|${EXIT_PLAN_END_PATTERN}|${CODEX_QUESTION_END_PATTERN}`
   // config 無し → 現行既定値と完全一致(回帰なし)
   assertEq('config 無し → 既定 pattern', composeEndMarkerPattern(undefined), DEFAULT_COMPOSED)
   assertEq('空オブジェクト → 既定 pattern', composeEndMarkerPattern({}), DEFAULT_COMPOSED)
-  // 型付き endMarkers → 両方を OR
+  // 型付き endMarkers → default|exitPlan|codex質問 を OR
   assertEq(
     '型付き {default, exitPlan}',
     composeEndMarkerPattern({ endMarkers: { default: 'AAA', exitPlan: 'BBB' } }),
-    'AAA|BBB'
+    `AAA|BBB|${CODEX_QUESTION_END_PATTERN}`
   )
-  // 型付き default のみ → exitPlan は既定で補完
+  // 型付き default のみ → exitPlan / codex質問 は既定で補完
   assertEq(
     '型付き default のみ → exitPlan 補完',
     composeEndMarkerPattern({ endMarkers: { default: 'AAA' } }),
-    `AAA|${EXIT_PLAN_END_PATTERN}`
+    `AAA|${EXIT_PLAN_END_PATTERN}|${CODEX_QUESTION_END_PATTERN}`
   )
   // legacy endMarker → ExitPlan を常に OR(footgun 解消の核心)
   const legacy = composeEndMarkerPattern({ endMarker: 'Esc\\s*to\\s*cancel' })
@@ -1455,6 +1459,13 @@ console.log('[26] extractCodexShortcut / resolveCodexInjection')
   assertEq('esc → bytes ESC(\\x1b)', resolveCodexInjection('No... (esc)'), { bytes: '\x1b' })
   // ★中核: 抽出不能ラベルは null → 呼び出し側は番号 + Enter に倒さず注入しない(#Z 防止)
   assertEq('抽出不能 → null(番号+Enter にフォールバックしない)', resolveCodexInjection('春 (Recommended)'), null)
+  // v1.17.0 (Phase 3b): 質問型の自由記入 option `None of the above ... (tab)` は末尾 (tab) が
+  // 複数文字 → null。これにより注入ディスパッチで「コマンド承認」でなく「質問型」へ振り分く。
+  assertEq(
+    '(tab) → null(質問型へ振り分く)',
+    resolveCodexInjection('None of the above Optionally, add details in notes (tab).'),
+    null
+  )
 }
 
 // -------------------------------------------------------
@@ -1501,6 +1512,156 @@ console.log('[28] isCodexCommand(起動コマンド判定)')
   assertEq('mycodex → false', isCodexCommand('mycodex'), false)
   assertEq('codex-cli → false', isCodexCommand('codex-cli'), false)
   assertEq('codex.sh → false(未許可拡張子)', isCodexCommand('codex.sh'), false)
+}
+
+// -------------------------------------------------------
+// 29. codex プランモード選択肢質問 fixture(Phase 3b、/tmp/codex-pty.log 実測由来)
+//     codex 0.142.2 実測 TUI:カーソル › / 質問末尾 全角 ？ / 選択肢 1..N 連続 /
+//     フッタ "tab to add notes | enter to submit answer | esc to interrupt"。
+//     B(質問型マーカー既定化)で config なしに検出され、合成判定で AskUserQuestion に
+//     分類されること、option がショートカットを持たず(= 質問型へ振り分く)を固定する。
+// -------------------------------------------------------
+console.log('[29] codex プランモード選択肢質問 fixture(parseDialog)')
+{
+  const buf = [
+    '  Question 1/1 (1 unanswered)',
+    '  春夏秋冬のうち、どの季節を題材にしますか？',
+    '› 1. 春 (Recommended)   花や新生活など、明るく柔らかい題材にします。',
+    '  2. 夏                 海や祭りなど、鮮やかで活発な題材にします。',
+    '  3. 秋                 紅葉や実りなど、落ち着いた情緒の題材にします。',
+    '  4. None of the above  Optionally, add details in notes (tab).',
+    '  tab to add notes | enter to submit answer | esc to interrupt',
+  ].join('\n')
+  const r = parseDialog(buf)
+  // B: config なしで検出(フッタ "enter to submit answer" が既定マーカーに追加されたため)
+  assertEq('検出できる(config なし・既定マーカー)', !!r, true)
+  // A-1: 選択肢質問は AskUserQuestion に分類(shift+tab なし / 承認句なし / glued なし / label なし)
+  assertEq("tool = 'AskUserQuestion'", r && r.tool, 'AskUserQuestion')
+  assertEq('options 数 = 4(1..N 連続で completeFromOne 通過)', r && r.options.length, 4)
+  assertEq('prompt が全角 ？ で抽出', r && /題材にしますか？$/.test(r.prompt), true)
+  // 振り分け: 質問型 option はショートカットを持たない → resolveCodexInjection 全て null
+  //   = 注入ディスパッチで replayCodexApproval でなく replayCodexQuestion へ
+  assertEq('option[0] (Recommended) → null', r && resolveCodexInjection(r.options[0]), null)
+  assertEq('option[3] (tab) → null', r && resolveCodexInjection(r.options[3]), null)
+}
+
+// -------------------------------------------------------
+// 30. isCodexCommandApprovalOptions / extractCodexCommand(Phase 3b / TODO 3 = 分類精緻化)
+//     codex コマンド承認を選択肢質問と区別する純関数。コマンド承認は全 option がショートカット
+//     (y/p/esc)を持つ ⟺ 質問型は持たない。IS_CODEX gate と組み合わせ、コマンド承認を
+//     AskUserQuestion 誤表示でなく Bash + コマンド本文で表示する。
+// -------------------------------------------------------
+console.log('[30] isCodexCommandApprovalOptions / extractCodexCommand')
+{
+  const cmdOpts = [
+    'Yes, proceed (y)',
+    "Yes, and don't ask again for commands that start with `touch hello.txt` (p)",
+    'No, and tell Codex what to do differently (esc)',
+  ]
+  const qOpts = [
+    '春 (Recommended) 花や新生活など。',
+    '夏 海や祭りなど。',
+    'None of the above Optionally, add details in notes (tab).',
+  ]
+  assertEq('コマンド承認 = 全 option がショートカット → true', isCodexCommandApprovalOptions(cmdOpts), true)
+  assertEq('選択肢質問 = ショートカットなし → false', isCodexCommandApprovalOptions(qOpts), false)
+  assertEq('option 1 個のみ → false(承認は 2 択以上)', isCodexCommandApprovalOptions(['Yes (y)']), false)
+  assertEq('非配列 → false(防御)', isCodexCommandApprovalOptions(null), false)
+  assertEq('空配列 → false', isCodexCommandApprovalOptions([]), false)
+  // コマンド本文抽出($ 行)。現ダイアログ領域(prompt qIdx 直後 〜 最初の選択肢)にアンカー。
+  const seg1 = '  Would you like to run the following command?\n  $ touch hello.txt\n› 1. Yes (y)'
+  assertEq('コマンド本文を $ 行から抽出', extractCodexCommand(seg1, seg1.indexOf('?')), 'touch hello.txt')
+  // VULN-001 回帰: 画面上方の stale な `$ old-cmd` は拾わず、現ダイアログの `$` を採る(#Z 取り違え防止)
+  const seg2 =
+    '  $ rm -rf /old\n  Would you like to run the following command?\n  $ touch new.txt\n› 1. Yes (y)'
+  assertEq('上方の stale $ を拾わず現ダイアログの $ を採る', extractCodexCommand(seg2, seg2.indexOf('?')), 'touch new.txt')
+  // 現ダイアログ領域に `$` が無ければ空(呼び出し側 = parseDialog が承認可能化を抑止 = #Z 秘匿側 fail-safe)
+  const seg3 = '  Would you like to run the following command?\n› 1. Yes (y)'
+  assertEq('現領域に $ なし → 空文字', extractCodexCommand(seg3, seg3.indexOf('?')), '')
+  assertEq('$ 行なし → 空文字', extractCodexCommand('  Question?\n› 1. 春 (Recommended)', 9), '')
+}
+
+// -------------------------------------------------------
+// 31. composeEndMarkerPattern: 質問型マーカー既定化(Phase 3b / B)
+//     config なしの既定 pattern が codex 質問型フッタ "enter to submit answer" を検出すること。
+//     これが A-1(質問型を config なしで検出)の前提。claude フッタ "Esc to cancel" /
+//     "shift+tab to approve" も従来どおり検出(回帰なし)。
+// -------------------------------------------------------
+console.log('[31] composeEndMarkerPattern 質問型マーカー既定化')
+{
+  const def = composeEndMarkerPattern(undefined)
+  assertEq('既定に codex 質問型パターンを含む', def.includes(CODEX_QUESTION_END_PATTERN), true)
+  assertEq(
+    '既定 pattern が "enter to submit answer" を検出',
+    new RegExp(def, 'gi').test('enter to submit answer | esc to interrupt'),
+    true
+  )
+  assertEq(
+    '既定 pattern は従来どおり "Esc to cancel" も検出(回帰なし)',
+    new RegExp(def, 'gi').test('Esc to cancel'),
+    true
+  )
+}
+
+// -------------------------------------------------------
+// 32. codex 質問型: 末尾 ? を持たない丁寧形(「…ください。」)の検出(Phase 3b / E2E 由来)
+//     実機(codex 0.142.x)は選択肢質問を必ずしも ? で終えない(丁寧な依頼形「選んでください。」)。
+//     parseDialog の ? アンカーだけだと未検出になる回帰を防ぐ。最初の選択肢直前を prompt 末尾
+//     アンカーに代用し、"Question N/N" ヘッダは prompt に混入しないことを固定する。
+//     /tmp/codex-q-pty.log の実画面構造を再現。
+// -------------------------------------------------------
+console.log('[32] codex 質問型: ? なし丁寧形の検出(E2E 実機由来)')
+{
+  const buf = [
+    '  Question 1/1 (1 unanswered)',
+    '  題材にしたい季節を選んでください。',
+    ' ',
+    '  › 1. 春 (Recommended)   桜や新生活など、明るく柔らかい雰囲気で進めます。',
+    '    2. 夏                 海や祭りなど、活発で鮮やかな雰囲気で進めます。',
+    '    3. 秋                 紅葉や収穫など、落ち着いた雰囲気で進めます。',
+    '    4. None of the above  Optionally, add details in notes (tab).',
+    ' ',
+    '  tab to add notes | enter to submit answer | esc to interrupt',
+  ].join('\n')
+  const r = parseDialog(buf)
+  assertEq('? なしでも検出できる', !!r, true)
+  assertEq("tool = 'AskUserQuestion'", r && r.tool, 'AskUserQuestion')
+  // prompt は「。」で終わり、"Question 1/1" ヘッダを含まない
+  assertEq('prompt = 質問本文のみ(ヘッダ除去)', r && r.prompt, '題材にしたい季節を選んでください。')
+  assertEq('options 数 = 4', r && r.options.length, 4)
+  assertEq('option[0] にショートカットなし → 質問型へ', r && resolveCodexInjection(r.options[0]), null)
+}
+
+// -------------------------------------------------------
+// 33. codex 複数質問フロー(Question N/M, M>1)は検出せず null(Phase 3b ガード / 3d で本対応)
+//     実機で codex が依頼を複数質問に分割(Question 1/3 …, ←/→ 巡回, "submit all")することが
+//     あり、単一質問として注入すると先頭 1 問だけ答えて残りが PC に残る。完全対応(sweep + タブ)
+//     は 3d。それまではスマホに出さず PC 処理に倒す。M=1(単一)は従来どおり検出されること([32])
+//     とペアで「分母 > 1 のみ抑止」を固定する。
+// -------------------------------------------------------
+console.log('[33] codex 複数質問フロー(M>1)は null で抑止')
+{
+  const multi = [
+    '  Question 1/3 (3 unanswered)',
+    '  春夏秋冬のうち、どちらの組から選びますか？',
+    '  › 1. 春・夏 (Recommended)   明るく軽い季節感の選択肢に進みます。',
+    '    2. 秋・冬                 落ち着いた季節感の選択肢に進みます。',
+    '    3. None of the above      Optionally, add details in notes (tab).',
+    '  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt',
+  ].join('\n')
+  assertEq('Question 1/3(M=3)→ null(抑止)', parseDialog(multi), null)
+
+  // 単一(M=1)は引き続き検出される(回帰防止: ガードが単一まで巻き込まないこと)
+  const single = [
+    '  Question 1/1 (1 unanswered)',
+    '  春夏秋冬から1つ選んでください。',
+    '  › 1. 春 (Recommended)   春を選択します。',
+    '    2. 夏                 夏を選択します。',
+    '  tab to add notes | enter to submit answer | esc to interrupt',
+  ].join('\n')
+  const rs = parseDialog(single)
+  assertEq('Question 1/1(M=1)→ 検出される', !!rs, true)
+  assertEq("単一は tool='AskUserQuestion'", rs && rs.tool, 'AskUserQuestion')
 }
 
 // -------------------------------------------------------

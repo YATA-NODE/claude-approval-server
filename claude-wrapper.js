@@ -87,20 +87,36 @@ const PROJECT_NAME = path.basename(process.cwd()) || 'unknown'
 const EXIT_PLAN_END_PATTERN = 'shift\\+tab\\s+to\\s+approve'
 const EXIT_PLAN_END_RE = new RegExp(EXIT_PLAN_END_PATTERN, 'i')
 const DEFAULT_END_MARKER = 'Esc\\s*to\\s*cancel'
+// v1.17.0 (Phase 3b): codex プランモードの選択肢質問(= AskUserQuestion 相当)のフッタは
+// "tab to add notes | enter to submit answer | esc to interrupt"。既定 endMarker
+// "Esc to cancel" に非一致なので、config なしでは検出できなかった。質問型に最も特異な
+// "enter to submit answer" を ExitPlanMode マーカーと同様に常時 OR-in して既定検出可能にする
+// (`esc to interrupt` は他文脈でも出うるため主キーにしない)。claude UI はこの語を出さない
+// ため誤検出ゼロ(233 fixture で回帰確認)。
+const CODEX_QUESTION_END_PATTERN = 'enter\\s+to\\s+submit\\s+answer'
+const CODEX_QUESTION_END_RE = new RegExp(CODEX_QUESTION_END_PATTERN, 'i')
+// codex プランモードの選択肢質問のヘッダ "Question N/N (M unanswered)"。prompt 抽出時に
+// この行を段落境界として扱い、prompt 本文(ヘッダの下の行)に混入させない。
+const CODEX_QUESTION_HEADER_RE = /^Question\s+\d+\/\d+/i
+// 同ヘッダの分母(総質問数 M)を取る。M>1 = 複数質問フロー(←/→ で巡回するタブ式相当)。
+// global 版は segment 内の全 "Question N/M" を走査して M>1 が 1 つでもあるか判定するのに使う
+// (先頭マッチ依存で stale ヘッダにすり抜けられるのを防ぐ)。
+const CODEX_QUESTION_COUNT_RE_G = /Question\s+\d+\/(\d+)/gi
 
-// 終端マーカー正規表現パターンを組み立てる純関数(テスト seam)。ExitPlanMode マーカーが
-// 構成から脱落しないよう常に OR-in する。優先順: 型付き endMarkers > legacy endMarker > 既定。
+// 終端マーカー正規表現パターンを組み立てる純関数(テスト seam)。ExitPlanMode マーカーと
+// codex 質問型マーカーが構成から脱落しないよう常に OR-in する。
+// 優先順: 型付き endMarkers > legacy endMarker > 既定。
 function composeEndMarkerPattern(dialogDetection) {
   const dd = dialogDetection || {}
   if (dd.endMarkers && typeof dd.endMarkers === 'object') {
     const def = dd.endMarkers.default || DEFAULT_END_MARKER
     const exit = dd.endMarkers.exitPlan || EXIT_PLAN_END_PATTERN
-    return `${def}|${exit}`
+    return `${def}|${exit}|${CODEX_QUESTION_END_PATTERN}`
   }
   if (typeof dd.endMarker === 'string' && dd.endMarker) {
-    return `${dd.endMarker}|${EXIT_PLAN_END_PATTERN}`
+    return `${dd.endMarker}|${EXIT_PLAN_END_PATTERN}|${CODEX_QUESTION_END_PATTERN}`
   }
-  return `${DEFAULT_END_MARKER}|${EXIT_PLAN_END_PATTERN}`
+  return `${DEFAULT_END_MARKER}|${EXIT_PLAN_END_PATTERN}|${CODEX_QUESTION_END_PATTERN}`
 }
 const _dialogDetection = config && config.dialogDetection
 if (
@@ -664,8 +680,11 @@ function expandPromptStart(beforeQ, startNl) {
     const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
     const isTabBar = TAB_BAR_RE.test(line)
     const isOption = CURSOR_ANY_RE.test(line)
+    // v1.17.0 (Phase 3b): codex 質問ヘッダ "Question N/N (..)" も段落境界 = prompt 本文に
+    // 含めない(claude は本行を出さないため claude 経路に影響なし)。
+    const isCodexQHeader = CODEX_QUESTION_HEADER_RE.test(line)
     // box 内部境界 = ここまでを 1 段落として連結採用。
-    if (line === '' || isRule || isTabBar || isOption) return lineStart
+    if (line === '' || isRule || isTabBar || isOption || isCodexQHeader) return lineStart
     lineStart = prevNl
     if (prevNl < 0) return startNl // box 境界に当たらず先頭到達 = 連結破棄
   }
@@ -691,13 +710,35 @@ function parseDialog(buf) {
   const segStart = Math.max(0, endIdx - DIALOG_SEGMENT_MAX)
   const segment = buf.slice(segStart, endIdx)
 
+  // 2b. v1.17.0 (Phase 3b): codex の複数質問フロー(Question N/M, M>1 = ←/→ で巡回するタブ式
+  //   相当)は、単一質問として中途半端に注入すると先頭 1 問だけ答えて残りが PC に残る(実機で
+  //   混乱を確認)。完全対応(全問 sweep + タブ登録 + submit all)は Phase 3d。それまでは検出せず
+  //   (null)PC 側で処理させる(スマホで半端に答える事故を防ぐ)。codex 質問型 endMarker が
+  //   立つ場合のみ判定するため claude / codex 承認には無影響。
+  if (CODEX_QUESTION_END_RE.test(endMarkerText)) {
+    // segment 内に分母 M>1 の "Question N/M" が 1 つでもあれば抑止(global 走査)。先頭マッチ依存
+    // だと画面上方に残る stale な "Question 1/1" が現 "Question 2/3" より先に当たりすり抜ける。
+    // 保守的に「複数質問マーカーが見えたら出さない」= 半端回答事故を防ぐ安全側。
+    const hasMulti = [...segment.matchAll(CODEX_QUESTION_COUNT_RE_G)].some(
+      (m) => parseInt(m[1], 10) > 1
+    )
+    if (hasMulti) return null
+  }
+
   // 3. 偽陽性除外: アクティブカーソル `❯` + 数字 1〜9 が必須
   // AskUserQuestion 型は選択肢が 4 個以上になることがあるため 1〜9 を許容。
   if (!CURSOR_NUM_RE.test(segment)) return null
 
   // 4. プロンプト抽出
   // 質問末尾は claude/codex 承認 = ASCII '?'、codex 選択肢質問 = 全角 '？'(U+FF1F)。両方探す。
-  const qIdx = Math.max(segment.lastIndexOf('?'), segment.lastIndexOf('？'))
+  // v1.17.0 (Phase 3b): codex プランモードの選択肢質問は丁寧形(「…ください。」)で ? を
+  // 持たないことがある。質問型 endMarker(enter to submit answer)が立つ場合のみ、最初の
+  // 選択肢の直前を prompt 末尾アンカーに代用する。claude / codex 承認は本フォールバックに
+  // 入らない(? がある限り従来の ? アンカー不変)。
+  let qIdx = Math.max(segment.lastIndexOf('?'), segment.lastIndexOf('？'))
+  if (qIdx < 0 && CODEX_QUESTION_END_RE.test(endMarkerText)) {
+    qIdx = codexQuestionPromptEnd(segment)
+  }
   if (qIdx < 0) return null
   const beforeQ = segment.slice(0, qIdx)
   // 改行を最優先で行頭とみなす。改行が見つからない場合のみボックス文字へフォールバック。
@@ -799,6 +840,18 @@ function parseDialog(buf) {
   let args = ''
   if (isExitPlanMode) {
     tool = 'ExitPlanMode'
+  } else if (IS_CODEX && isCodexCommandApprovalOptions(options)) {
+    // v1.17.0 (Phase 3b / TODO 3): codex コマンド承認は合成判定だと looksLikeAUQ に倒れ
+    // AskUserQuestion と誤表示される(prompt "Would you like to run" を APPROVAL_PHRASE_RE が
+    // 拾わないため)。全 option がショートカットを持つ = コマンド承認として Bash ラベル + コマンド
+    // 本文で表示する(注入経路は別途 option ラベルのショートカット抽出で振り分けるため不変)。
+    tool = 'Bash'
+    args = extractCodexCommand(segment, qIdx)
+    // 表示側 fail-safe(#Z 秘匿側): コマンド本文を確証できない(断片フレームで `$` 行が未描画 等)
+    // なら、コマンド空欄のブラインド承認になるため承認可能化しない。null を返し次の完全フレームで
+    // 再検出させる(injection 側の reRegisterUninjectableDialog と対称の保守的挙動)。5b 完全性
+    // ガードが options のみ検証し `$` 行を見ないため、ここで補う。
+    if (!args) return null
   } else if (looksLikeAUQ) {
     tool = 'AskUserQuestion'
   } else {
@@ -883,6 +936,56 @@ function resolveCodexInjection(optionLabel) {
   return { bytes: sc.char }
 }
 
+// v1.17.0 (Phase 3b / TODO 3): codex の「コマンド承認」を「選択肢質問(AskUserQuestion)」と
+// 区別する純関数。コマンド承認の option は必ず全件が末尾ショートカット (y)/(p)/(esc) を持つ
+// (`Yes, proceed (y)` / `...(p)` / `No, ... (esc)`)。一方プランモードの選択肢質問は
+// `春 (Recommended)` / `None of the above ... (tab)` のように末尾が複数文字 = extractCodexShortcut
+// が null。よって「全 option がショートカットを持つ」をコマンド承認の十分条件にできる。
+// これで従来コマンド承認が AskUserQuestion と誤分類されスマホに args 空で表示された問題を是正する。
+function isCodexCommandApprovalOptions(options) {
+  return (
+    Array.isArray(options) &&
+    options.length >= 2 &&
+    options.every((o) => extractCodexShortcut(o) !== null)
+  )
+}
+
+// 選択肢行(行頭の任意カーソル + 数字 1-9 + 区切り . / ))の最初の出現。カーソル文字集合は
+// 他の派生 RegExp(CURSOR_NUM_RE 等)と同様に CURSOR_CHARS から生成し drift を避ける
+// (新 CLI のカーソルを CURSOR_CHARS に足せば本 RegExp も自動追従)。
+const CODEX_OPTION_LINE_RE = new RegExp(`(?:^|\\n)[ \\t]*[${CURSOR_CHARS}]?[ \\t]*[1-9][.)]`)
+
+// v1.17.0 (Phase 3b): codex プランモードの選択肢質問は丁寧形(「…ください。」等)で末尾に
+// ? / ？ を持たないことがある(実機確認: codex 0.142.x)。その場合の prompt/option 境界
+// アンカーとして「最初の選択肢行の直前にある最後の非空白文字」の index を返す純関数(= ? の
+// 代替。? がある claude/codex 承認は本関数を使わず従来の ? アンカー不変)。選択肢行が無い /
+// 手前に非空白が無ければ -1。
+function codexQuestionPromptEnd(segment) {
+  const m = String(segment).match(CODEX_OPTION_LINE_RE)
+  if (!m) return -1
+  let i = m.index - 1
+  while (i >= 0 && /\s/.test(segment[i])) i--
+  return i
+}
+
+// codex コマンド承認のコマンド本文を `$ ...` 行から抽出する純関数(**スマホ表示専用 = display only,
+// never execute**。注入は番号→ショートカット経路で、本文字列は実行に使わない)。
+// codex は "Would you like to run the following command?"(= prompt, qIdx)の直後に `$ <command>` を
+// 描画し、その下に選択肢が続く。**現ダイアログ領域(prompt 直後 〜 最初の選択肢の手前)に限定**して
+// 抽出する: segment 全体の先頭 `$` を拾うと画面上方に残る別(実行済み)コマンドを誤って拾い、
+// 表示と実際の承認内容が食い違う(#Z 取り違え)。確証できなければ空文字(呼び出し側が承認可能化を
+// 抑止 = #Z 秘匿側の fail-safe)。
+function extractCodexCommand(segment, qIdx) {
+  const s = String(segment)
+  const after = s.slice((qIdx | 0) + 1)
+  // 最初の選択肢行の手前までに範囲を絞る(コマンドは prompt と選択肢の間にある)。
+  const optM = after.match(CODEX_OPTION_LINE_RE)
+  const region = optM ? after.slice(0, optM.index) : after
+  const m = region.match(/^\s*\$\s+(.+)$/m)
+  // 内部の連続空白を 1 個に畳み、行末の余白を除去(罫線描画由来の trailing space 対策)。
+  return m ? m[1].replace(/\s+/g, ' ').trim() : ''
+}
+
 // 複合質問の回答配列バリデータ。
 // answers は次の要素を含む配列(長さは tabs.length と一致):
 //   - 文字列 "1"〜"9"(=数字キーのみ送信、Type something 以外のオプション)
@@ -943,6 +1046,8 @@ if (typeof module !== 'undefined') {
     extractCodexShortcut,
     resolveCodexInjection,
     isCodexCommand,
+    isCodexCommandApprovalOptions,
+    extractCodexCommand,
     // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
     BOX_CHARS,
     RULE_CHARS,
@@ -955,6 +1060,7 @@ if (typeof module !== 'undefined') {
     TAB_NAV_RE,
     EXIT_PLAN_END_PATTERN,
     DEFAULT_END_MARKER,
+    CODEX_QUESTION_END_PATTERN,
   }
 }
 
@@ -1407,7 +1513,52 @@ async function pollForResponse(id) {
       return
     }
 
-    // v1.12.0: スマホからフリーテキストが添付されている場合の経路。
+    // v1.17.0 (Phase 3b): codex は注入方式が claude と全く異なるため、claude 用の経路
+    // (フリーテキスト / 数字 + Enter)より前に最前段で分岐する。IS_CODEX=false の claude では
+    // 本ブロックに入らず以降の既存経路が完全不変。振り分けキー = 選択された option ラベルの
+    // ショートカット抽出可否(コマンド承認の option は必ず (y/p/esc) を持ち、質問型は持たない)。
+    // 判定順は安全性のため固定(① → ② → ③):
+    //   ① ショートカット抽出可 → コマンド承認(ショートカットキーのみ、Enter 不送出 = #Z 回避)
+    //   ② resp.text あり      → 質問型の自由記入(選択 → Tab → テキスト → Enter)
+    //   ③ それ以外(番号選択肢) → 質問型(番号 → Enter)
+    // 注: 分類は parseDialog(全 option がショートカット ⟺ Bash)が既に出しているが、注入側は
+    //   それに依存せず「選択 option のショートカット抽出可否」で独立に再判定する(defense in depth)。
+    //   分類が万一誤ってもコマンド承認(ショートカット持ち)を番号+Enter 経路に落とさないため = #Z
+    //   再発防止の核。tool ラベル駆動に寄せると分類ミス時に承認が番号+Enter で誤確定しうる。
+    if (IS_CODEX) {
+      // ① コマンド承認(選択 option がショートカットを持つ)を最優先で判定。text が添付されて
+      //    いてもショートカット専用経路に倒す(Enter 不送出)。これより前に text 経路を置くと、
+      //    クライアントが {answer, text} を投げてコマンド承認を番号+Enter 経路に落とし末尾 Enter で
+      //    既定 option1(承認)を誤確定させうる(#Z 同型・API 直叩き迂回)。codex コマンドに
+      //    notes は無いので text は無視するのが正(server 側も Type something 限定で text を 400)。
+      if (resolveCodexInjection(selectedOpt)) {
+        await replayCodexApproval(key, currentDialog.options, id)
+        return
+      }
+      // ② 質問型の自由記入(Tab notes)。①を通過した = 選択 option はショートカットを持たない
+      //    質問型のみ。text 健全性を再検証(defense in depth)。
+      //    Phase 3c 予定: 現状 server の D1 ゲートで codex 質問型の text は 400 = 本分岐は未到達。
+      //    UI + server 緩和後に活きる(defense in depth として今は安全側に置いておく)。
+      if (resp.text != null) {
+        const safeText = validateFreeText(resp.text)
+        if (!safeText) {
+          // W001: 入力内容そのものはログに出さない(自由記入に機密が入りうる)。型/長さのみ記録。
+          wlog(
+            `codex notes text rejected (type=${typeof resp.text}, len=${
+              typeof resp.text === 'string' ? resp.text.length : 'n/a'
+            })。注入スキップ。`
+          )
+          return
+        }
+        await replayCodexQuestion(key, safeText, id)
+        return
+      }
+      // ③ 質問型の通常選択(番号 → Enter)。
+      await replayCodexQuestion(key, null, id)
+      return
+    }
+
+    // v1.12.0: スマホからフリーテキストが添付されている場合の経路(claude)。
     // resp.text を validateFreeText で再検証(defense in depth)し、
     // replayFreeText で「キー → モード遷移待ち → 1 文字ずつ → Enter」で注入。
     // text なしの通常経路は従来通り「数字 + Enter」のみ。
@@ -1430,14 +1581,6 @@ async function pollForResponse(id) {
       wlog(
         `injected free text (key="${key}", len=${safeText.length}) for dialog ${id}`
       )
-      return
-    }
-
-    // v1.16.0 (Phase 3a): codex 起動時はコマンド承認の注入方式が異なる(番号 + Enter では
-    // 誤確定する)。番号 → option ラベルのショートカット(y/p/esc)に変換して注入する。
-    // claude(IS_CODEX=false)では本分岐に入らず、以降の既存経路が完全不変。
-    if (IS_CODEX) {
-      await replayCodexApproval(key, currentDialog.options, id)
       return
     }
 
@@ -1538,6 +1681,49 @@ async function replayCodexApproval(key, options, id) {
     // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
     wlog(`injected codex shortcut for key="${key}" dialog ${id}`)
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
+}
+
+// v1.17.0 (Phase 3b): codex プランモードの選択肢質問(= AskUserQuestion 相当)を注入する。
+// コマンド承認(replayCodexApproval)と違い、option ラベルにショートカット文字が無いため、
+// 番号で選択肢へ移動 → Enter で確定(フッタ "enter to submit answer")する。
+// text 付き(自由記入 = Tab notes)は codex 仕様で「選択 → Tab で notes 欄を開く → テキスト →
+// Enter」(フッタ "tab to add notes")。claude の replayFreeText とは Tab の有無/順序が異なる。
+// 注 1: text 経路は Phase 3c へ分離(現状 server の D1 ゲート〔approval-server.js: text は
+//   "Type something" option 限定〕が codex 質問型 option の text を 400 で拒否するため未到達。
+//   3c で UI + server(codex 質問型への安全な text 許可)+ 本経路を一体で出す)。本実装は
+//   defense in depth として残し、ゲート緩和後に即活きる形にしておく。
+// 注 2: 番号キーが「移動」か「即選択確定」か、Enter 要否、Tab notes の順序/待ちは E2E(U1-U3)で
+//   確定する unknown。確定するまでは安全側既定(番号 → Enter)で出す。誤確定の主リスクは
+//   コマンド承認側(#Z)で、質問型は最悪でも誤った選択肢/notes の送信に留まる(承認取り違えでない)。
+async function replayCodexQuestion(key, text, id) {
+  tabReplayInProgress = true
+  try {
+    term.write(key) // 番号で選択肢へ
+    if (text != null) {
+      // 自由記入: Tab で notes 欄を開いてから 1 文字ずつ注入(replayFreeText と同ペース)
+      await sleep(MODE_TRANSITION_MS)
+      term.write('\t')
+      await sleep(MODE_TRANSITION_MS)
+      let j = 0
+      for (const ch of text) {
+        term.write(ch)
+        await sleep(j < CHAR_INJECT_WARMUP ? CHAR_INJECT_MS_SLOW : CHAR_INJECT_MS_FAST)
+        j++
+      }
+    }
+    await sleep(MULTI_SUBMIT_WAIT_MS)
+    term.write('\r') // enter to submit answer
+    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+    wlog(
+      `injected codex question (key="${key}"${
+        text != null ? `, notes len=${text.length}` : ''
+      }) for dialog ${id}`
+    )
   } finally {
     tabReplayInProgress = false
     flushStdinBuffer()

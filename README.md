@@ -306,8 +306,17 @@ APPROVAL_TARGET_CMD=codex node /path/to/claude-approval-server/claude-wrapper.js
 - `APPROVAL_TARGET_CMD=codex` で起動対象を codex に切り替えます（既定は `claude`）。`--ask-for-approval untrusted` など、codex 側に承認を要求させるフラグが必要です（素の codex は自動実行で承認ダイアログが出ません）。
 - **サーバーと ngrok は claude と共有**できます（同じ `port` / `token`）。複数の wrapper（claude / codex）が 1 つの承認パネルに集まり、`[projectName]` で識別されます。2 台目のサーバー / ngrok は不要です。
 - 承認の注入は codex 流のショートカットキー（option ラベル末尾の `(y)` / `(p)` / `(esc)`）で行います。番号ではなくキーで確定するため、claude の「番号 + Enter」とは別経路です。
+- コマンド承認はスマホ上で `[projectName][Bash] <コマンド本文> — Would you like to run…?` のように、実行されるコマンド本文付きで表示されます（v1.17.0+）。本文を確証できない描画途中フレームは承認可能化されず、完全に描画されてから表示されます。
 - 設定ファイルで固定したい場合は `approval-config.codex.example.json` を参考にしてください（`target.command` に `codex` を指定）。
-- **対象範囲**: 現状はコマンド承認（通常モードで出るもの）に対応。codex のプランモードで出る選択肢質問（AskUserQuestion 相当）は今後対応予定です。
+
+### プランモードの選択肢質問に対応（v1.17.0+）
+
+codex の **プランモードで出る選択肢質問**（`Question 1/1` … = claude の AskUserQuestion 相当）もスマホから回答できます。スマホで選択肢をタップすると、番号で選択 → Enter で確定します。終端マーカー（`enter to submit answer`）を既定で検出するため、追加設定は不要です。
+
+- **対応**: 単一質問（`Question 1/1`）の選択肢回答。
+- **未対応（今後対応予定）**:
+  - **自由記入（Tab notes）**: 選択肢の `add details in notes (tab)` 経由のテキスト入力。
+  - **複数質問フロー**: codex が依頼を複数問に分割した場合（`Question 1/3` … を `←/→` で巡回、最後に `enter to submit all`）。**この形式はスマホに転送されません**ので、PC 側で操作してください（先頭 1 問だけ中途半端に確定して残りが取り残されるのを防ぐための安全側の挙動です）。
 
 ## トラブルシューティング
 
