@@ -93,15 +93,31 @@ const DEFAULT_END_MARKER = 'Esc\\s*to\\s*cancel'
 // "enter to submit answer" を ExitPlanMode マーカーと同様に常時 OR-in して既定検出可能にする
 // (`esc to interrupt` は他文脈でも出うるため主キーにしない)。claude UI はこの語を出さない
 // ため誤検出ゼロ(233 fixture で回帰確認)。
-const CODEX_QUESTION_END_PATTERN = 'enter\\s+to\\s+submit\\s+answer'
+// v1.17.0 (Phase 3d): 複数質問フローの最後の問(Question M/M)はフッタが "enter to submit all"
+// に変わる(実機確認: ユーザー画面)。これを拾えないと sweep が最後の問を読めず M-1 問しか
+// 登録できない。よって submit (answer|all) を両方マッチさせる。claude UI は両語とも出さない
+// ため誤検出ゼロを維持。
+const CODEX_QUESTION_END_PATTERN = 'enter\\s+to\\s+submit\\s+(?:answer|all)'
 const CODEX_QUESTION_END_RE = new RegExp(CODEX_QUESTION_END_PATTERN, 'i')
 // codex プランモードの選択肢質問のヘッダ "Question N/N (M unanswered)"。prompt 抽出時に
 // この行を段落境界として扱い、prompt 本文(ヘッダの下の行)に混入させない。
 const CODEX_QUESTION_HEADER_RE = /^Question\s+\d+\/\d+/i
-// 同ヘッダの分母(総質問数 M)を取る。M>1 = 複数質問フロー(←/→ で巡回するタブ式相当)。
-// global 版は segment 内の全 "Question N/M" を走査して M>1 が 1 つでもあるか判定するのに使う
-// (先頭マッチ依存で stale ヘッダにすり抜けられるのを防ぐ)。
-const CODEX_QUESTION_COUNT_RE_G = /Question\s+\d+\/(\d+)/gi
+// 同ヘッダの N(現在番号)と M(総数)を取る global RE。M>1 = 複数質問フロー(←/→ で巡回する
+// タブ式相当)。sweep の Q1 復帰回数 (N-1) と巡回 loop bound(M)、および M>1 判定に使う。
+// m[1]=N / m[2]=M。**行頭アンカー必須**(`m` フラグ + `^\s*`): codex の実ヘッダは行頭(インデント
+// 込み)に描画される。非アンカーだと prompt/options 本文に紛れた "Question 9/9" 等をヘッダ誤認し、
+// 単一質問を multi 扱いで検出抑止 / sweep の移動数・総数汚染が起きうる(codex adversarial review B001)。
+// 既存 CODEX_QUESTION_HEADER_RE(`^Question…`)と整合。誤認時も fail-safe(PC フォールバック)だが
+// 行頭限定で誤認面を最小化する。
+const CODEX_QUESTION_POS_RE_G = /^\s*Question\s+(\d+)\/(\d+)/gim
+
+// v1.17.0 (Phase 3d): segment 内に分母 M>1 の "Question N/M" が 1 つでもあるか(global 走査で全件
+// some)。先頭マッチ依存だと画面上方に残る stale な "Question 1/1" が現 "Question 2/3" より先に
+// 当たりすり抜けるため全件走査する。parseDialog の M>1 抑止ガード(:734)と isCodexMultiQuestion の
+// 前段ゲートが共有する唯一の述語(二重持ち = drift 源を回避)。
+function hasMultiCodexQuestion(segment) {
+  return [...String(segment).matchAll(CODEX_QUESTION_POS_RE_G)].some((m) => parseInt(m[2], 10) > 1)
+}
 
 // 終端マーカー正規表現パターンを組み立てる純関数(テスト seam)。ExitPlanMode マーカーと
 // codex 質問型マーカーが構成から脱落しないよう常に OR-in する。
@@ -691,7 +707,11 @@ function expandPromptStart(beforeQ, startNl) {
   return startNl // MAX_LINES 内に box 境界なし = 連結破棄
 }
 
-function parseDialog(buf) {
+// opts.allowMultiCodex(既定 false): true のとき codex 複数質問(Question N/M, M>1)を null で
+// 弾かず「現在表示中の 1 問」を返す。sweepCodexQuestions が各問を読むためだけに使う。既定経路
+// (detectDialogSingle / waitTabStable の既定 等)は false のままで挙動完全不変(M>1 は従来どおり
+// 検出せず PC に倒す)。
+function parseDialog(buf, opts = {}) {
   // 1. 終端マーカーの最終出現を取得
   const endMatches = [...buf.matchAll(END_MARKER_RE_G)]
   if (endMatches.length === 0) return null
@@ -715,14 +735,12 @@ function parseDialog(buf) {
   //   混乱を確認)。完全対応(全問 sweep + タブ登録 + submit all)は Phase 3d。それまでは検出せず
   //   (null)PC 側で処理させる(スマホで半端に答える事故を防ぐ)。codex 質問型 endMarker が
   //   立つ場合のみ判定するため claude / codex 承認には無影響。
-  if (CODEX_QUESTION_END_RE.test(endMarkerText)) {
-    // segment 内に分母 M>1 の "Question N/M" が 1 つでもあれば抑止(global 走査)。先頭マッチ依存
-    // だと画面上方に残る stale な "Question 1/1" が現 "Question 2/3" より先に当たりすり抜ける。
-    // 保守的に「複数質問マーカーが見えたら出さない」= 半端回答事故を防ぐ安全側。
-    const hasMulti = [...segment.matchAll(CODEX_QUESTION_COUNT_RE_G)].some(
-      (m) => parseInt(m[1], 10) > 1
-    )
-    if (hasMulti) return null
+  // v1.17.0 (Phase 3d): allowMultiCodex=true のときはこの抑止を外し、現在表示中の 1 問を返す
+  // (sweepCodexQuestions が ←/→ 巡回で各問を読むため)。M>1 判定は isCodexMultiQuestion 前段
+  // ゲートと同じ共有述語 hasMultiCodexQuestion を使う(あちらは detectDialog 用の前段検出、ここは
+  // parseDialog 内の安全ガード)。保守的に「複数質問マーカーが見えたら出さない」= 半端回答事故防止。
+  if (CODEX_QUESTION_END_RE.test(endMarkerText) && !opts.allowMultiCodex) {
+    if (hasMultiCodexQuestion(segment)) return null
   }
 
   // 3. 偽陽性除外: アクティブカーソル `❯` + 数字 1〜9 が必須
@@ -986,6 +1004,36 @@ function extractCodexCommand(segment, qIdx) {
   return m ? m[1].replace(/\s+/g, ' ').trim() : ''
 }
 
+// v1.17.0 (Phase 3d): 画面が codex の複数質問フロー(Question N/M, M>1)かを判定する純関数
+// (detectDialog の前段ゲート)。最終 endMarker が codex 質問型(enter to submit answer)で、
+// かつ現ダイアログ領域(末尾マーカー手前 DIALOG_SEGMENT_MAX)に分母 M>1 の "Question N/M" が
+// あれば true。M>1 判定は parseDialog の抑止ガード(:734)と共有述語 hasMultiCodexQuestion を
+// 共用する(IS_CODEX 判定は呼び出し側 detectDialog が行う = 本関数は CLI 種別非依存の純関数)。
+function isCodexMultiQuestion(buf) {
+  const s = String(buf)
+  // 早期ガード: codex 質問型マーカーが画面のどこにも無ければ即 false。毎フレーム + 400ms tick で
+  // 走る detectDialog ホットパスで、全 endMarker の matchAll spread を idle/claude 風画面で回避する
+  // (test() は最初の一致で停止)。マーカーが在れば下で last マッチの種別を厳密判定する。
+  if (!CODEX_QUESTION_END_RE.test(s)) return false
+  const endMatches = [...s.matchAll(END_MARKER_RE_G)]
+  if (endMatches.length === 0) return false
+  const last = endMatches[endMatches.length - 1]
+  if (!CODEX_QUESTION_END_RE.test(last[0])) return false
+  const segStart = Math.max(0, last.index - DIALOG_SEGMENT_MAX)
+  const segment = s.slice(segStart, last.index)
+  return hasMultiCodexQuestion(segment)
+}
+
+// v1.17.0 (Phase 3d): 画面に見えている最新(最後)の "Question N/M" の N と M を返す純関数。
+// sweep で Q1 へ戻す回数 (N-1) と巡回の loop bound(M)に使う。見つからなければ null。最後の
+// マッチを採るのは、画面上方に stale な旧ヘッダが残っても最下=現在の問を優先するため。
+function codexQuestionPos(screen) {
+  const ms = [...String(screen).matchAll(CODEX_QUESTION_POS_RE_G)]
+  if (ms.length === 0) return null
+  const last = ms[ms.length - 1]
+  return { n: parseInt(last[1], 10), m: parseInt(last[2], 10) }
+}
+
 // 複合質問の回答配列バリデータ。
 // answers は次の要素を含む配列(長さは tabs.length と一致):
 //   - 文字列 "1"〜"9"(=数字キーのみ送信、Type something 以外のオプション)
@@ -1048,6 +1096,9 @@ if (typeof module !== 'undefined') {
     isCodexCommand,
     isCodexCommandApprovalOptions,
     extractCodexCommand,
+    isCodexMultiQuestion,
+    codexQuestionPos,
+    codexMultiKeySequence,
     // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
     BOX_CHARS,
     RULE_CHARS,
@@ -1107,7 +1158,8 @@ function flushStdinBuffer() {
 async function waitTabStable(
   timeoutMs = 600,
   previousPrompt = null,
-  previousOptionsLen = -1
+  previousOptionsLen = -1,
+  parseOpts = {}
 ) {
   const t0 = Date.now()
   let prev = null
@@ -1115,7 +1167,7 @@ async function waitTabStable(
   let nullCount = 0
   while (Date.now() - t0 < timeoutMs) {
     await sleep(80)
-    const d = parseDialog(getScreenText())
+    const d = parseDialog(getScreenText(), parseOpts)
     if (!d) {
       nullCount++
       if (nullCount >= 3) return prev
@@ -1197,6 +1249,61 @@ async function sweepTabs() {
   }
 }
 
+// v1.17.0 (Phase 3d): ← (左矢印) を n 回送って codex の質問を前方(Q1 方向)へ戻す。各送出後に
+// TUI 再描画を待つ sleep を挟む。sweep の前半(現在位置→Q1)と後半(巡回後→Q1 復帰)で共用。
+async function pressLeftArrow(n) {
+  for (let i = 0; i < n; i++) {
+    term.write('\x1b[D') // ←
+    await sleep(50)
+  }
+}
+
+// v1.17.0 (Phase 3d): codex プランモードの複数質問(Question N/M, M>1)を巡回キャプチャする。
+// sweepTabs の codex 版。claude は ☐✔ タブ式 UI を Tab/Shift+Tab で巡回するが、codex は 1 問ずつ
+// 表示し ←/→ で問を移動する(実機確認: codex 0.142.x、フッタ "←/→ to navigate questions")。
+// 各問は parseDialog(..., {allowMultiCodex:true}) で読む(既定の M>1 抑止を外す)。終了判定は
+// claude の shape-match でなく分母 M を loop bound に使う(より堅牢)。巡回後は Q1 へ戻して
+// 注入(replayCodexMultiAnswers が Q1 から番号を順送り)に備える。finally で sweep フラグ解除 +
+// stdin flush(巡回中の PC 入力を取りこぼさない)。
+async function sweepCodexQuestions() {
+  tabSweepInProgress = true
+  try {
+    const parseOpts = { allowMultiCodex: true }
+    // 現在位置を Q1 へ戻す。Q1 で ← を押したときラップするか止まるかは未確定なので、画面の現在 N
+    // を読んで (N-1) 回だけ ← を送る(過剰送出でラップする事故を避ける保守的算出)。
+    const startPos = codexQuestionPos(getScreenText())
+    if (!startPos) return null
+    await pressLeftArrow(startPos.n - 1)
+    await waitTabStable(400, null, -1, parseOpts)
+
+    const first = parseDialog(getScreenText(), parseOpts)
+    if (!first) return null
+    // 分母 M は巡回中不変なので rewind 前に読んだ startPos.m を流用(画面の再読取を避ける)。
+    const total = startPos.m
+    if (total < 2) return null // 単一は通常パスへフォールバック
+    const tabs = [first]
+    // → で残りの問を順に読む。上限 9(registerMultiDialog / validateMultiAnswer の tabs 上限)。
+    for (let i = 1; i < total && i < 9; i++) {
+      term.write('\x1b[C') // →
+      const last = tabs[tabs.length - 1]
+      const next = await waitTabStable(600, last.prompt, last.options.length, parseOpts)
+      if (!next) break
+      tabs.push(next)
+    }
+    // 巡回後は Q1 へ戻す(注入は Q1 から番号を順送りするため)。
+    await pressLeftArrow(tabs.length - 1)
+    // 全問(分母 M)を捕捉できなかった場合(waitTabStable が null で break / M>9 で 9 打ち切り)は
+    // 半端登録を避けて null を返す → detectDialogSingle が parseDialog 既定(allowMultiCodex=false で
+    // M>1 抑止)で PC 側に倒す。2≤tabs.length<M の半端帯で未回答の残り問に submit all の \r が入る
+    // ブラインド承認(#Z 退行)を構造的に閉じる(3 段レビュー security/codex の収束指摘)。
+    if (tabs.length !== total) return null
+    return tabs
+  } finally {
+    tabSweepInProgress = false
+    flushStdinBuffer()
+  }
+}
+
 // 複合質問の応答キー列を PTY に再生する。
 // answers は validateMultiAnswer 通過済の { num, text? } 配列。
 //   - text なし: 数字キー押下で「選択肢選択 + 自動で次のタブへ移動」
@@ -1249,6 +1356,40 @@ async function replayCancel() {
   }
 }
 
+// v1.17.0 (Phase 3d): codex 複数質問の注入キー列を組み立てる純関数(テスト seam)。#Z(承認取り
+// 違え)防止の不変条件を単体で固定する = 中間問は番号のみ(Enter を一切挟まない)/ submit は最後に
+// \r を 1 回だけ。中間で Enter を挟むと別問の既定 option を誤確定しうる(#Z)。answers は
+// validateMultiAnswer 通過済の { num }(codex 質問型に Type something は無く a.text は不使用 = 番号
+// のみ = 安全側)。戻り値 = ["1","2",...,"\r"]。replayCodexMultiAnswers がこの列を PTY に流す。
+function codexMultiKeySequence(answers) {
+  const keys = answers.map((a) => a.num)
+  keys.push('\r') // enter to submit all(全問送信、最後に 1 回だけ)
+  return keys
+}
+
+// v1.17.0 (Phase 3d): codexMultiKeySequence のキー列を PTY に再生する(replayMultiAnswers の codex 版)。
+// 実機 E2E verified(codex 0.142.x, 案A): ある問で番号キーを押すと選択確定 + 自動で次問へ遷移(claude
+// タブ式と同じ)。全問回答が揃うとフッタが "enter to submit all" になり \r で全送信(claude の
+// "数字列 → 1\r" と同型、codex は \r 単独)。3 問バッチで 番号列 [1,3,2] → \r が全問確定・誤確定なしを
+// 実機確認。#Z 不変条件(中間 Enter なし / submit 1 回)は codexMultiKeySequence が純粋化・テスト固定。
+async function replayCodexMultiAnswers(answers) {
+  tabReplayInProgress = true
+  try {
+    // 各問送出後に次問描画を待ち、submit \r の前にまとめ待ちを入れて流す(タイミングは従来と同一)。
+    const keys = codexMultiKeySequence(answers)
+    const submitIdx = keys.length - 1
+    for (let i = 0; i < keys.length; i++) {
+      if (i === submitIdx) await sleep(MULTI_SUBMIT_WAIT_MS) // submit 直前のまとめ待ち
+      term.write(keys[i]) // 中間 = 番号(codex が自動で次問へ)/ 末尾 = \r(submit all)
+      if (i < submitIdx) await sleep(MULTI_TAB_STEP_MS) // 各問送出後の次問描画待ち
+    }
+    if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
+  } finally {
+    tabReplayInProgress = false
+    flushStdinBuffer()
+  }
+}
+
 async function registerMultiDialog(tabs, projectName) {
   const description = `[${projectName}][AskUserQuestion-Multi] 複合質問 ${tabs.length} 件`
   const tabsPayload = tabs.map((t, i) => ({
@@ -1286,6 +1427,14 @@ async function registerMultiDialog(tabs, projectName) {
   }
 }
 
+// v1.17.0 (Phase 3d): 登録済みの codex 複数質問が画面に出続けている「生存中」状態の述語。
+// detectDialog の生存短絡(dismissal タイマー武装阻止)と onDialogDismissed の発火時 veto が共有し、
+// 逐語重複による drift を防ぐ(hasMultiCodexQuestion を共有述語にしたのと同じ思想)。currentDialog /
+// IS_CODEX のモジュール状態に依存するため純関数でない点に注意。
+function isLiveCodexMulti(screen) {
+  return !!(currentDialog && currentDialog.tabs && IS_CODEX && isCodexMultiQuestion(screen))
+}
+
 async function detectDialog() {
   // タブ巡回 / 再生中は通常検出をスキップ(dedup・誤登録を回避)
   if (tabSweepInProgress || tabReplayInProgress) return
@@ -1293,6 +1442,19 @@ async function detectDialog() {
   // 画面バッファのテキストを 1 回取得し、detectDialogSingle にも引数で渡す
   // (同一 onPtyData 内での二度取りを避ける)
   const screen = getScreenText()
+
+  // v1.17.0 (Phase 3d): 登録済みの codex 複数質問(currentDialog.tabs)が画面に出続けている間は
+  // 「生存」とみなす。codex multi は parseDialog 既定が M>1 抑止で null を返すため detectDialogSingle
+  // の生存パス(lastSeenAt 更新)に乗れず、dismissal タイマー → onDialogDismissed が resolve-by-cli →
+  // 再 sweep + 再登録の無限ループ(id が ~3 秒ごとに入れ替わりスマホは 409「他端末で処理済」)に陥る。
+  // ここで dismissal を止め lastSeenAt を更新して再 sweep させない。claude(IS_CODEX=false)/ codex
+  // 単一質問(tabs なし)は不該当で完全不変。回答注入は tabReplayInProgress ガードで別管理。
+  if (isLiveCodexMulti(screen)) {
+    clearTimeout(dismissalTimer)
+    dismissalTimer = null
+    currentDialog.lastSeenAt = Date.now()
+    return
+  }
 
   // タブ式の判定: parseDialog が non-null かつ isTabbedDialog が真なら sweep に進む
   // ただし currentDialog が既にあって同じ複合質問が回答待ちなら通常パスに戻る
@@ -1305,6 +1467,19 @@ async function detectDialog() {
         return
       }
       // タブが 1 件しか拾えなければ単一質問として通常パスへフォールバック
+    }
+  }
+
+  // v1.17.0 (Phase 3d): codex の複数質問(Question N/M, M>1)は claude の ☐✔ タブ式 UI を
+  // 持たないため isTabbedDialog では拾えない。専用ゲート isCodexMultiQuestion で検出し、
+  // sweepCodexQuestions で ←/→ 巡回 → registerMultiDialog(tool 非依存で流用)。拾えなければ
+  // 素通り → detectDialogSingle。そこでは parseDialog 既定(allowMultiCodex=false)が M>1 を
+  // null にするため、半端な単一注入は起きず PC 側に残る(安全側フォールバック)。
+  if (!currentDialog && IS_CODEX && isCodexMultiQuestion(screen)) {
+    const tabs = await sweepCodexQuestions()
+    if (tabs && tabs.length >= 2) {
+      await registerMultiDialog(tabs, PROJECT_NAME)
+      return
     }
   }
 
@@ -1483,7 +1658,10 @@ async function pollForResponse(id) {
           `multi answers "${JSON.stringify(resp.answers).slice(0, 80)}" は許可された値ではない。注入スキップ。`
         )
       } else {
-        await replayMultiAnswers(validated)
+        // v1.17.0 (Phase 3d): codex は注入キーが claude と異なる(番号で自動次問 + \r で submit all)
+        // ため IS_CODEX で振り分ける。claude(IS_CODEX=false)は従来経路で完全不変。
+        if (IS_CODEX) await replayCodexMultiAnswers(validated)
+        else await replayMultiAnswers(validated)
         // text 内容はログに出さず、長さのみ記録(defense in depth)
         const summary = validated.map((a) =>
           a.text != null ? { num: a.num, text_len: a.text.length } : { num: a.num }
@@ -1734,9 +1912,14 @@ async function replayCodexQuestion(key, text, id) {
 async function onDialogDismissed() {
   dismissalTimer = null
   if (!currentDialog) return
+  const screen = getScreenText()
+  // v1.17.0 (Phase 3d): codex 複数質問は parseDialog 既定が null(M>1 抑止)= 下の d チェックを
+  // すり抜けて誤 dismiss(resolve-by-cli)し、スマホが持つ id を奪う。まだ画面に出ていれば生存と
+  // みなしキャンセル(detectDialog の生存短絡と同じ盲点への defense in depth)。
+  if (isLiveCodexMulti(screen)) return
   // 発火時点で再度 parseDialog して、画面にまだ(抑制対象でない)ダイアログが
   // あればキャンセルしない
-  const d = parseDialog(getScreenText())
+  const d = parseDialog(screen)
   if (d && !isSuppressed(d)) return
   if (Date.now() - currentDialog.lastSeenAt < DISMISSAL_MS) return
   await resolveCurrentAsCli()

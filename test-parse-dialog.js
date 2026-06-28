@@ -27,6 +27,9 @@ const {
   isCodexCommand,
   isCodexCommandApprovalOptions,
   extractCodexCommand,
+  isCodexMultiQuestion,
+  codexQuestionPos,
+  codexMultiKeySequence,
   BOX_CHARS,
   RULE_CHARS,
   PROMPT_BOX_ANCHOR_CHARS,
@@ -1662,6 +1665,171 @@ console.log('[33] codex 複数質問フロー(M>1)は null で抑止')
   const rs = parseDialog(single)
   assertEq('Question 1/1(M=1)→ 検出される', !!rs, true)
   assertEq("単一は tool='AskUserQuestion'", rs && rs.tool, 'AskUserQuestion')
+}
+
+// -------------------------------------------------------
+// 34. isCodexMultiQuestion(Phase 3d): 複数質問フロー検出の前段ゲート。M>1 かつ codex 質問型
+//     endMarker のときだけ true。最後の問(submit all)も拾えること(submit (answer|all) 拡張)、
+//     単一(M=1)/ claude UI / 非ダイアログは false を固定する。detectDialog の codex 分岐条件。
+// -------------------------------------------------------
+console.log('[34] isCodexMultiQuestion(複数質問フロー検出)')
+{
+  const q1 = [
+    '  Question 1/3 (3 unanswered)',
+    '  フレームワークを選んでください。',
+    '  › 1. Next.js (Recommended)   小さな Web アプリを最短でまとめやすいです。',
+    '    2. SvelteKit               軽量で UI 中心の小規模アプリ向けです。',
+    '    3. None of the above       Optionally, add details in notes (tab).',
+    '  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt',
+  ].join('\n')
+  assertEq('M=3 → true', isCodexMultiQuestion(q1), true)
+
+  // 最後の問はフッタが "enter to submit all"。これも codex 質問型として検出される必要がある
+  const qLast = [
+    '  Question 3/3 (3 unanswered)',
+    '  認証方式を選んでください。',
+    '  › 1. Supabase Auth (Recommended)   実装量を抑えられます。',
+    '    2. Google OAuth                  登録しやすいです。',
+    '    3. None of the above             Optionally, add details in notes (tab).',
+    '  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt',
+  ].join('\n')
+  assertEq('最後の問(submit all)→ true', isCodexMultiQuestion(qLast), true)
+
+  // 単一(M=1)は false(複数フローでない)
+  const single = [
+    '  Question 1/1 (1 unanswered)',
+    '  季節を選んでください。',
+    '  › 1. 春 (Recommended)   春。',
+    '    2. 夏                 夏。',
+    '  tab to add notes | enter to submit answer | esc to interrupt',
+  ].join('\n')
+  assertEq('M=1 → false', isCodexMultiQuestion(single), false)
+
+  // claude タブ式 AUQ(codex 質問型 endMarker でない)→ false
+  const claudeTab = [
+    '  ☐ Q1  ☐ Q2  ✔ Submit →',
+    '  Which color?',
+    '  › 1. Red',
+    '    2. Blue',
+    '  Esc to cancel',
+  ].join('\n')
+  assertEq('claude UI(codex endMarker なし)→ false', isCodexMultiQuestion(claudeTab), false)
+  assertEq('endMarker なしの素テキスト → false', isCodexMultiQuestion('just some text'), false)
+}
+
+// -------------------------------------------------------
+// 35. codexQuestionPos(Phase 3d): 画面の最新 "Question N/M" の N/M を返す。sweep の Q1 復帰回数
+//     (N-1)と loop bound(M)に使う。stale な旧ヘッダがあれば最後(最下=現在)を優先。
+// -------------------------------------------------------
+console.log('[35] codexQuestionPos(N/M 抽出)')
+{
+  assertEq('Question 2/3 → {n:2,m:3}', codexQuestionPos('  Question 2/3 (3 unanswered)\n  本文'), {
+    n: 2,
+    m: 3,
+  })
+  assertEq(
+    'stale 旧ヘッダがあれば最後(現在)を採る',
+    codexQuestionPos('Question 1/3 ...\n... \nQuestion 2/3 (3 unanswered)'),
+    { n: 2, m: 3 }
+  )
+  assertEq('ヘッダなし → null', codexQuestionPos('no question header here'), null)
+}
+
+// -------------------------------------------------------
+// 36. parseDialog allowMultiCodex(Phase 3d): sweep が各問を読むためのオプション。既定(オプション
+//     なし)は M>1 → null で従来挙動完全不変([33] と同じ)。allowMultiCodex=true で現在表示中の
+//     1 問を抽出。最後の問(submit all)も抽出できること(submit (answer|all) 拡張)を固定する。
+// -------------------------------------------------------
+console.log('[36] parseDialog allowMultiCodex(sweep 用・現在問抽出)')
+{
+  const q2 = [
+    '  Question 2/3 (3 unanswered)',
+    '  DBを選んでください。',
+    '  › 1. Supabase Postgres (Recommended)   小さく始めやすいです。',
+    '    2. SQLite                            構成が最小になります。',
+    '    3. None of the above                 Optionally, add details in notes (tab).',
+    '  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt',
+  ].join('\n')
+  // 既定(オプションなし)は M>1 → null(従来挙動不変 = [33] の回帰)
+  assertEq('既定は M>1 → null(従来挙動不変)', parseDialog(q2), null)
+  // allowMultiCodex=true で現在問(Q2)を抽出
+  const r = parseDialog(q2, { allowMultiCodex: true })
+  assertEq('allowMultiCodex → 検出できる', !!r, true)
+  assertEq("tool = 'AskUserQuestion'", r && r.tool, 'AskUserQuestion')
+  assertEq('prompt = 現在問の本文(ヘッダ除去)', r && r.prompt, 'DBを選んでください。')
+  assertEq('options 数 = 3', r && r.options.length, 3)
+
+  // 最後の問(submit all)も allowMultiCodex で抽出できる(submit all 拡張の検証)
+  const q3 = [
+    '  Question 3/3 (3 unanswered)',
+    '  認証方式を選んでください。',
+    '  › 1. Supabase Auth (Recommended)   実装量を抑えられます。',
+    '    2. Google OAuth                  登録しやすいです。',
+    '    3. None of the above             Optionally, add details in notes (tab).',
+    '  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt',
+  ].join('\n')
+  const r3 = parseDialog(q3, { allowMultiCodex: true })
+  assertEq('最後の問(submit all)も検出できる', !!r3, true)
+  assertEq('prompt = 最後の問の本文', r3 && r3.prompt, '認証方式を選んでください。')
+}
+
+// -------------------------------------------------------
+// 37. codexMultiKeySequence(Phase 3d): codex 複数質問注入の #Z 不変条件を固定。中間問は番号のみで
+//     Enter を一切挟まず、submit は最後に \r を 1 回だけ。中間に \r が混入すると別問の既定 option を
+//     誤確定する(failure #Z)ため、退行を単体で検出する seam。
+// -------------------------------------------------------
+console.log('[37] codexMultiKeySequence(#Z 不変条件 = 中間 Enter なし / submit 1回)')
+{
+  const seq3 = codexMultiKeySequence([{ num: '1' }, { num: '2' }, { num: '3' }])
+  assertEq('3 問 → 番号列 + 末尾 \\r', seq3, ['1', '2', '3', '\r'])
+  // 末尾以外に \r が無い(中間 Enter 禁止)
+  const midEnter = seq3.slice(0, -1).some((k) => k === '\r')
+  assertEq('中間に Enter なし', midEnter, false)
+  assertEq('末尾は \\r 1 個だけ', seq3.filter((k) => k === '\r').length, 1)
+  assertEq('末尾要素が \\r', seq3[seq3.length - 1], '\r')
+
+  // 1 問・最大 9 問でも同規律
+  assertEq('1 問 → ["1","\\r"]', codexMultiKeySequence([{ num: '1' }]), ['1', '\r'])
+  const seq9 = codexMultiKeySequence(
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((n) => ({ num: n }))
+  )
+  assertEq('9 問でも \\r は末尾 1 個', seq9.filter((k) => k === '\r').length, 1)
+  assertEq('9 問の長さ = 10', seq9.length, 10)
+}
+
+// -------------------------------------------------------
+// 38. B001(codex adversarial review): Question N/M 検出の行頭アンカー。prompt/options 本文に紛れた
+//     "Question 9/9" 等をヘッダ誤認しない。単一質問(M=1)の本文に M>1 文字列があっても multi 扱いに
+//     しない(検出抑止の汚染防止)。codexQuestionPos も行頭の実ヘッダのみ拾う。
+// -------------------------------------------------------
+console.log('[38] B001 行頭アンカー(本文混入 Question N/M を誤認しない)')
+{
+  // 単一質問だが本文に "Question 9/9"(行頭でない)が紛れている → multi 扱いにしない
+  const poisonedSingle = [
+    '  Question 1/1 (1 unanswered)',
+    '  次の説明では Question 9/9 のように書かれることがあります。どれにしますか?',
+    '  › 1. はい (Recommended)   進めます。',
+    '    2. いいえ               やめます。',
+    '  tab to add notes | enter to submit answer | esc to interrupt',
+  ].join('\n')
+  assertEq('本文の Question 9/9 で multi 誤認しない', isCodexMultiQuestion(poisonedSingle), false)
+  assertEq('codexQuestionPos は行頭の実ヘッダ(1/1)を採る', codexQuestionPos(poisonedSingle), {
+    n: 1,
+    m: 1,
+  })
+  // 既定 parseDialog は単一質問として現在問を抽出できる(誤抑止されない)
+  const ps = parseDialog(poisonedSingle)
+  assertEq('単一として検出できる(誤抑止なし)', !!ps, true)
+
+  // option 行頭は番号 "1." 等が来るため "Question" 始まりにならない(誤認しない)を確認
+  const optionLike = [
+    '  Question 1/1 (1 unanswered)',
+    '  どれにしますか?',
+    '  › 1. Question 9/9 という選択肢   説明。',
+    '    2. ふつうの選択肢               説明。',
+    '  tab to add notes | enter to submit answer | esc to interrupt',
+  ].join('\n')
+  assertEq('option 内 Question 9/9 でも multi 誤認しない', isCodexMultiQuestion(optionLike), false)
 }
 
 // -------------------------------------------------------
