@@ -206,21 +206,59 @@ const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
 // Claude TUI 組み込みの "Type something" / "Type something." だけに限定。
 const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
 
-// v1.12.0 (D1): answer 文字列(数字 or 完全一致 option 文字列)から該当 option を解決。
-// codex B001-B003 の防御: API 直叩きで数字指定により option 種別チェックを迂回されない
-// よう、サーバ側で必ず options 配列に照合する。
-function resolveOption(opts, ans) {
-  if (!Array.isArray(opts) || typeof ans !== 'string') return null
+// answer 文字列(数字 or 完全一致 option 文字列)から 0-based index を解決。不一致 → -1。
+// 照合ロジックの単一 SoT(resolveOption はこれの薄いラッパー)。
+// 防御: API 直叩きで数字指定により option 種別チェックを迂回されないよう、必ず options 配列に照合する。
+function resolveOptionIndex(opts, ans) {
+  if (!Array.isArray(opts) || typeof ans !== 'string') return -1
   const trimmed = ans.trim()
   if (/^[1-9]$/.test(trimmed)) {
     const idx = parseInt(trimmed, 10) - 1
-    return idx < opts.length ? opts[idx] : null
+    return idx < opts.length ? idx : -1
   }
-  return opts.includes(trimmed) ? trimmed : null
+  return opts.indexOf(trimmed)
+}
+
+// answer から該当 option 文字列を解決(resolveOptionIndex の文字列版)。不一致 → null。
+function resolveOption(opts, ans) {
+  const idx = resolveOptionIndex(opts, ans)
+  return idx >= 0 ? opts[idx] : null
+}
+
+// v1.18.0 (Phase 3c): wrapper が /request 時に宣言する「自由記入可能な option の番号(1-based)」を
+// 正規化。codex プランモード質問の (tab) option をスマホで自由記入可にするサイドカーメタ。
+// 識別 SoT は wrapper の codexFreeTextOptions(ローカル parse)。freeTextOptions は /request 時にのみ
+// 設定され /resolve では受け口がない = 正規 item では事後変更不能(immutable)ゆえ宣言を信頼できる。
+// (token を持つ主体は ngrok 経由でも /request に到達しうるが、攻撃者生成 item は wrapper が
+//  自分の登録 id しか poll しないため孤児化するだけ = freeTextOptions 由来の新規攻撃面は増えない。)
+// claude 経路は宣言しない(常に null)= 挙動完全不変。各要素 1..optLen の整数のみ・dedup・最大 9。
+function sanitizeFreeTextOptions(arr, optLen) {
+  if (!Array.isArray(arr)) return null
+  const seen = new Set()
+  for (const v of arr) {
+    if (typeof v !== 'number' || !Number.isInteger(v)) continue
+    if (v < 1 || v > optLen) continue
+    seen.add(v)
+    if (seen.size >= 9) break
+  }
+  return seen.size > 0 ? Array.from(seen) : null
+}
+
+// v1.18.0 (Phase 3c): 単一質問で text を受理してよいか(D1 ゲートの純粋判定、test seam)。
+// tabs なし前提(複合は呼び出し側で別途 400)。許可 = "Type something" OR codex 自由記入宣言 option。
+// idx を 1 度だけ算出(API 直叩きの番号迂回は resolveOptionIndex の options 照合で不可)。
+// claude は item.freeTextOptions=null で第2項常に false = Type something 限定のまま不変。
+function isSingleTextAllowed(item, answer) {
+  const idx = resolveOptionIndex(item.options, answer)
+  if (idx < 0) return false // 不一致 / 範囲外 = API 直叩きの番号迂回も含め拒否
+  const isTypeSomething = FREE_TEXT_OPTION_RE.test(item.options[idx])
+  const isCodexFreeText =
+    Array.isArray(item.freeTextOptions) && item.freeTextOptions.includes(idx + 1)
+  return isTypeSomething || isCodexFreeText
 }
 
 app.post('/request', authenticate, (req, res) => {
-  const { description, options, tabs } = req.body
+  const { description, options, tabs, freeTextOptions } = req.body
   if (!description || typeof description !== 'string') {
     return res.status(400).json({ error: 'description is required' })
   }
@@ -261,11 +299,19 @@ app.post('/request', authenticate, (req, res) => {
     if (safeTabs) safeOptions = ['Submit']
   }
 
+  // freeTextOptions(v1.18.0 Phase 3c): codex 自由記入 option(末尾 (tab))の番号宣言。
+  // 識別 SoT は wrapper(127.0.0.1 trusted)。単一質問のみ対象 = tabs ありは無視(null)。
+  // claude は宣言しないため常に null = 挙動不変。
+  const safeFreeTextOptions = safeTabs
+    ? null
+    : sanitizeFreeTextOptions(freeTextOptions, safeOptions.length)
+
   const item = {
     id: crypto.randomUUID(),
     description: safeDesc,
     options: safeOptions,
     tabs: safeTabs, // null または [{label?, prompt, options}]
+    freeTextOptions: safeFreeTextOptions, // v1.18.0: codex 自由記入可 option の番号配列(1-based)or null
     status: 'pending', // pending | resolved
     answer: null,
     answers: null, // 複合質問の回答配列(null または string[])
@@ -390,10 +436,12 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     if (Array.isArray(item.tabs)) {
       return res.status(400).json({ error: 'text is not allowed for tabbed items (use answers[i].text)' })
     }
-    const selectedOpt = resolveOption(item.options, answer)
-    if (!selectedOpt || !FREE_TEXT_OPTION_RE.test(selectedOpt)) {
+    // D1 拡張(v1.18.0 Phase 3c): text 許可 = "Type something" OR codex 自由記入宣言 option。
+    // 判定は純関数 isSingleTextAllowed に集約(test seam)。
+    if (!isSingleTextAllowed(item, answer)) {
       return res.status(400).json({
-        error: 'text is only allowed when the selected option matches "Type something"',
+        error:
+          'text is only allowed when the selected option is "Type something" or a codex free-text (tab) option',
       })
     }
     safeText = sanitizeFreeText(text)
@@ -602,15 +650,18 @@ server.on('error', (err) => {
 
 // C2: 明示的に 127.0.0.1 にバインド（LAN 他端末からの直接アクセスを防止）
 // 外部アクセスは ngrok トンネル経由のみに限定される。
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`\n✅ Approval server running on http://127.0.0.1:${PORT} (loopback only)`)
-  console.log(`\n🔑 SECRET_TOKEN: ${SECRET_TOKEN}`)
-  console.log(`   (スマホUIとエージェントコードにこのトークンを設定してください)\n`)
-  console.log(`次のステップ:`)
-  console.log(`  1. 別ターミナルで: ngrok http ${PORT}`)
-  console.log(`  2. ngrokが表示したURLをスマホUIに設定`)
-  console.log(`  3. エージェントコードでもURLとトークンを設定\n`)
-})
+// require.main ガード: test 等で require した場合はポートを束縛しない(純関数の単体テスト用)。
+if (require.main === module) {
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`\n✅ Approval server running on http://127.0.0.1:${PORT} (loopback only)`)
+    console.log(`\n🔑 SECRET_TOKEN: ${SECRET_TOKEN}`)
+    console.log(`   (スマホUIとエージェントコードにこのトークンを設定してください)\n`)
+    console.log(`次のステップ:`)
+    console.log(`  1. 別ターミナルで: ngrok http ${PORT}`)
+    console.log(`  2. ngrokが表示したURLをスマホUIに設定`)
+    console.log(`  3. エージェントコードでもURLとトークンを設定\n`)
+  })
+}
 
 // -------------------------------------------------------
 // エージェントから使うヘルパー関数（同プロセス内で使う場合）
@@ -656,4 +707,13 @@ async function requestApproval(description, options = ['Yes', 'No']) {
   return false
 }
 
-module.exports = { requestApproval }
+module.exports = {
+  requestApproval,
+  // v1.18.0 (Phase 3c): D1 ゲート純関数の test seam(server 側受理/拒否境界の回帰保護)
+  resolveOption,
+  resolveOptionIndex,
+  sanitizeFreeTextOptions,
+  isSingleTextAllowed,
+  FREE_TEXT_OPTION_RE,
+  CHAT_ABOUT_RE,
+}

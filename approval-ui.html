@@ -1210,6 +1210,9 @@
         div.className = 'req-card' + (isSelected ? ' selected' : '')
         div.dataset.id = item.id
 
+        // v1.18.0 (Phase 3c): 自由記入宣言はカード単位で 1 度だけ束ねる(per-option の使い捨て
+        // 空配列確保を避ける)。claude は null = []。
+        const fto = item.freeTextOptions || []
         const btnHtml = isSelected
           ? `<div class="btn-area">${item.options
               .map((opt, oi) => {
@@ -1217,7 +1220,10 @@
                 // 保持し wrapper / サーバーへの番号と整合させる(複合質問と同方式)。
                 if (CHAT_ABOUT_RE.test(opt)) return ''
                 const num = String(oi + 1)
-                return `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-num="${num}" data-answer="${escHtml(opt)}">${escHtml(opt)}</button>`
+                // v1.18.0 (Phase 3c): フリーテキスト判定を render 確定メタ化。Type something に加え
+                // codex 自由記入((tab))= item.freeTextOptions(1-based)宣言で自由記入モーダルを開く。
+                const isFreeText = FREE_TEXT_OPTION_RE.test(opt) || fto.includes(oi + 1)
+                return `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-num="${num}" data-answer="${escHtml(opt)}" data-freetext="${isFreeText ? '1' : '0'}">${escHtml(opt)}</button>`
               })
               .join('')}<button class="btn-cancel-dialog" data-cancel-id="${item.id}">${t('btnCancelDialog')}</button></div>`
           : ''
@@ -1331,8 +1337,9 @@
         if (btn) {
           const label = btn.dataset.answer
           const num = btn.dataset.num
-          // v1.12.0: Type something / Chat about this はテキスト入力モーダルを開く
-          if (FREE_TEXT_OPTION_RE.test(label)) {
+          // v1.18.0 (Phase 3c): フリーテキスト判定は render 確定メタ(data-freetext)を信頼。
+          // Type something(v1.12.0)に加え codex 自由記入((tab))でも入力モーダルを開く。
+          if (btn.dataset.freetext === '1') {
             openFreeTextModal(btn.dataset.id, label, null, num)
             return
           }
