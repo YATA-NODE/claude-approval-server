@@ -901,7 +901,17 @@ function parseDialog(buf, opts = {}) {
     }
   }
 
-  return { prompt, options, tool, args }
+  const dlg = { prompt, options, tool, args }
+  // v1.18.0 (Phase 3c): codex 自由記入 option(末尾 (tab))の番号宣言を付与。
+  // claude / コマンド承認((tab) 不在)は付かず key 自体が出ない = 下流の挙動・body 不変。
+  // codex 判定は opts.codex 優先・既定 IS_CODEX(opts.allowMultiCodex と同じく opts 経由で渡せる
+  // ようにし parseDialog を test から純関数として検証可能に。本番は呼出側が省略 = IS_CODEX で不変)。
+  const codexMode = opts.codex !== undefined ? opts.codex : IS_CODEX
+  if (codexMode) {
+    const fto = codexFreeTextOptions(options)
+    if (fto) dlg.freeTextOptions = fto
+  }
+  return dlg
 }
 
 // タブ式 AskUserQuestion(複合質問)の特徴判定。
@@ -966,6 +976,23 @@ function isCodexCommandApprovalOptions(options) {
     options.length >= 2 &&
     options.every((o) => extractCodexShortcut(o) !== null)
   )
+}
+
+// v1.18.0 (Phase 3c): codex プランモード質問の「自由記入 option」(末尾 (tab))の番号(1-based)を
+// 返す純関数。codex は `None of the above … (tab)` を選び Tab を押すと notes 入力欄が開く。この
+// option をスマホで自由記入可にするため、wrapper が detectDialog 時に番号を算出し /request で server
+// へ宣言する(識別 SoT = 本関数 1 箇所、ラベル文字列依存をここに集約。server/UI は宣言を信頼するだけ)。
+// extractCodexShortcut が (tab) に null を返す(:960)ため command 承認 (y)/(p)/(esc) とは構造的に交わらない。
+// 末尾の `[.\s]*` は codex 実レンダリング `… notes (tab).`(末尾ピリオド)を許容するため
+// (E2E 2026-06-29 で発覚: `\(tab\)\s*$` だと末尾ピリオドで不一致 → 自由記入未宣言の実バグ)。
+const CODEX_FREE_TEXT_OPTION_RE = /\(tab\)[.\s]*$/i
+function codexFreeTextOptions(options) {
+  if (!Array.isArray(options)) return null
+  const out = []
+  for (let i = 0; i < options.length; i++) {
+    if (CODEX_FREE_TEXT_OPTION_RE.test(String(options[i]))) out.push(i + 1)
+  }
+  return out.length > 0 ? out : null
 }
 
 // 選択肢行(行頭の任意カーソル + 数字 1-9 + 区切り . / ))の最初の出現。カーソル文字集合は
@@ -1096,6 +1123,7 @@ if (typeof module !== 'undefined') {
     isCodexCommand,
     isCodexCommandApprovalOptions,
     extractCodexCommand,
+    codexFreeTextOptions,
     isCodexMultiQuestion,
     codexQuestionPos,
     codexMultiKeySequence,
@@ -1553,7 +1581,13 @@ async function registerDialog(d) {
   // currentDialog=null のまま二重登録されてしまう。先にスロットを予約する。
   currentDialog = { ...d, id: null, lastSeenAt: Date.now() }
   try {
-    const resp = await httpRequest('POST', '/request', { description, options: d.options })
+    // v1.18.0 (Phase 3c): codex 自由記入宣言を server へ。claude は d.freeTextOptions=undefined
+    // → spread しない = body byte 不変(回帰アサート対象)。
+    const resp = await httpRequest('POST', '/request', {
+      description,
+      options: d.options,
+      ...(d.freeTextOptions ? { freeTextOptions: d.freeTextOptions } : {}),
+    })
     // スロットが別物に置き換わっていなければ id を埋める
     if (currentDialog && currentDialog.id === null && currentDialog.prompt === d.prompt) {
       currentDialog.id = resp.id
@@ -1714,10 +1748,19 @@ async function pollForResponse(id) {
         return
       }
       // ② 質問型の自由記入(Tab notes)。①を通過した = 選択 option はショートカットを持たない
-      //    質問型のみ。text 健全性を再検証(defense in depth)。
-      //    Phase 3c 予定: 現状 server の D1 ゲートで codex 質問型の text は 400 = 本分岐は未到達。
-      //    UI + server 緩和後に活きる(defense in depth として今は安全側に置いておく)。
+      //    質問型のみ。text 健全性を再検証(defense in depth)。v1.18.0 (Phase 3c) で活性化。
       if (resp.text != null) {
+        // defense in depth (v1.18.0 Phase 3c): text 注入は wrapper 自身が宣言した自由記入 option
+        //   (currentDialog.freeTextOptions, 1-based)に限定。server D1 ゲートと対称の二重防御で、
+        //   宣言外 option への text 流し込み(#Z / B001 同型)を wrapper 側でも塞ぐ。
+        const keyNum = parseInt(key, 10)
+        if (
+          !(Array.isArray(currentDialog.freeTextOptions) &&
+            currentDialog.freeTextOptions.includes(keyNum))
+        ) {
+          wlog(`text attached but option #${keyNum} is not a declared codex free-text option。注入スキップ。`)
+          return
+        }
         const safeText = validateFreeText(resp.text)
         if (!safeText) {
           // W001: 入力内容そのものはログに出さない(自由記入に機密が入りうる)。型/長さのみ記録。

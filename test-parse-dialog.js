@@ -27,6 +27,7 @@ const {
   isCodexCommand,
   isCodexCommandApprovalOptions,
   extractCodexCommand,
+  codexFreeTextOptions,
   isCodexMultiQuestion,
   codexQuestionPos,
   codexMultiKeySequence,
@@ -1830,6 +1831,108 @@ console.log('[38] B001 行頭アンカー(本文混入 Question N/M を誤認し
     '  tab to add notes | enter to submit answer | esc to interrupt',
   ].join('\n')
   assertEq('option 内 Question 9/9 でも multi 誤認しない', isCodexMultiQuestion(optionLike), false)
+}
+
+// -------------------------------------------------------
+// 39. codexFreeTextOptions(自由記入 option 番号抽出 / Phase 3c)
+// 末尾 (tab) ラベルの 1-based index 配列を返す純関数。識別 SoT(server/UI はこの宣言を信頼)。
+// -------------------------------------------------------
+console.log('\n[39] codexFreeTextOptions(自由記入 option 番号抽出)')
+{
+  assertEq(
+    'None of the above … (tab) を拾う(1-based)',
+    codexFreeTextOptions(['Yes (y)', 'No (esc)', 'None of the above … (tab)']),
+    [3]
+  )
+  // 実 codex レンダリングは末尾ピリオド付き `… notes (tab).`(E2E 2026-06-29 で確認、回帰固定)
+  assertEq(
+    '末尾ピリオド付き (tab). を拾う(実 codex 形)',
+    codexFreeTextOptions(['Yes (y)', 'No (esc)', 'None of the above Optionally, add details in notes (tab).']),
+    [3]
+  )
+  assertEq('複数の (tab) を拾う', codexFreeTextOptions(['Foo (tab)', 'Bar', 'Baz (tab)']), [1, 3])
+  assertEq('混在: (Recommended) は無視し (tab) のみ', codexFreeTextOptions(['春 (Recommended)', 'A (tab)']), [2])
+  assertEq('コマンド承認 (y)/(esc) は拾わない → null', codexFreeTextOptions(['Yes (y)', 'No (esc)']), null)
+  assertEq('Type something は (tab) でない → null', codexFreeTextOptions(['Type something', 'Other']), null)
+  assertEq('(tab) が末尾でない → null', codexFreeTextOptions(['(tab) foo', 'bar']), null)
+  assertEq('非配列 → null(防御)', codexFreeTextOptions(null), null)
+  assertEq('空配列 → null', codexFreeTextOptions([]), null)
+  // 非衝突: 自由記入 option は command 承認のショートカットを持たない(#Z 回避の構造的分離)
+  assertEq('extractCodexShortcut("… (tab)") === null', extractCodexShortcut('None of the above … (tab)'), null)
+  // claude byte 不変の根拠: claude の通常 option は (tab) を持たないため宣言が乗らない
+  assertEq(
+    'claude 通常 option は宣言なし → null(body 不変の根拠)',
+    codexFreeTextOptions(['Option A', 'Option B', 'Type something']),
+    null
+  )
+}
+
+// -------------------------------------------------------
+// 40. codex 単一質問 (tab) option の parse 統合(Phase 3c)
+// parseDialog が (tab) 末尾 option を保持し、opts.codex 指定時に freeTextOptions を付与することを検証。
+// (parseDialog は opts.codex 優先・既定 IS_CODEX = 本番不変。test は opts.codex で純関数検証可能。)
+// -------------------------------------------------------
+console.log('\n[40] codex 単一質問 (tab) option の parse 統合')
+{
+  const seg = [
+    '  Question 1/1 (1 unanswered)',
+    '  どの季節がよいですか?',
+    '  › 1. 春 (Recommended)   暖かいです。',
+    '    2. 夏                  暑いです。',
+    '    3. None of the above  Optionally, add details in notes (tab).',
+    '  tab to add notes | enter to submit answer | esc to interrupt',
+  ].join('\n')
+  // codex モード: freeTextOptions が付与される(parse→番号付与の一気通貫を検証)
+  const parsed = parseDialog(seg, { codex: true })
+  assertEq('単一質問として検出できる', !!parsed, true)
+  if (parsed) {
+    // 実 codex 形は末尾ピリオド付き `(tab).` = 検出器と同じ末尾ピリオド許容で照合
+    assertEq('option 3 末尾に (tab). が残る(ピリオド許容)', /\(tab\)[.\s]*$/i.test(parsed.options[2]), true)
+    assertEq('codex モードで freeTextOptions=[3] が付与', parsed.freeTextOptions, [3])
+  }
+  // claude モード(opts.codex=false): freeTextOptions は付与されない(body 不変の根拠)
+  const parsedClaude = parseDialog(seg, { codex: false })
+  assertEq('claude モードでは freeTextOptions 付与なし', parsedClaude && parsedClaude.freeTextOptions, undefined)
+}
+
+// -------------------------------------------------------
+// 41. Server D1 ゲート純関数(approval-server.js、Phase 3c W001 回帰)
+// codex 自由記入の text 受理/拒否境界を server 側で直接検証(require.main ガードで listen せず import)。
+// -------------------------------------------------------
+console.log('\n[41] Server D1 ゲート純関数(approval-server.js)')
+{
+  const { isSingleTextAllowed, sanitizeFreeTextOptions } = require('./approval-server.js')
+
+  // Type something 互換(claude 経路の既存挙動が壊れていない)
+  assertEq(
+    'Type something option に text 許可',
+    isSingleTextAllowed({ options: ['Yes', 'Type something'], freeTextOptions: null }, '2'),
+    true
+  )
+  assertEq(
+    'claude 通常 option に text 不可(freeTextOptions=null)',
+    isSingleTextAllowed({ options: ['Yes', 'No'], freeTextOptions: null }, '1'),
+    false
+  )
+
+  // codex 自由記入宣言 option(3 番)に text 許可、宣言外(1 番)は不可
+  const codexItem = {
+    options: ['春', '夏', 'None of the above Optionally, add details in notes (tab).'],
+    freeTextOptions: [3],
+  }
+  assertEq('codex 宣言 option(3)に text 許可', isSingleTextAllowed(codexItem, '3'), true)
+  assertEq('codex 宣言外 option(1)に text 不可', isSingleTextAllowed(codexItem, '1'), false)
+  assertEq(
+    'ラベル完全一致でも宣言 option は許可',
+    isSingleTextAllowed(codexItem, 'None of the above Optionally, add details in notes (tab).'),
+    true
+  )
+  assertEq('範囲外番号(9)は不可(API 直叩き迂回不可)', isSingleTextAllowed(codexItem, '9'), false)
+
+  // sanitizeFreeTextOptions の境界(optLen=3): 範囲外/型不正/小数/文字列を除去し正規 index のみ
+  assertEq('不正混在を除去し正規 index のみ(順序保持)', sanitizeFreeTextOptions([0, 3, 4, '2', 2.5, 2], 3), [3, 2])
+  assertEq('全要素不正 → null', sanitizeFreeTextOptions([0, 4, 'x'], 3), null)
+  assertEq('非配列 → null', sanitizeFreeTextOptions(undefined, 3), null)
 }
 
 // -------------------------------------------------------
