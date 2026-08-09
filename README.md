@@ -271,6 +271,7 @@ function codex {
 4. どこかで応答（`POST /resolve/:id`）が入ると、サーバーの long-poll が即座に返答
 5. ラッパーが対象 CLI に合わせて番号、Enter、ショートカットキーなどを PTY に注入し、CLI 本体が続行
 6. 逆に PC ターミナルで直接応答された場合、ラッパーはダイアログ消失を検知して `resolvedBy=cli` で resolve。スマホ側の表示も閉じる
+7. UI の「すべて削除」操作で `DELETE /history`(認証必須)を呼ぶと、サーバーは resolved 済みのキューエントリのみを一括削除し `{ removed }`(削除件数)を返す。pending なエントリには影響しない
 
 ## セキュリティ
 
@@ -280,7 +281,7 @@ function codex {
 - **入力サニタイズ**: `description` は 500 文字、`options` は 9 件 × 200 文字、複合質問の `tabs` は 9 件(label 100 文字 / prompt 500 文字)、`answers` は 9 件まで。余剰は切り詰め(件数超過は破棄)
 - **注入ホワイトリスト**: PTY に書き込まれるのは以下のいずれかのみ。任意キー注入を構造的に防止
   - 数字 `1`〜`9`(選択肢番号)
-  - `options` の完全一致文字列
+  - `options` の値と完全一致する回答(完全一致を検証したうえで対応する 1 始まりの番号の文字列に正規化して注入。一致した文字列そのものは書き込まれない)
   - `Type something` 経路の text(制御文字 C0+DEL+C1 を 3 層 reject、最大 2000 文字)
   - cancel 経路の `\x1b`(Esc キー、wrapper 内部生成のみ)
   - codex のコマンド承認確定キー(option ラベル末尾の `(y)`/`(p)`/`(esc)` から抽出した単一英数字 1 文字 or `\x1b`)。抽出不能なら注入せず再登録(誤確定防止)
@@ -720,6 +721,7 @@ After the one-time setup:
 4. When either side resolves via `POST /resolve/:id`, the server's long-poll returns immediately
 5. The wrapper injects the target CLI's expected response into the PTY (number + Enter, shortcut key, Esc, etc.) and the CLI proceeds
 6. If the user answers directly in the PC terminal, the wrapper detects the dialog disappearing and resolves the entry with `resolvedBy=cli`, clearing it from the panel
+7. The panel's "Clear all" action calls the authenticated `DELETE /history` endpoint, which bulk-removes only resolved queue entries and returns `{ removed }` (the count deleted); pending entries are left untouched
 
 ## Security
 
@@ -729,7 +731,7 @@ After the one-time setup:
 - **Input sanitization**: `description` is capped at 500 chars, `options` at 9 items × 200 chars, `tabs` (multi-question) at 9 items (label 100 chars / prompt 500 chars), and `answers` at 9 items. Anything beyond is clipped (excess items are dropped).
 - **Injection whitelist**: PTY writes are restricted to one of the following — arbitrary keystrokes cannot be injected:
   - digits `1`–`9` (option number)
-  - exact match of an `options` entry
+  - an answer that exactly matches an `options` entry (validated as an exact match, then normalized to the corresponding 1-based number string before injection; the matched text itself is never written)
   - text via the `Type something` path (C0 + DEL + C1 controls rejected in 3 layers, max 2000 chars)
   - `\x1b` (Esc) for the cancel path, generated internally by the wrapper
   - codex command-approval confirm key: a single alphanumeric char extracted from the option label's trailing `(y)`/`(p)`/`(esc)`, or `\x1b`. If none can be extracted the wrapper re-registers instead of injecting (misconfirmation guard)
