@@ -1,8 +1,8 @@
 /**
- * test-tab-sweep-state.js — v1.18.1 タブ巡回・注入の状態機械テスト
+ * test-tab-sweep-state.js — タブ巡回・注入の状態機械テスト
  *
  * 純関数テスト(test-parse-dialog.js)では固定できない不変条件を、偽 TUI に対して
- * 実際に巡回・注入を回して確認する。中心は #Z(承認取り違え)の防止:
+ * 実際に巡回・注入を回して確認する。中心は承認取り違えの防止:
  *
  *   - 全タブを取り切れなければ登録しない(半端登録 → 回答列と Submit の位置ずれ)
  *   - 巡回中にローカル入力が来たら即中断し、確定キーを PTY へ流さない
@@ -377,7 +377,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     // 理由を分けるのは「PC が引き取った = 再登録しても永久に弾かれる」を呼び出し側が
     // 判別するため(実機の再登録ループの回帰)
     assertEq('理由は pc-progressed(再登録しない側)', injected.reason, 'pc-progressed')
-    assertEq('数字を 1 バイトも書かない(#Z 防止の中核)', tui.digitsWritten(), [])
+    assertEq('数字を 1 バイトも書かない(承認取り違え防止の中核)', tui.digitsWritten(), [])
     assertEq('Submit の Enter も書かない', tui.writes.includes('1\r'), false)
   }
   {
@@ -423,7 +423,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
 
   {
     // タブ数も印も同じで先頭質問まで同じ「別ダイアログ」に差し替わったケース。
-    // 印だけの指紋では通ってしまい、旧回答が後続の別質問へ入る(#Z 型)。
+    // 印だけの指紋では通ってしまい、旧回答が後続の別質問へ入る(承認取り違えの一種)。
     const tabsA = [
       { prompt: '共通の先頭質問は?', options: ['a', 'b'] },
       { prompt: 'A の 2 問目は?', options: ['a', 'b'] },
@@ -582,7 +582,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     install(tui)
     await __test.detectTick()
     assertEq('ExitPlanMode にはキーを送らない', tui.writes, [])
-    // ExitPlanMode 自体は v1.14.1 以降スマホ転送の対象(単一ダイアログとして登録される)。
+    // ExitPlanMode 自体はスマホ転送の対象(単一ダイアログとして登録される)。
     // 止めるべきなのは「キーを送ること」であって「転送すること」ではない。
     assertEq('単一として転送はする', httpCalls, ['POST /request'])
   }
@@ -686,7 +686,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
   }
   {
     // 逆に、実バーが 2 本あって決められない画面では単一として登録しない
-    // (表示中の 1 タブだけを転送すると回答位置がずれる = #Z)。
+    // (表示中の 1 タブだけを転送すると回答位置がずれる = 承認取り違え)。
     const tui = new FakeTui(mkTabs(3), { above: '偽: ← ☐ x ☐ y ✔ Submit →' })
     install(tui)
     await __test.detectTick()
@@ -831,7 +831,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     // 収集数だけを見ると、過少読み + 最終ステップでの形状衝突が「正常終了」と同じ
     // 観測になる。prompt はモデル生成で一致判定は緩い部分列比較なので、後ろの質問を
     // 先頭の質問に似せるだけで衝突は作れる。ここを通すと 4 問中 2 問の半端登録になり、
-    // 注入末尾の Enter が未提示の質問を確定させる(#Z)。
+    // 注入末尾の Enter が未提示の質問を確定させる(承認取り違え)。
     const collide = mkTabs(4)
     collide[2] = { prompt: '質問1は?(再確認)', options: collide[0].options.slice() }
     const tui = new FakeTui(collide, { wrapBarAfter: 2 })
@@ -871,7 +871,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
   {
     // 延命の根拠を「バー行が見える」だけにすると、モデルが会話ログに書いた 1 行で
     // 登録済みの依頼が生き残り、後から出た別のダイアログへ回答が入る余地になる。
-    // v1.18.1 で足した経路(バー行だけが残る確認画面)は見出し列の一致まで要求する。
+    // 足した経路(バー行だけが残る確認画面)は見出し列の一致まで要求する。
     const bar = '  ← ☐ 好きな色 ☐ 好きな季節 ✔ Submit →' // 会話ログに紛れた 1 行を模す
     // 前提: この 1 行だけでは既存経路(ナビ表示)は真にならない。ここが崩れると
     // 以下 3 件は何も証明しない(見出し一致が死んでも緑のままになる)。
@@ -1056,7 +1056,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     ])
     assertEq('借りを巡回の外へ持ち越さない(注入しない)', injected.ok, false)
     assertEq('理由は position(取り下げない側)', injected.reason, 'position')
-    assertEq('数字を 1 バイトも書かない(#Z 防止の中核)', tui.digitsWritten(), [])
+    assertEq('数字を 1 バイトも書かない(承認取り違え防止の中核)', tui.digitsWritten(), [])
   }
 
   // -------------------------------------------------------
@@ -1143,7 +1143,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
   console.log('\n[S18] 形が同じでもコマンドが違えば別の承認として扱う')
   // -------------------------------------------------------
   {
-    // 実運用で起きる #Z: エージェントが 15 秒以内に形の同じ Bash 承認を 2 回出すと、
+    // 実運用で起きる承認取り違え: エージェントが 15 秒以内に形の同じ Bash 承認を 2 回出すと、
     // 再描画 dedup(prompt + 選択肢の形しか見ない)が 2 個目を「描き直し」と誤認する。
     // スマホには 1 個目(ls)が出たまま、承認の Enter は画面上の 2 個目に入る。
     // 実機の承認画面の形(実測 2026-08-01): `● Bash(...)` 行は出ず、罫線 + `Bash command`
