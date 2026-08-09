@@ -45,13 +45,12 @@ app.set('trust proxy', 'loopback')
 
 app.use(cors())
 app.use(express.json({ limit: '64kb' }))
-// v1.12.0 (codex B001 修正): 旧 `express.static(__dirname)` を撤去。
-// プロジェクトルート全体を未認証配信していたため、approval-config.json
-// (APPROVAL_TOKEN を含む)が ngrok 経由で取得可能だった(2026-05-15 検証時に
-// HTTP 200 で配信を確認 = token 漏洩リスク)。
+// プロジェクトルート全体の静的配信(`express.static(__dirname)`)は使わない。
+// 未認証で配信すると approval-config.json(APPROVAL_TOKEN を含む)が ngrok 経由で
+// 取得できてしまう(実際に HTTP 200 で配信されることを確認済み = token 漏洩)。
 // approval-ui.html は CSS/JS を全 inline で外部アセット参照なし = 個別ルート
 // のみで配信し、それ以外のファイルへの直接アクセスは Express デフォルトの
-// 404 で拒否する設計に変更。
+// 404 で拒否する。
 app.get('/', (req, res) => {
   res.set('Cache-Control', 'no-store, must-revalidate')
   res.sendFile(path.join(__dirname, 'approval-ui.html'))
@@ -87,16 +86,16 @@ const { EventEmitter } = require('events')
 const resolveEvents = new EventEmitter()
 resolveEvents.setMaxListeners(100)
 
-// I1: description の最大長（ngrok 経由で機微情報が長大化するのを抑制）
+// description の最大長（ngrok 経由で機微情報が長大化するのを抑制）
 const MAX_DESC_LEN = 500
-// v1.12.0 フリーテキスト送信機能(Type something / Chat about this 経路)用。
+// フリーテキスト送信機能(Type something / Chat about this 経路)用。
 // 制御文字を除いた上で 2000 文字を上限とする。Claude TUI のテキスト入力欄の
 // 想定ユースケース(中規模メッセージ)を覆う長さで設定。
 // ※ claude-wrapper.js MAX_FREE_TEXT_LEN / approval-ui.html textarea maxlength
 //   と同期する(3 箇所、変更時は同時更新)。
 const MAX_FREE_TEXT_LEN = 2000
 
-// I2: レート制限（同一 IP の 401 連発を 10 分ブロック）
+// レート制限（同一 IP の 401 連発を 10 分ブロック）
 const failCounter = new Map() // ip -> { count, resetAt, blockedUntil }
 const FAIL_WINDOW = 60 * 1000
 const FAIL_LIMIT = 10
@@ -126,7 +125,7 @@ function recordSuccess(ip) {
   failCounter.delete(ip)
 }
 
-// I3: タイミング攻撃耐性のあるトークン比較
+// タイミング攻撃耐性のあるトークン比較
 function tokensMatch(received, expected) {
   if (typeof received !== 'string' || received.length === 0) return false
   const a = Buffer.from(received)
@@ -175,15 +174,15 @@ function sanitizeOptions(arr) {
     .map((o) => clipString(o, 200))
 }
 
-// v1.12.0 フリーテキスト送信(Type something)用の入力検証。
-// v1.12.0 (D2/W001 修正): エラー文と実装の不整合(silent 削除 vs "not allowed")
-// を解消するため、削除型 → strict reject 型へ変更。UI 側で先に制御文字を削除して
-// 送るので通常ケースで影響なし。wrapper validateFreeText と一貫した挙動になり、
-// defense in depth は「UI 削除 → server reject → wrapper reject」の 3 段化。
+// フリーテキスト送信(Type something)用の入力検証。
+// 削除型ではなく strict reject 型。削除型はエラー文("not allowed")と実装(silent 削除)
+// が食い違ううえ、wrapper validateFreeText と挙動が揃わない。UI 側で先に制御文字を
+// 削除して送るので通常ケースで影響はなく、defense in depth は
+// 「UI 削除 → server reject → wrapper reject」の 3 段になる。
 // 検査: 文字列 / 長さ 1〜MAX_FREE_TEXT_LEN / 制御文字を含まない /
-//      trim 後 length>0(空白のみ拒否、suggestion s2 対応)。
+//      trim 後 length>0(空白のみ拒否)。
 // 違反は null。通過したらそのままの文字列(変更しない)を返す。
-// v1.12.0 (codex W3 修正): C0(\x00-\x1F)+ DEL(\x7F)+ C1(\x80-\x9F)を統一拒否。
+// C0(\x00-\x1F)+ DEL(\x7F)+ C1(\x80-\x9F)を統一拒否する。
 // C1 は UTF-8 decode 後の string で単独出現するケースは限定的だが、端末/アプリ
 // 解釈差を排除して defense in depth を完全化する。
 const CONTROL_CHAR_TEST_RE = /[\x00-\x1F\x7F\x80-\x9F]/
@@ -195,13 +194,13 @@ function sanitizeFreeText(s) {
   return s
 }
 
-// v1.12.0: Chat about this は遠隔不能(数字キー単独で選べず、選んでもダイアログ
+// Chat about this は遠隔不能(数字キー単独で選べず、選んでもダイアログ
 // 全体を抜ける TUI 仕様)。サーバ側で answer / answers が指す option がこのパターン
 // に一致する場合は 400 reject(旧クライアントからの不正リクエスト防御)。
 const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
-// v1.12.0 (D1, codex B001/B002 修正): text 添付は Type something 系 option 限定。
+// text 添付は Type something 系 option 限定。
 // approval-ui.html / claude-wrapper.js の同名定数と完全同期。
-// v1.12.0 (codex B002 修正): 前方一致だと "Type something custom" のような通常
+// 前方一致だと "Type something custom" のような通常
 // 選択肢を誤マッチして text 注入を許してしまう。末尾アンカー $ + period 任意で
 // Claude TUI 組み込みの "Type something" / "Type something." だけに限定。
 const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
@@ -225,7 +224,7 @@ function resolveOption(opts, ans) {
   return idx >= 0 ? opts[idx] : null
 }
 
-// v1.18.0 (Phase 3c): wrapper が /request 時に宣言する「自由記入可能な option の番号(1-based)」を
+// wrapper が /request 時に宣言する「自由記入可能な option の番号(1-based)」を
 // 正規化。codex プランモード質問の (tab) option をスマホで自由記入可にするサイドカーメタ。
 // 識別 SoT は wrapper の codexFreeTextOptions(ローカル parse)。freeTextOptions は /request 時にのみ
 // 設定され /resolve では受け口がない = 正規 item では事後変更不能(immutable)ゆえ宣言を信頼できる。
@@ -244,10 +243,10 @@ function sanitizeFreeTextOptions(arr, optLen) {
   return seen.size > 0 ? Array.from(seen) : null
 }
 
-// v1.18.0 (Phase 3c): 単一質問で text を受理してよいか(D1 ゲートの純粋判定、test seam)。
+// 単一質問で text を受理してよいか(text 添付ゲートの純粋判定、test seam)。
 // tabs なし前提(複合は呼び出し側で別途 400)。許可 = "Type something" OR codex 自由記入宣言 option。
 // idx を 1 度だけ算出(API 直叩きの番号迂回は resolveOptionIndex の options 照合で不可)。
-// claude は item.freeTextOptions=null で第2項常に false = Type something 限定のまま不変。
+// claude は item.freeTextOptions=null で第2項常に false = Type something 限定になる。
 function isSingleTextAllowed(item, answer) {
   const idx = resolveOptionIndex(item.options, answer)
   if (idx < 0) return false // 不一致 / 範囲外 = API 直叩きの番号迂回も含め拒否
@@ -263,7 +262,7 @@ app.post('/request', authenticate, (req, res) => {
     return res.status(400).json({ error: 'description is required' })
   }
 
-  // I1: 長過ぎる description は切り詰め（ngrok 経由の情報漏洩抑制・UI 表示の保護）
+  // 長過ぎる description は切り詰め（ngrok 経由の情報漏洩抑制・UI 表示の保護）
   const safeDesc = clipString(description, MAX_DESC_LEN)
 
   // options: 文字列配列のみ許可、最大 9 件・各 200 文字
@@ -299,9 +298,9 @@ app.post('/request', authenticate, (req, res) => {
     if (safeTabs) safeOptions = ['Submit']
   }
 
-  // freeTextOptions(v1.18.0 Phase 3c): codex 自由記入 option(末尾 (tab))の番号宣言。
+  // freeTextOptions: codex 自由記入 option(末尾 (tab))の番号宣言。
   // 識別 SoT は wrapper(127.0.0.1 trusted)。単一質問のみ対象 = tabs ありは無視(null)。
-  // claude は宣言しないため常に null = 挙動不変。
+  // claude は宣言しないため常に null。
   const safeFreeTextOptions = safeTabs
     ? null
     : sanitizeFreeTextOptions(freeTextOptions, safeOptions.length)
@@ -311,11 +310,11 @@ app.post('/request', authenticate, (req, res) => {
     description: safeDesc,
     options: safeOptions,
     tabs: safeTabs, // null または [{label?, prompt, options}]
-    freeTextOptions: safeFreeTextOptions, // v1.18.0: codex 自由記入可 option の番号配列(1-based)or null
+    freeTextOptions: safeFreeTextOptions, // codex 自由記入可 option の番号配列(1-based)or null
     status: 'pending', // pending | resolved
     answer: null,
     answers: null, // 複合質問の回答配列(null または string[])
-    text: null, // v1.12.0: フリーテキスト送信(Type something / Chat about this 経路)
+    text: null, // フリーテキスト送信(Type something / Chat about this 経路)
     resolvedBy: null, // 'pc' | 'smartphone' | 'cli'
     createdAt: new Date().toISOString(),
     resolvedAt: null,
@@ -341,8 +340,8 @@ app.get('/status/:id', authenticate, (req, res) => {
     status: item.status,
     answer: item.answer,
     answers: item.answers, // 複合質問の回答配列(null または (string|{num,text})[])
-    text: item.text, // v1.12.0: フリーテキスト(null またはサニタイズ済 string)
-    action: item.action || null, // v1.12.0: 'cancel' または null
+    text: item.text, // フリーテキスト(null またはサニタイズ済 string)
+    action: item.action || null, // 'cancel' または null
   })
 
   const wait = Math.min(Math.max(parseInt(req.query.wait) || 0, 0), 60)
@@ -394,7 +393,7 @@ app.post('/resolve/:id', authenticate, (req, res) => {
   if (!isCancel && !answer && !hasAnswers) {
     return res.status(400).json({ error: 'answer or answers is required' })
   }
-  // v1.12.0 (D4 改善 + codex 3rd s1): action='cancel' と answer/answers/text の
+  // action='cancel' と answer/answers/text の
   // 同時送信を排他化。truthy 判定だと answer:'' が抜けるので property presence で判定。
   if (isCancel) {
     const hasAny = ['answer', 'answers', 'text'].some((k) =>
@@ -413,7 +412,7 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     return res.status(409).json({ error: 'Already resolved' })
   }
 
-  // v1.12.0 (D3/suggestion): resolvedBy 不正値は null 丸めではなく 400 reject。
+  // resolvedBy 不正値は null 丸めではなく 400 reject。
   // 未指定(null/undefined)は許可(後方互換)、指定があって不正値のみ reject。
   const allowedResolvedBy = ['pc', 'smartphone', 'cli']
   if (resolvedBy != null && !allowedResolvedBy.includes(resolvedBy)) {
@@ -427,16 +426,16 @@ app.post('/resolve/:id', authenticate, (req, res) => {
   let safeAnswers = null
   let safeText = null
 
-  // v1.12.0: フリーテキスト送信。Type something 経路でスマホからテキスト入力を
+  // フリーテキスト送信。Type something 経路でスマホからテキスト入力を
   // 受信した場合、サニタイズして wrapper に渡す。
   // tabs を持つ複合 dialog のフリーテキストは answers[i].text 経由(下の Multi 経路)。
-  // D1 (codex B001 修正): text は Type something option 選択時のみ許可。通常選択肢
+  // text は Type something option 選択時のみ許可。通常選択肢
   // に text を添付して送る経路を server 側で塞ぐ。
   if (hasText) {
     if (Array.isArray(item.tabs)) {
       return res.status(400).json({ error: 'text is not allowed for tabbed items (use answers[i].text)' })
     }
-    // D1 拡張(v1.18.0 Phase 3c): text 許可 = "Type something" OR codex 自由記入宣言 option。
+    // text 許可 = "Type something" OR codex 自由記入宣言 option。
     // 判定は純関数 isSingleTextAllowed に集約(test seam)。
     if (!isSingleTextAllowed(item, answer)) {
       return res.status(400).json({
@@ -487,14 +486,14 @@ app.post('/resolve/:id', authenticate, (req, res) => {
         return res.status(400).json({ error: `answers[${i}] out of range` })
       }
       const selectedOpt = item.tabs[i].options[idx]
-      // v1.12.0: Chat about this オプションを指す回答は遠隔不能なので reject
+      // Chat about this オプションを指す回答は遠隔不能なので reject
       if (CHAT_ABOUT_RE.test(selectedOpt)) {
         return res.status(400).json({
           error: `answers[${i}] points to "Chat about this" which is not remote-controllable`,
         })
       }
       if (rawText !== undefined) {
-        // D1 (codex B002 修正): text 添付は Type something option 限定。
+        // text 添付は Type something option 限定。
         // 通常選択肢に text を添付すると、wrapper が数字キー押下後にテキスト本文を
         // 注入し、次タブや Submit 画面に流れ込む脆弱性を防ぐ。
         if (!FREE_TEXT_OPTION_RE.test(selectedOpt)) {
@@ -517,7 +516,7 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     // 互換のため answer にも要約を残す(text 内容は含めず num のみ)
     safeAnswer = norm.map((a) => (typeof a === 'string' ? a : a.num)).join(',')
   } else if (isCancel) {
-    // v1.12.0: ダイアログキャンセル(Esc 相当)。answer/answers は不要。
+    // ダイアログキャンセル(Esc 相当)。answer/answers は不要。
     // wrapper が cancel を検知して Esc キーを TUI に送る。
     safeAnswer = 'cancelled-by-remote'
   } else {
@@ -530,13 +529,13 @@ app.post('/resolve/:id', authenticate, (req, res) => {
     if (Array.isArray(item.tabs) && answer !== 'resolved-by-cli') {
       return res.status(400).json({ error: 'tabbed items require answers array' })
     }
-    // v1.12.0: Chat about this 直接指定も遠隔不能なので reject
+    // Chat about this 直接指定も遠隔不能なので reject
     if (CHAT_ABOUT_RE.test(answer)) {
       return res.status(400).json({
         error: 'Chat about this is not remote-controllable (use cancel instead)',
       })
     }
-    // v1.12.0 (codex W2/W3 修正): answer に制御文字が含まれていたら reject。
+    // answer に制御文字が含まれていたら reject。
     // 通常 wrapper 側で再生不能だが、サーバログ([RESOLVED] answer=...)に
     // 制御文字が混入すると端末崩れ / ログ汚染になる。
     if (CONTROL_CHAR_TEST_RE.test(answer)) {
@@ -544,7 +543,7 @@ app.post('/resolve/:id', authenticate, (req, res) => {
         error: 'answer must not contain control characters',
       })
     }
-    // v1.12.0 (codex 3rd W001 修正): 'resolved-by-cli' は wrapper 内部通知用 sentinel。
+    // 'resolved-by-cli' は wrapper 内部通知用 sentinel。
     // リモートクライアント(resolvedBy='pc' or 'smartphone')から送られた場合は
     // server 状態と TUI 状態の乖離を生むので 400 reject。CLI 経由(resolvedBy='cli'
     // または明示なし)からのみ許可。
@@ -709,7 +708,7 @@ async function requestApproval(description, options = ['Yes', 'No']) {
 
 module.exports = {
   requestApproval,
-  // v1.18.0 (Phase 3c): D1 ゲート純関数の test seam(server 側受理/拒否境界の回帰保護)
+  // text 添付ゲート純関数の test seam(server 側受理/拒否境界の回帰保護)
   resolveOption,
   resolveOptionIndex,
   sanitizeFreeTextOptions,
