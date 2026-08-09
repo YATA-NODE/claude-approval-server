@@ -2831,6 +2831,9 @@ function codexMultiKeySequence(answers) {
 // タブ式と同じ)。全問回答が揃うとフッタが "enter to submit all" になり \r で全送信(claude の
 // "数字列 → 1\r" と同型、codex は \r 単独)。3 問バッチで 番号列 [1,3,2] → \r が全問確定・誤確定なしを
 // 実機確認。取り違え防止の不変条件(中間 Enter なし / submit 1 回)は codexMultiKeySequence が純粋化・テスト固定。
+// 注: この verified は複数質問(このファイル群)での実測。単一質問側(replayCodexQuestion 注 2、
+// 下記)は対象外 = 単一質問と複数質問で codex の挙動が異なる可能性があるため、そちらは unknown の
+// まま安全側既定を維持している(食い違いでなく意図的な非対称)。
 // codex 版の注入前ゲート(claude の verifyAtFirstTab に対応)。codex はタブバーを持たない
 // 代わりに `Question n/m` を描くので、そこから位置と質問数を読む。claude 側だけ検証があり
 // codex 側が無条件だと、巡回から回答到着までの数十秒に PC 側で 1 問答える / ←/→ で移動する
@@ -3877,6 +3880,9 @@ async function replayCodexApproval(key, options, id) {
 // 注 2: 番号キーが「移動」か「即選択確定」か、Enter 要否、Tab notes の順序/待ちは
 //   単一質問の実機 E2E で確定するまで unknown。確定するまでは安全側既定(番号 → Enter)で出す。誤確定の主リスクは
 //   コマンド承認側(承認取り違え)で、質問型は最悪でも誤った選択肢/notes の送信に留まる(承認取り違えでない)。
+//   複数質問側(replayCodexMultiAnswers、上記)は実機 E2E verified(番号キー押下で選択確定 + 自動
+//   次問遷移)だが、それは複数質問での実測範囲であり単一質問への外挿は未確認。単一質問と複数質問で
+//   codex の挙動が異なる可能性があるため、この単一質問側だけ unknown のまま安全側を維持している。
 async function replayCodexQuestion(key, text, id) {
   tabReplayInProgress = true
   try {
