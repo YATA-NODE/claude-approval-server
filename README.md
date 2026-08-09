@@ -277,21 +277,29 @@ function codex {
 - **127.0.0.1 バインド**: 承認サーバーはループバックのみ受け付け、外部アクセスは ngrok 経由のみ
 - **トークン認証**: 全 API で `x-secret-token` ヘッダー必須。`crypto.timingSafeEqual` でタイミング攻撃に耐性あり
 - **レート制限**: 認証失敗が 60 秒あたり 10 回を超えた IP は 10 分間ブロック
-- **入力サニタイズ**: `description` は 500 文字、`options` は 8 件 × 100 文字まで。余剰は切り詰め
+- **入力サニタイズ**: `description` は 500 文字、`options` は 9 件 × 200 文字、複合質問の `tabs` は 9 件(label 100 文字 / prompt 500 文字)、`answers` は 9 件まで。余剰は切り詰め(件数超過は破棄)
 - **注入ホワイトリスト**: PTY に書き込まれるのは以下のいずれかのみ。任意キー注入を構造的に防止
   - 数字 `1`〜`9`(選択肢番号)
   - `options` の完全一致文字列
   - `Type something` 経路の text(制御文字 C0+DEL+C1 を 3 層 reject、最大 2000 文字)
   - cancel 経路の `\x1b`(Esc キー、wrapper 内部生成のみ)
   - codex のコマンド承認確定キー(option ラベル末尾の `(y)`/`(p)`/`(esc)` から抽出した単一英数字 1 文字 or `\x1b`)。抽出不能なら注入せず再登録(誤確定防止)
-- **option 種別検証**: text 添付は `Type something` option を選択した場合のみ許可。通常選択肢への text 添付は server / wrapper 両方で 400 reject(defense in depth)
+- **option 種別検証**: text 添付は `Type something` option、または wrapper が自由記入可と宣言した codex option(ラベル末尾が `(tab)` の Tab notes 選択肢)を選んだ場合のみ許可。それ以外の選択肢への text 添付は server / wrapper 両方で reject(defense in depth)
 - **`Chat about this` 完全防御**: 遠隔不能仕様(数字キーで選べず、選ぶとダイアログ全体を抜けて通常チャットへ移行)のため、UI から除外 + サーバで 4 経路全て reject(options[idx] / answer 数字指定 / answer 文字列完全一致 / Multi `{num,text}`)。代替として「キャンセル」ボタンを提供
 - **静的配信の絞り込み**: `/` での `approval-ui.html` 配信のみ許可し、`approval-config.json` 等への直接アクセスは 404
 - **ログ非露出**: フリーテキストの本文は server コンソール / wrapper wlog / UI 履歴サマリのいずれにも残さず、長さのみ記録。履歴カードのタップ展開時のみブラウザメモリ上の本文を再表示します(localStorage 不使用 = リロード or タブ閉じ or 1 時間 TTL で消失)
 - **設定ファイル**: `approval-config.json` は `.gitignore` 済み + 上記の通り配信もされません
 - **ngrok URL 漏洩対策**: ngrok URL は毎セッション変わります。使用後はトンネルを閉じてください
 
-> ⚠️ **権限拡張の注記**: 上記の防御層により注入経路は厳格にホワイトリスト化されていますが、本ツールの認証トークン(`approval-config.json` 内の値)を保持している人は **`Type something` 経路を通じて対象 CLI に任意テキストを送信できます**。トークンの取り扱い(共有しない / セッション後の `approval-config.json` 削除)に注意してください。送信した本文は同一ブラウザのメモリ内に最大 1 時間残ります(履歴展開で表示可能)。共有端末で使う場合は使用後にタブを閉じてください。
+> ⚠️ **権限拡張の注記**: 上記の防御層により注入経路は厳格にホワイトリスト化されていますが、本ツールの認証トークン(`approval-config.json` 内の値)を保持している人は **`Type something` 経路、および codex の Tab notes(自由記入)経路を通じて対象 CLI に任意テキストを送信できます**。トークンの取り扱い(共有しない / セッション後の `approval-config.json` 削除)に注意してください。送信した本文は同一ブラウザのメモリ内に最大 1 時間残ります(履歴展開で表示可能)。共有端末で使う場合は使用後にタブを閉じてください。
+
+> ⚠️ **残っているリスクの注記**: 上の防御層は「スマホから何が送れるか」を絞るものです。
+> これとは別に、**ラベルの無い承認枠（`WebFetch` / MCP 系）では、スマホに出る表示を
+> すり替えられる余地**と、**対象を読み取れないため別の承認と同一視される余地**が残っています。
+> 内容と現時点の運用（ラベルの無い枠のうち実測で転送されたのは MCP 系です。MCP の承認は PC 側で
+> 内容を確認してから答えてください。`WebFetch` の枠は実測では検出されずスマホに出ませんでした）は
+> [承認の表示内容は「承認枠の中身」から読みます](#承認の表示内容は承認枠の中身から読みます)
+> の「このバージョンで塞ぎ切れていないこと」③⑩ を参照してください。
 
 ## スマートフォン UI の機能
 
@@ -375,19 +383,21 @@ PTY はダイアログを複数フレームに分けて描画します。ツー�
 
 ### 承認依頼がスマホに届かない（Claude Code を更新後）
 
-Claude Code 本体のダイアログ書式が変わって検出が壊れた場合は、`approval-config.json` の `dialogDetection.endMarker` で終端マーカーの正規表現を上書きすることで暫定対処できます:
+Claude Code 本体のダイアログ書式が変わって検出が壊れた場合は、`approval-config.json` の `dialogDetection.endMarkers.default` で終端マーカーの正規表現を上書きすることで暫定対処できます:
 
 ```json
 {
   "port": 3000,
   "token": "...",
-  "dialogDetection": { "endMarker": "新しい終端文字列の正規表現" }
+  "dialogDetection": { "endMarkers": { "default": "新しい終端文字列の正規表現" } }
 }
 ```
 
+旧形式の `dialogDetection.endMarker`（文字列）も動作しますが非推奨で、起動時に警告が出ます。ExitPlanMode や codex 質問型のマーカーは自動で OR されるため、通常は `default` だけを上書きすれば足ります。
+
 ### タブ式の複合質問でタブが動くのが気になる
 
-複数質問をまとめたタブ式ダイアログは、各タブの中身を読む手段が「実際に Tab キーを送ってそのタブへ移動する」しかないため、検出時に一度だけタブを巡回します（v1.19.0 以降、1 回の出現につき 1 回だけ・巡回中に PC で操作すると即中断）。巡回そのものを止めたい場合は `dialogDetection.tabSweep` に `false` を設定します。タブ式ダイアログはスマホへ転送されなくなり、PC で回答することになります（単一質問の転送は従来どおり）。
+複数質問をまとめたタブ式ダイアログは、各タブの中身を読む手段が「実際に Tab キーを送ってそのタブへ移動する」しかないため、検出時に一度だけタブを巡回します（v1.19.0 以降、1 回の出現につき 1 回だけ・巡回中に PC で操作すると即中断）。巡回そのものを止めたい場合は `dialogDetection.tabSweep` に `false` を設定します。タブ式ダイアログはスマホへ転送されなくなり、PC で回答することになります（単一質問の転送は従来どおり）。この設定は codex CLI の複数質問（`Question N/M`）の巡回にも同じように効くため、`false` にすると codex の複数質問もスマホへ転送されなくなります。
 
 v1.19.0 以降、**巡回はタブバーが出現時から動いていないときだけ始まります**。PC 側で 1 問でも答えるとタブバーの表示が変わるため、以降そのダイアログにはキーを送らず、スマホへも転送されません(PC で回答することになります)。スマホで回答したい場合は、ダイアログが出てから 1〜2 秒ほど PC 側で操作せずに待ってください。
 
@@ -413,7 +423,7 @@ v1.19.0 以降、ツール名とコマンドは **承認枠の中に描かれた
 
 **承認枠の同定が曖昧なフレームは転送しません**。罫線もラベルもモデルが本文に書ける文字なので、コマンド本文の中に「罫線だけの行 + `Bash command` + 無害なコマンド」を書くと枠の境界をずらせます（実際のコマンドが 1 文字も出ないまま承認できました）。**ラベルらしい行が 2 つ以上見えるフレームは転送しません**。また 500 文字を超えるコマンド本文も転送しません（切ると別コマンドが同じ表示・同じ依頼に潰れるため）。いずれも PC 側では従来どおり回答できます。
 
-**このバージョンで塞ぎ切れていないこと**: ①端末の折り返しで作られる「偽の行頭」②タブバーが CLI 描画かの判定が背景色依存であること ③**ラベルの無い承認枠（`WebFetch` / MCP 系）では `● Tool(...)` 行が唯一の手掛かりで、その行はモデルが作れるため表示をすり替えられる余地が残ること**（ただし画面のどこかに `Bash command` 等の見出し語が 1 行でも残っていると、枠の切り出し失敗と区別できないため転送しません。この見出し語の検知は画面＝表示領域 + スクロールバック 40 行の範囲に限られ、本文を長くして見出し語を画面外へ押し出すとこの fail-close は外れます＝実行確認、ただしそこから実機で表示すり替えに至るかは未確認。実機で確認した範囲では `WebFetch` の枠は終端マーカーを持たずそもそも検出されず、MCP の枠は検出されるがツール名と対象を読み取れません。いずれも 1 例ずつの観測）④承認枠の同定がテキストのみに依存していること（セル属性による同定は次のリリース）⑤巡回中の「戻す一手」だけは属性を確認せずに送られること ⑥説明行を含めて表示するため、描画の進行中に依頼が出し直されることがあること ⑦**折り返した質問文の前半がコマンド本文として表示され、端末幅が変わると同じ承認が別依頼として出し直されうること** ⑧**コマンド本文の引用符（`"` / `'`）が奇数個で閉じていない承認枠は転送しないこと**（ラベルの無い枠でのみ発生、fail-close）⑨**codex の複数質問フロー（`Question 1/N`）ではスマホからのキャンセル（Esc）が送られず PC 側の操作になること**（承認・拒否の回答はスマホから可能）⑩**ラベルの無い承認枠（`WebFetch` / MCP 系）は対象を読み取れないため、実行内容が違っても同一の依頼と判定され、続けて別の MCP 承認が出た場合に 1 つ目への回答で 2 つ目が確定する余地があること**（MCP 系の承認は PC 側で内容を確認してから答えてください）。
+**このバージョンで塞ぎ切れていないこと**: ①端末の折り返しで作られる「偽の行頭」②タブバーが CLI 描画かの判定が背景色依存であること ③**ラベルの無い承認枠（`WebFetch` / MCP 系）では `● Tool(...)` 行が唯一の手掛かりで、その行はモデルが作れるため表示をすり替えられる余地が残ること**（ただし画面のどこかに `Bash command` 等の見出し語が 1 行でも残っていると、枠の切り出し失敗と区別できないため転送しません。この見出し語の検知は画面＝表示領域 + スクロールバック 40 行の範囲に限られ、本文を長くして見出し語を画面外へ押し出すとこの fail-close は外れます＝実行確認、ただしそこから実機で表示すり替えに至るかは未確認。実機で確認した範囲では `WebFetch` の枠は終端マーカーを持たずそもそも検出されず、MCP の枠は検出されるがツール名と対象を読み取れません。いずれも 1 例ずつの観測）④承認枠の同定がテキストのみに依存していること（セル属性による同定は次のリリース）⑤巡回中の「戻す一手」だけは属性を確認せずに送られること(claude)。**codex の複数質問では巡回キー(←/→)に CLI 描画の確認そのものが無いこと**(タブバーという CLI 描画の証拠を持たないため、巡回の起動判断が画面の文字列だけに依存する) ⑥説明行を含めて表示するため、描画の進行中に依頼が出し直されることがあること ⑦**折り返した質問文の前半がコマンド本文として表示され、端末幅が変わると同じ承認が別依頼として出し直されうること** ⑧**コマンド本文の引用符（`"` / `'`）が奇数個で閉じていない承認枠は転送しないこと**（ラベルの無い枠でのみ発生、fail-close）⑨**codex の複数質問フロー（`Question 1/N`）ではスマホからのキャンセル（Esc）が送られず PC 側の操作になること**（承認・拒否の回答はスマホから可能）⑩**ラベルの無い承認枠（`WebFetch` / MCP 系）は対象を読み取れないため、実行内容が違っても同一の依頼と判定され、続けて別の MCP 承認が出た場合に 1 つ目への回答で 2 つ目が確定する余地があること**（MCP 系の承認は PC 側で内容を確認してから答えてください）。
 
 ## 対応プラットフォーム
 
@@ -424,6 +434,8 @@ v1.19.0 以降、ツール名とコマンドは **承認枠の中に描かれた
 | Claude Code | CLI | — |
 | codex CLI | CLI | — |
 | スマホブラウザ | iOS Safari、Android Chrome | その他 |
+
+※ **タブ式（claude の ☐/✔ タブ UI）の転送は、PC 側のターミナルが背景色を報告することに依存します。** タブバーが CLI の描画かどうかを、選択中タブの背景色（セル属性）で判定しているためです。背景色を報告しないターミナルではタブ式ダイアログがスマホへ転送されません（PC で回答してください）。単一質問の転送は影響を受けません。**codex CLI の複数質問（`Question N/M`）はタブバーを持たずこの判定を通らないため、背景色を報告しないターミナルでも転送されます**（止めたい場合は `dialogDetection.tabSweep` に `false` を設定してください）。詳細はトラブルシューティングの「タブ式の複合質問でタブが動くのが気になる」を参照してください。
 
 ## ライセンス
 
@@ -714,21 +726,30 @@ After the one-time setup:
 - **Loopback bind**: the approval server listens on `127.0.0.1` only. External access requires ngrok.
 - **Token auth**: every API requires the `x-secret-token` header. Compared with `crypto.timingSafeEqual` to resist timing attacks.
 - **Rate limiting**: an IP with 10+ auth failures per 60s is blocked for 10 minutes.
-- **Input sanitization**: `description` is capped at 500 chars, `options` at 8 items × 100 chars.
+- **Input sanitization**: `description` is capped at 500 chars, `options` at 9 items × 200 chars, `tabs` (multi-question) at 9 items (label 100 chars / prompt 500 chars), and `answers` at 9 items. Anything beyond is clipped (excess items are dropped).
 - **Injection whitelist**: PTY writes are restricted to one of the following — arbitrary keystrokes cannot be injected:
   - digits `1`–`9` (option number)
   - exact match of an `options` entry
   - text via the `Type something` path (C0 + DEL + C1 controls rejected in 3 layers, max 2000 chars)
   - `\x1b` (Esc) for the cancel path, generated internally by the wrapper
   - codex command-approval confirm key: a single alphanumeric char extracted from the option label's trailing `(y)`/`(p)`/`(esc)`, or `\x1b`. If none can be extracted the wrapper re-registers instead of injecting (misconfirmation guard)
-- **Option-type validation**: attached `text` is only accepted when the selected option matches `Type something`. Attaching text to a normal option returns HTTP 400 on both the server and the wrapper (defense in depth).
+- **Option-type validation**: attached `text` is only accepted when the selected option matches `Type something`, or when it is a codex option the wrapper declared as free-text (a Tab-notes choice whose label ends in `(tab)`). Attaching text to any other option is rejected on both the server and the wrapper (defense in depth).
 - **`Chat about this` blocked across all paths**: the built-in `Chat about this` option cannot be selected by a digit key alone and exits the dialog to plain chat when chosen, so it is not remotely controllable. The UI hides it and the server rejects all four entry paths (`options[idx]` / numeric `answer` / exact-match `answer` / multi `{num,text}`). Use the **Cancel** button as the equivalent action.
 - **Restricted static serving**: only `/` serves `approval-ui.html`; other files such as `approval-config.json` return 404.
 - **No log leak**: free-text bodies are never written to the server console, wrapper wlog, or the UI history summary; only the length is recorded. Expanding a history card surfaces the body from in-memory browser state only (no `localStorage`, cleared on reload, tab close, or after a 1-hour TTL).
 - **Config file**: `approval-config.json` is gitignored and is not served over HTTP.
 - **ngrok URL rotation**: the public URL changes each session. Close the tunnel when you're done.
 
-> ⚠️ **Authorization scope notice**: the defense layers above strictly whitelist what reaches the PTY, but anyone holding the auth token (value of `APPROVAL_TOKEN` in `approval-config.json`) **can send arbitrary text to the target CLI via the `Type something` path**. Treat the token accordingly: do not share it, and remove `approval-config.json` once your session is over. The typed body stays in the same browser's memory for up to one hour (revealable via history expansion). Close the tab after use on shared devices.
+> ⚠️ **Authorization scope notice**: the defense layers above strictly whitelist what reaches the PTY, but anyone holding the auth token (value of `APPROVAL_TOKEN` in `approval-config.json`) **can send arbitrary text to the target CLI via the `Type something` path or the codex Tab-notes free-text path**. Treat the token accordingly: do not share it, and remove `approval-config.json` once your session is over. The typed body stays in the same browser's memory for up to one hour (revealable via history expansion). Close the tab after use on shared devices.
+
+> ⚠️ **Remaining-risk notice**: the layers above restrict *what the phone can send*. Separately from
+> that, **approval boxes without a label (`WebFetch` / MCP tools) leave room for the phone-side
+> display to be swapped**, and **their target cannot be read, so two different ones can end up
+> treated as the same request**. See items (3) and (10) under "Known gaps in this version" in
+> [What the phone shows is read from inside the approval box](#what-the-phone-shows-is-read-from-inside-the-approval-box)
+> for the details and the current workaround (of the label-less boxes, only MCP ones were observed
+> to reach the phone — answer those on the PC after checking what they do; the `WebFetch` box was
+> not detected at all on the machine we recorded).
 
 ## Smartphone UI features
 
@@ -810,13 +831,15 @@ If a Claude Code update changes the dialog rendering and detection breaks, you c
 {
   "port": 3000,
   "token": "...",
-  "dialogDetection": { "endMarker": "regex of the new trailing marker" }
+  "dialogDetection": { "endMarkers": { "default": "regex of the new trailing marker" } }
 }
 ```
 
+The legacy `dialogDetection.endMarker` (a plain string) still works but is deprecated and prints a warning at startup. The ExitPlanMode and codex question markers are OR-ed in automatically, so overriding `default` alone is usually enough.
+
 ### The tabs move on their own in multi-question dialogs
 
-For a tabbed multi-question dialog, the only way to read what is on the other tabs is to actually send Tab and move there, so the wrapper sweeps the tabs once when it detects the dialog (since v1.19.0: at most once per appearance, and aborted immediately if you touch the keyboard). To stop the sweep entirely, set `dialogDetection.tabSweep` to `false`. Tabbed dialogs are then never forwarded to the phone and you answer them on the PC; single questions are forwarded as before.
+For a tabbed multi-question dialog, the only way to read what is on the other tabs is to actually send Tab and move there, so the wrapper sweeps the tabs once when it detects the dialog (since v1.19.0: at most once per appearance, and aborted immediately if you touch the keyboard). To stop the sweep entirely, set `dialogDetection.tabSweep` to `false`. Tabbed dialogs are then never forwarded to the phone and you answer them on the PC; single questions are forwarded as before. The same switch also governs the codex CLI multi-question sweep (`Question N/M`), so setting it to `false` stops those from reaching the phone as well.
 
 Since v1.19.0 **the sweep only starts while the tab bar has not changed since the dialog appeared.** Answering even one tab on the PC changes the tab bar, so from then on the wrapper sends no keys to that dialog and does not forward it to the phone (you answer it on the PC). To answer from your phone, leave the keyboard alone for a second or two after the dialog appears.
 
@@ -842,7 +865,7 @@ Before injecting an answer from the phone, the wrapper also checks that **the di
 
 **Frames where the approval box cannot be identified unambiguously are not forwarded.** Rule lines and labels are ordinary characters a model can write, so writing `───` + `Bash command` + a harmless command inside the command text can move the box boundary (the real command reached the phone not at all). **Frames with two or more label-like lines are not forwarded**, and neither is command text longer than 500 characters (cutting it collapses different commands into the same display and the same request). Both cases can still be answered on the PC.
 
-**Known gaps in this version**: (1) a "fake line start" produced by terminal wrapping; (2) the CLI-drawn tab bar check relies on background color; (3) **for approval boxes without a label (`WebFetch` / MCP tools) the `● Tool(...)` line is the only signal, and a model can produce that line — so the display can be swapped for those approvals** (such a box is not forwarded when a heading word like `Bash command` is visible anywhere on screen, since that is indistinguishable from a failed box extraction; this heading-word check only covers the screen — viewport + 40 lines of scrollback — so making the body long enough to push the heading word off-screen defeats this fail-close: confirmed for the guard itself, but whether a real display swap follows is unverified; on the machine we recorded, the `WebFetch` box carries no end marker and is not detected at all, and the MCP box is detected but its tool name and target cannot be read — single observations each); (4) identifying the approval box still relies on text alone (cell-attribute identification is a later release); (5) the single "give back the Tab" keystroke during sweeping is sent without the CLI-drawn attribute check; (6) the description line is included in the displayed command, so a request can be re-issued while the box is still being drawn; (7) **the first line of a wrapped question is shown as part of the command, so resizing the terminal can re-issue the same approval as a new request**; (8) **approval boxes whose command text has an odd number of quotes (`"` / `'`) are not forwarded** (label-less boxes only; fail-close); (9) **in the codex multi-question flow (`Question 1/N`), a cancel (Esc) from the phone is not sent and must be done on the PC** (approve/reject still work from the phone); (10) **label-less approval boxes (`WebFetch` / MCP) cannot be told apart even when they do different things, so a second MCP approval may be settled by answering the first** (answer MCP approvals on the PC after checking what they do).
+**Known gaps in this version**: (1) a "fake line start" produced by terminal wrapping; (2) the CLI-drawn tab bar check relies on background color; (3) **for approval boxes without a label (`WebFetch` / MCP tools) the `● Tool(...)` line is the only signal, and a model can produce that line — so the display can be swapped for those approvals** (such a box is not forwarded when a heading word like `Bash command` is visible anywhere on screen, since that is indistinguishable from a failed box extraction; this heading-word check only covers the screen — viewport + 40 lines of scrollback — so making the body long enough to push the heading word off-screen defeats this fail-close: confirmed for the guard itself, but whether a real display swap follows is unverified; on the machine we recorded, the `WebFetch` box carries no end marker and is not detected at all, and the MCP box is detected but its tool name and target cannot be read — single observations each); (4) identifying the approval box still relies on text alone (cell-attribute identification is a later release); (5) the single "give back the Tab" keystroke during sweeping is sent without the CLI-drawn attribute check (and in the codex multi-question flow the sweep keys ←/→ carry no CLI-drawn check at all — there is no tab bar to prove the CLI drew it, so the decision to sweep rests on screen text alone); (6) the description line is included in the displayed command, so a request can be re-issued while the box is still being drawn; (7) **the first line of a wrapped question is shown as part of the command, so resizing the terminal can re-issue the same approval as a new request**; (8) **approval boxes whose command text has an odd number of quotes (`"` / `'`) are not forwarded** (label-less boxes only; fail-close); (9) **in the codex multi-question flow (`Question 1/N`), a cancel (Esc) from the phone is not sent and must be done on the PC** (approve/reject still work from the phone); (10) **label-less approval boxes (`WebFetch` / MCP) cannot be told apart even when they do different things, so a second MCP approval may be settled by answering the first** (answer MCP approvals on the PC after checking what they do).
 
 ## Supported platforms
 
@@ -853,6 +876,8 @@ Before injecting an answer from the phone, the wrapper also checks that **the di
 | Claude Code | CLI | — |
 | codex CLI | CLI | — |
 | Mobile browser | iOS Safari, Android Chrome | others |
+
+Note: **forwarding tabbed dialogs (claude's ☐/✔ tab UI) depends on your PC terminal reporting background colors.** Whether the tab bar was drawn by the CLI is decided from the background color (cell attribute) of the selected tab, so terminals that do not report background colors never forward tabbed dialogs to the phone (answer them on the PC). Single-question dialogs are unaffected. **The codex CLI multi-question flow (`Question N/M`) has no tab bar and does not go through this check, so it is still forwarded on terminals that report no background colors** (set `dialogDetection.tabSweep` to `false` to stop it). See "The tabs move on their own in multi-question dialogs" under Troubleshooting for details.
 
 ## License
 
