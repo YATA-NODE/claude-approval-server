@@ -385,6 +385,36 @@ Claude Code 本体のダイアログ書式が変わって検出が壊れた場�
 }
 ```
 
+### タブ式の複合質問でタブが動くのが気になる
+
+複数質問をまとめたタブ式ダイアログは、各タブの中身を読む手段が「実際に Tab キーを送ってそのタブへ移動する」しかないため、検出時に一度だけタブを巡回します（v1.19.0 以降、1 回の出現につき 1 回だけ・巡回中に PC で操作すると即中断）。巡回そのものを止めたい場合は `dialogDetection.tabSweep` に `false` を設定します。タブ式ダイアログはスマホへ転送されなくなり、PC で回答することになります（単一質問の転送は従来どおり）。
+
+v1.19.0 以降、**巡回はタブバーが出現時から動いていないときだけ始まります**。PC 側で 1 問でも答えるとタブバーの表示が変わるため、以降そのダイアログにはキーを送らず、スマホへも転送されません(PC で回答することになります)。スマホで回答したい場合は、ダイアログが出てから 1〜2 秒ほど PC 側で操作せずに待ってください。
+
+なお v1.19.0 以降、タブバーは画面下端のフッタを起点に探します。画面にタブバーらしい行が複数見えて本物を特定できないときは、キーを 1 バイトも送らずに転送を諦めます（PC で回答してください）。この状態はラッパーのログに `tab bar ambiguous` として記録されます。
+
+さらに v1.19.0 以降、**巡回は「CLI が描いたタブバー」が見えているときだけ始まります**。会話ログにタブバーらしい行とタブ移動のヒントが流れているだけの状態ではキーを一切送りません（Claude が出力した文章だけで巡回が始まり、通常の入力欄へ Shift+Tab が送られるのを防ぐため）。判定にはタブバー行のセル属性（選択中タブの背景色）を使うため、**背景色を報告しない端末ではタブ式がスマホへ転送されません**（PC で回答してください）。この状態はログに `タブバーが CLI 描画でない` として記録されます。
+
+```json
+{
+  "port": 3000,
+  "token": "...",
+  "dialogDetection": { "tabSweep": false }
+}
+```
+
+### 承認の表示内容は「承認枠の中身」から読みます
+
+v1.19.0 以降、ツール名とコマンドは **承認枠の中に描かれたコマンド本文**（`Bash command` / `Run command` ラベルの下）から読み取ります。`● Tool(...)` 行を使うのは、その行が**承認枠の罫線に密着している**ときだけです。枠から離れた行（前のターンの残りや、コマンド本文の中に書かれた `● Read(...)`）を採用すると、スマホの表示と実際に承認される内容がずれるためです。**承認枠の外**（枠の上に流れている会話ログ）は表示の材料にしません。
+
+**コマンド本文がまだ描かれていないフレームは転送しません**（次に画面が描き直された時点で通常どおり転送されます）。実行内容が空欄のまま、あるいは質問文が「コマンド」として並んだ状態で承認できてしまうのを防ぐためです。
+
+また、スマホからの回答を注入する直前に、**いま表示領域に出ているダイアログが依頼と同じ相手か**を確かめます（v1.19.0 以降、タブ式だけでなく通常の 1 問形式にも適用）。質問文・選択肢の並び・ツール名とコマンドに加えて、**スマホに出した 1 行そのもの**を作り直して突き合わせます。質問文の照合は、長い質問文で末尾だけ違う別の承認を取り違えないよう**完全一致**に限定します（末尾の置換も追記も弾きます）。違っていた場合や画面を読み取れない場合は 1 バイトも注入せず、依頼をスマホへ出し直します（ログは `inject aborted`）。スマホからのキャンセル（Esc）も、タブ式を含めて同じ確認を通ります（タブ式はタブバーの指紋照合のみで、キーは送りません）。
+
+**承認枠の同定が曖昧なフレームは転送しません**。罫線もラベルもモデルが本文に書ける文字なので、コマンド本文の中に「罫線だけの行 + `Bash command` + 無害なコマンド」を書くと枠の境界をずらせます（実際のコマンドが 1 文字も出ないまま承認できました）。**ラベルらしい行が 2 つ以上見えるフレームは転送しません**。また 500 文字を超えるコマンド本文も転送しません（切ると別コマンドが同じ表示・同じ依頼に潰れるため）。いずれも PC 側では従来どおり回答できます。
+
+**このバージョンで塞ぎ切れていないこと**: ①端末の折り返しで作られる「偽の行頭」②タブバーが CLI 描画かの判定が背景色依存であること ③**ラベルの無い承認枠（`WebFetch` / MCP 系）では `● Tool(...)` 行が唯一の手掛かりで、その行はモデルが作れるため表示をすり替えられる余地が残ること**（ただし画面のどこかに `Bash command` 等の見出し語が 1 行でも残っていると、枠の切り出し失敗と区別できないため転送しません。この見出し語の検知は画面＝表示領域 + スクロールバック 40 行の範囲に限られ、本文を長くして見出し語を画面外へ押し出すとこの fail-close は外れます＝実行確認、ただしそこから実機で表示すり替えに至るかは未確認。実機で確認した範囲では `WebFetch` の枠は終端マーカーを持たずそもそも検出されず、MCP の枠は検出されるがツール名と対象を読み取れません。いずれも 1 例ずつの観測）④承認枠の同定がテキストのみに依存していること（セル属性による同定は次のリリース）⑤巡回中の「戻す一手」だけは属性を確認せずに送られること ⑥説明行を含めて表示するため、描画の進行中に依頼が出し直されることがあること ⑦**折り返した質問文の前半がコマンド本文として表示され、端末幅が変わると同じ承認が別依頼として出し直されうること** ⑧**コマンド本文の引用符（`"` / `'`）が奇数個で閉じていない承認枠は転送しないこと**（ラベルの無い枠でのみ発生、fail-close）⑨**codex の複数質問フロー（`Question 1/N`）ではスマホからのキャンセル（Esc）が送られず PC 側の操作になること**（承認・拒否の回答はスマホから可能）⑩**ラベルの無い承認枠（`WebFetch` / MCP 系）は対象を読み取れないため、実行内容が違っても同一の依頼と判定され、続けて別の MCP 承認が出た場合に 1 つ目への回答で 2 つ目が確定する余地があること**（MCP 系の承認は PC 側で内容を確認してから答えてください）。
+
 ## 対応プラットフォーム
 
 | 項目 | 確認済み | 未確認 |
@@ -783,6 +813,36 @@ If a Claude Code update changes the dialog rendering and detection breaks, you c
   "dialogDetection": { "endMarker": "regex of the new trailing marker" }
 }
 ```
+
+### The tabs move on their own in multi-question dialogs
+
+For a tabbed multi-question dialog, the only way to read what is on the other tabs is to actually send Tab and move there, so the wrapper sweeps the tabs once when it detects the dialog (since v1.19.0: at most once per appearance, and aborted immediately if you touch the keyboard). To stop the sweep entirely, set `dialogDetection.tabSweep` to `false`. Tabbed dialogs are then never forwarded to the phone and you answer them on the PC; single questions are forwarded as before.
+
+Since v1.19.0 **the sweep only starts while the tab bar has not changed since the dialog appeared.** Answering even one tab on the PC changes the tab bar, so from then on the wrapper sends no keys to that dialog and does not forward it to the phone (you answer it on the PC). To answer from your phone, leave the keyboard alone for a second or two after the dialog appears.
+
+Since v1.19.0 the tab bar is located starting from the footer at the bottom of the screen. If several tab-bar-like lines are visible and the real one cannot be identified, the wrapper sends no keys at all and gives up on forwarding (answer on the PC). The wrapper log records this as `tab bar ambiguous`.
+
+Also since v1.19.0, **the sweep only starts while a tab bar drawn by the CLI is visible.** A tab-bar-like line and a navigation hint scrolling by in the conversation are not enough — the wrapper sends no keys in that state (this prevents text Claude itself printed from starting a sweep and sending Shift+Tab into the ordinary input). The check uses cell attributes of the tab bar row (the background color of the selected tab), so **terminals that do not report background colors will not forward tabbed dialogs to the phone** (answer them on the PC). The log records this as `タブバーが CLI 描画でない`.
+
+```json
+{
+  "port": 3000,
+  "token": "...",
+  "dialogDetection": { "tabSweep": false }
+}
+```
+
+### What the phone shows is read from inside the approval box
+
+Since v1.19.0 the tool name and command are read from the **command text inside the approval box** (under the `Bash command` / `Run command` label). A `● Tool(...)` line is used only when it is **flush against the box border**; a line that is not flush is ignored — a leftover from the previous turn, or a `● Read(...)` written inside the command text, would otherwise make the phone display disagree with what is actually being approved. **Text outside the box** (the conversation log scrolling above it) is never used.
+
+**A frame in which the command text has not been drawn yet is not forwarded** (the next redraw is forwarded normally). This prevents approving with an empty command field, or with the question itself displayed as if it were the command.
+
+Before injecting an answer from the phone, the wrapper also checks that **the dialog currently in the viewport is the one the request was made for** (since v1.19.0 this covers ordinary single-question dialogs, not just tabbed ones). It compares the question, the option order, the tool and command, and **the exact line sent to the phone**, rebuilt and matched byte for byte. The question must match exactly (rejecting both a substituted and an appended tail), so a long prompt that differs only in its tail is not taken as the same approval. If anything differs, or the screen cannot be read, nothing is injected and the request is re-issued to the phone (logged as `inject aborted`). Cancels (Esc) go through the same check, including tabbed dialogs (those compare the tab bar fingerprint only — no keys are sent).
+
+**Frames where the approval box cannot be identified unambiguously are not forwarded.** Rule lines and labels are ordinary characters a model can write, so writing `───` + `Bash command` + a harmless command inside the command text can move the box boundary (the real command reached the phone not at all). **Frames with two or more label-like lines are not forwarded**, and neither is command text longer than 500 characters (cutting it collapses different commands into the same display and the same request). Both cases can still be answered on the PC.
+
+**Known gaps in this version**: (1) a "fake line start" produced by terminal wrapping; (2) the CLI-drawn tab bar check relies on background color; (3) **for approval boxes without a label (`WebFetch` / MCP tools) the `● Tool(...)` line is the only signal, and a model can produce that line — so the display can be swapped for those approvals** (such a box is not forwarded when a heading word like `Bash command` is visible anywhere on screen, since that is indistinguishable from a failed box extraction; this heading-word check only covers the screen — viewport + 40 lines of scrollback — so making the body long enough to push the heading word off-screen defeats this fail-close: confirmed for the guard itself, but whether a real display swap follows is unverified; on the machine we recorded, the `WebFetch` box carries no end marker and is not detected at all, and the MCP box is detected but its tool name and target cannot be read — single observations each); (4) identifying the approval box still relies on text alone (cell-attribute identification is a later release); (5) the single "give back the Tab" keystroke during sweeping is sent without the CLI-drawn attribute check; (6) the description line is included in the displayed command, so a request can be re-issued while the box is still being drawn; (7) **the first line of a wrapped question is shown as part of the command, so resizing the terminal can re-issue the same approval as a new request**; (8) **approval boxes whose command text has an odd number of quotes (`"` / `'`) are not forwarded** (label-less boxes only; fail-close); (9) **in the codex multi-question flow (`Question 1/N`), a cancel (Esc) from the phone is not sent and must be done on the PC** (approve/reject still work from the phone); (10) **label-less approval boxes (`WebFetch` / MCP) cannot be told apart even when they do different things, so a second MCP approval may be settled by answering the first** (answer MCP approvals on the PC after checking what they do).
 
 ## Supported platforms
 

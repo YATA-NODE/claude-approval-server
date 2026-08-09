@@ -1,10 +1,11 @@
 {
   "name": "claude-approval-server",
-  "version": "1.18.0",
+  "version": "1.19.0",
   "description": "Claude Code の承認ダイアログをスマートフォンから承認・拒否できるツール",
   "main": "approval-server.js",
   "scripts": {
-    "start": "node approval-server.js"
+    "start": "node approval-server.js",
+    "test": "node test-parse-dialog.js && node test-tab-sweep-state.js"
   },
   "keywords": [
     "claude-code",
