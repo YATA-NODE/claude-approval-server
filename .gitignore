@@ -6,4 +6,8 @@ approval-config.codex.json
 .claude/
 
 e2e-*.log
+# 実機録画から起こす成果物(画面ダンプ / メタ / 判定結果)。内部 path とセッション内容を
+# 含むため PUBLIC OSS リポへ混入させない(`.claude/` 全体除外と同じ理由、2026-08-08 追加)。
+e2e-*.txt
+e2e-*.json
 inspect-*.js
