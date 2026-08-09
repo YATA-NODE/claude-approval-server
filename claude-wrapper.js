@@ -27,7 +27,7 @@
  */
 
 const pty = require('node-pty')
-// v1.11.2: PTY 出力を headless terminal に write して画面バッファを正確に再現する。
+// PTY 出力を headless terminal に write して画面バッファを正確に再現する。
 // Claude Code TUI は CSI カーソル移動で in-place 差分再描画するため、ANSI を正規表現で
 // 除去する旧 stripAnsi 方式では描画順序が崩れ、スピナー混在時にダイアログを取りこぼす。
 // 必須依存(純 JS・native build 不要なので install 失敗リスクは低い)。
@@ -64,10 +64,14 @@ const SECRET_TOKEN = config.token || process.env.APPROVAL_TOKEN || ''
 // ルート直下などで basename が空になった場合は 'unknown' を充てる。
 const PROJECT_NAME = path.basename(process.cwd()) || 'unknown'
 
+// **承認取り違え** = スマホに表示した承認と、実際にキーが入るダイアログが別物になること
+// (拒否のつもりが承認になる / 表示と実行内容がずれる)。以下でこの語が出る箇所は、
+// すべてこの事故を防ぐための不変条件を指している。
+//
 // ダイアログ検出: 終端マーカー (Esc to cancel 等) を主アンカーに使う。
-// 旧 v1.7.3 までは "Do you want to" を主トリガーにしていたが、Claude Code v2.1.x の
+// プロンプト本文("Do you want to")を主トリガーにはできない。Claude Code v2.1.x の
 // Write/Edit 系ダイアログは ANSI 部分再描画の副作用で "Do you want t creat ..."
-// のように 1〜2 文字単位で欠落するため、プロンプト本文ベースの検出が成立しなくなった。
+// のように 1〜2 文字単位で欠落するため。
 // 一方 "Esc to cancel" は別行に独立描画されるため空白崩れ ("Esctocancel") のみで済む。
 //
 // ExitPlanMode(プラン承認)プロンプトだけは例外で、フッタが "Esc to cancel" ではなく
@@ -87,13 +91,13 @@ const PROJECT_NAME = path.basename(process.cwd()) || 'unknown'
 const EXIT_PLAN_END_PATTERN = 'shift\\+tab\\s+to\\s+approve'
 const EXIT_PLAN_END_RE = new RegExp(EXIT_PLAN_END_PATTERN, 'i')
 const DEFAULT_END_MARKER = 'Esc\\s*to\\s*cancel'
-// v1.17.0 (Phase 3b): codex プランモードの選択肢質問(= AskUserQuestion 相当)のフッタは
+// codex プランモードの選択肢質問(= AskUserQuestion 相当)のフッタは
 // "tab to add notes | enter to submit answer | esc to interrupt"。既定 endMarker
 // "Esc to cancel" に非一致なので、config なしでは検出できなかった。質問型に最も特異な
 // "enter to submit answer" を ExitPlanMode マーカーと同様に常時 OR-in して既定検出可能にする
 // (`esc to interrupt` は他文脈でも出うるため主キーにしない)。claude UI はこの語を出さない
 // ため誤検出ゼロ(233 fixture で回帰確認)。
-// v1.17.0 (Phase 3d): 複数質問フローの最後の問(Question M/M)はフッタが "enter to submit all"
+// 複数質問フローの最後の問(Question M/M)はフッタが "enter to submit all"
 // に変わる(実機確認: ユーザー画面)。これを拾えないと sweep が最後の問を読めず M-1 問しか
 // 登録できない。よって submit (answer|all) を両方マッチさせる。claude UI は両語とも出さない
 // ため誤検出ゼロを維持。
@@ -106,12 +110,12 @@ const CODEX_QUESTION_HEADER_RE = /^Question\s+\d+\/\d+/i
 // タブ式相当)。sweep の Q1 復帰回数 (N-1) と巡回 loop bound(M)、および M>1 判定に使う。
 // m[1]=N / m[2]=M。**行頭アンカー必須**(`m` フラグ + `^\s*`): codex の実ヘッダは行頭(インデント
 // 込み)に描画される。非アンカーだと prompt/options 本文に紛れた "Question 9/9" 等をヘッダ誤認し、
-// 単一質問を multi 扱いで検出抑止 / sweep の移動数・総数汚染が起きうる(codex adversarial review B001)。
+// 単一質問を multi 扱いで検出抑止 / sweep の移動数・総数汚染が起きうる。
 // 既存 CODEX_QUESTION_HEADER_RE(`^Question…`)と整合。誤認時も fail-safe(PC フォールバック)だが
 // 行頭限定で誤認面を最小化する。
 const CODEX_QUESTION_POS_RE_G = /^\s*Question\s+(\d+)\/(\d+)/gim
 
-// v1.17.0 (Phase 3d): segment 内に分母 M>1 の "Question N/M" が 1 つでもあるか(global 走査で全件
+// segment 内に分母 M>1 の "Question N/M" が 1 つでもあるか(global 走査で全件
 // some)。先頭マッチ依存だと画面上方に残る stale な "Question 1/1" が現 "Question 2/3" より先に
 // 当たりすり抜けるため全件走査する。parseDialog の M>1 抑止ガード(:734)と isCodexMultiQuestion の
 // 前段ゲートが共有する唯一の述語(二重持ち = drift 源を回避)。
@@ -167,7 +171,7 @@ function safeIdPath(id) {
   return SAFE_ID_RE.test(s) ? encodeURIComponent(s) : null
 }
 
-// v1.18.1: 状態機械テストは検出 tick を直接回すため、登録経路が **実際に動いている
+// 状態機械テストは検出 tick を直接回すため、登録経路が **実際に動いている
 // approval-server** へ POST しうる(テスト用のダミー依頼がスマホに飛ぶ)。差し替え点を
 // 1 つ設けて、テストからは必ずスタブに向ける。実行時は素通し。
 let httpRequestImpl = null
@@ -239,7 +243,7 @@ async function preflight() {
 // PTY 起動
 // -------------------------------------------------------
 let term
-// v1.11.2: PTY 出力を流し込む headless terminal。spawnClaude() で生成。
+// PTY 出力を流し込む headless terminal。spawnClaude() で生成。
 let headlessTerm = null
 
 // getScreenText が表示領域より上に含めるスクロールバック行数。
@@ -272,7 +276,7 @@ function getScreenText() {
   )
 }
 
-// v1.18.1: 表示領域のみ(スクロールバック 0 行)のテキスト。
+// 表示領域のみ(スクロールバック 0 行)のテキスト。
 // 「いま画面に出ているか」を判定する用途は必ずこちらを使う。getScreenText() は
 // スクロールバック 40 行を含むため、既に閉じたダイアログのタブバーが残っていると
 // 「まだ出ている」と誤判定し、依頼が永久に解決しなくなる。
@@ -295,13 +299,13 @@ function resolveTargetCommand() {
   return raw
 }
 
-// v1.16.0 (Phase 3a): 起動対象 CLI をモジュールロード時に 1 回だけ解決して保持する。
+// 起動対象 CLI をモジュールロード時に 1 回だけ解決して保持する。
 // 注入関数(pollForResponse 等)は spawnClaude のローカルスコープ外で動くため、
 // codex 向けのキー注入分岐に必要な「いま codex を相手にしているか」をここで確定させる。
 // IS_CODEX は basename 一致(パス付き起動・実行ファイル拡張子を許容)。claude では
 // false で既存経路が完全不変。判定漏れ(例 Windows の codex.cmd / codex.exe)は危険:
 // IS_CODEX=false で番号 + Enter 経路に落ち、codex の既定 option1(承認)を誤確定しうる
-// (拒否のはずが承認 = failure #Z 同型)ため、起動形態の揺れを広めに codex と判定する。
+// (拒否のはずが承認 = 承認取り違えと同型)ため、起動形態の揺れを広めに codex と判定する。
 // resolveTargetCommand が許可するのは英数 . _ - / のみ(バックスラッシュは exit(1) 拒否)
 // なので path.basename は / 区切りで安定。純関数化してテストで判定境界を固定する。
 function isCodexCommand(cmd) {
@@ -328,7 +332,7 @@ function spawnClaude() {
     env: process.env,
   })
 
-  // v1.11.2: 画面バッファ再現用の headless terminal を pty と同じ cols/rows で生成。
+  // 画面バッファ再現用の headless terminal を pty と同じ cols/rows で生成。
   // allowProposedApi は buffer API (proposed) アクセスに必須。
   try {
     headlessTerm = new Terminal({
@@ -361,7 +365,7 @@ function spawnClaude() {
   startPeriodicDetect()
 
   // リサイズ
-  // v1.11.2: headless terminal も同じ cols/rows に揃える。揃えないとグリッド再現が
+  // headless terminal も同じ cols/rows に揃える。揃えないとグリッド再現が
   // 実 TUI とズレて parseDialog の行構造が壊れる。
   process.stdout.on('resize', () => {
     const newCols = process.stdout.columns || cols
@@ -422,7 +426,7 @@ function wlog(msg) {
 // -------------------------------------------------------
 // ダイアログ検出
 // -------------------------------------------------------
-// v1.11.2: 検出は headless terminal の画面バッファ(getScreenText())ベースに移行。
+// 検出は headless terminal の画面バッファ(getScreenText())ベースに移行。
 // 旧 cleanBuf スライディングウィンドウは廃止。
 // DIALOG_SEGMENT_MAX は parseDialog が END_MARKER 手前を「ダイアログ候補領域」と
 // して見る幅。getScreenText() はタブバー + prompt + options + フッタ + その上の
@@ -433,7 +437,7 @@ const DIALOG_SEGMENT_MAX = 2000
 // { id, options, tool, args, prompt, lastSeenAt }
 let currentDialog = null
 
-// v1.18.1: currentDialog を変える処理(検出 / 登録 / 解決 / 再登録)を直列化する。
+// currentDialog を変える処理(検出 / 登録 / 解決 / 再登録)を直列化する。
 // これらは onPtyData のコールバックと 400ms tick から fire-and-forget で呼ばれるため、
 // await(HTTP 往復)を跨いで交錯し、二重登録やスロット上書きが起こりうる。
 let dialogLock = Promise.resolve()
@@ -460,7 +464,7 @@ function bumpDialogGeneration() {
 // 登録のロールバック(id 採番失敗)や再登録のためのスロット解放では立てない。
 let dialogLifecycleEnded = false
 
-// v1.18.1: parseDialog が連続して null を返し始めた時刻(成功でリセット)。
+// parseDialog が連続して null を返し始めた時刻(成功でリセット)。
 // 「タブ UI は見えているのに読めない」状態がどれだけ続いたかの計測にだけ使い、
 // **これを根拠にダイアログを解決しない**(可視中の解決は Type something の
 // 長い入力を取りこぼすため)。
@@ -491,7 +495,7 @@ const BOX_CHARS = '│╭╮╰╯─╌' // ボックス枠 + 罫線(7文字)
 const RULE_CHARS = '─╌' // 横罫線のみ
 const PROMPT_BOX_ANCHOR_CHARS = '│─╌' // prompt 行頭アンカー探索用の意図的サブセット(╭╮╰╯ を含まない)
 // タブバーのチェック印。U+2610 ☐ / U+2714 ✔ と、フォントフォールバックの □ / ✓。
-// v1.18.1: 「回答済み」を示す印(☒ U+2612 / ⊠ U+22A0)を追加。実機での実文字は未確認だが、
+// 「回答済み」を示す印(☒ U+2612 / ⊠ U+22A0)を追加。実機での実文字は未確認だが、
 // 追加しないと回答が進むにつれ印の個数が減り、①タブバー検出(>=2 個)が落ちる
 // ②expectedTabCount が過少になる、の 2 つが起きる。過少側は完全性ゲートで
 // 「転送しない」に倒れるだけなので安全側だが、検出が落ちると生存判定まで崩れる。
@@ -552,7 +556,7 @@ function boxLabelToolFor(line) {
   return hit || null
 }
 
-// ツール承認分類シグナル(W002 = AUQ 文言解消)。●Tool() 行のマーカー。
+// ツール承認分類シグナル。●Tool() 行のマーカー。
 // AUQ は専用 ●AskUserQuestion() 行を持たない。
 //
 // **行頭アンカー**である理由: `●` は CLI が tool 行の行頭に描くマーカーで、行の途中に現れる
@@ -641,14 +645,14 @@ function extractBoxCommand(body) {
   }
   // 打ち切るときは **印を付ける**。無印で切ると、先頭が同じで後半だけ違う 2 つのコマンドが
   // 同じ `args` に潰れ、`sameDialogIdentity` / `strictDialogIdentity` が「同じダイアログ」と
-  // 判定する(表示は `&& ls` のまま `&& rm -rf ~` を承認できた = #Z の再発。実行で再現)。
+  // 判定する(表示は `&& ls` のまま `&& rm -rf ~` を承認できた = 承認取り違えの再発。実行で再現)。
   // 印が付いた本文は codex 経路と同じく承認可能化しない(下記 6e)。
   return truncateCommandText(parts.join(' '))
 }
 
 // 直近の `● Tool(...)` を 1 つ返す。args は **括弧の対応を数えて**閉じ括弧まで採る。
 // 最初の `)` で打ち切ると `echo "(x)" && ls` と `echo "(x)" && rm -rf ~` が同じ `echo "(x`
-// に化け、`sameDialogIdentity` が別承認を「再描画」と誤認する(#Z、実行で再現済み)。
+// に化け、`sameDialogIdentity` が別承認を「再描画」と誤認する(承認取り違え、実行で再現済み)。
 // 折り返した tool 行(args が次行へ続く)を扱うため、走査は行をまたぐ。
 //
 // readable=false の意味は「このフレームでは本文を読み切れなかった」:
@@ -769,7 +773,7 @@ function dialogShapeMatches(a, b, { exactPrompt = false } = {}) {
   return exactPrompt ? a.prompt === b.prompt : promptSimilar(a.prompt, b.prompt)
 }
 
-// v1.11.2: 解決済みダイアログの抑制機構(旧 `cleanBuf = ''` リセットの代替)。
+// 解決済みダイアログの抑制機構(旧 `cleanBuf = ''` リセットの代替)。
 // 旧実装は cleanBuf を空にして「古いダイアログ本文を捨てる」ことで、回答済みなのに
 // parseDialog が同じダイアログを再検出するのを防いでいた。
 // headless terminal ベースでは画面が再描画されれば buffer は自然に最新化されるが、
@@ -798,7 +802,7 @@ function isSuppressed(d) {
   return promptSimilar(d.prompt, suppressedPrompt)
 }
 
-// v1.11.2: 本番検出経路は getScreenText()(headless terminal)に移行したため、
+// 本番検出経路は getScreenText()(headless terminal)に移行したため、
 // 本関数は実行時には使われない。test-parse-dialog.js の fixture 整形と後方互換
 // テスト用に定義・export を残している。
 function stripAnsi(s) {
@@ -828,7 +832,7 @@ function stripAnsi(s) {
 }
 
 function onPtyData(chunk) {
-  // v1.11.2: headless terminal にそのまま write し、ANSI 解釈はライブラリに任せる。
+  // headless terminal にそのまま write し、ANSI 解釈はライブラリに任せる。
   // write のコールバックはバッファ反映後に呼ばれるので、そこで検出を回す
   // (中途半端な描画状態で parseDialog することがなくなる)。
   // 画面透過(process.stdout.write)は本関数より前に実行済みなので、検出が失敗
@@ -956,7 +960,7 @@ function expandPromptStart(beforeQ, startNl) {
     const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
     const isTabBar = TAB_BAR_RE.test(line)
     const isOption = CURSOR_ANY_RE.test(line)
-    // v1.17.0 (Phase 3b): codex 質問ヘッダ "Question N/N (..)" も段落境界 = prompt 本文に
+    // codex 質問ヘッダ "Question N/N (..)" も段落境界 = prompt 本文に
     // 含めない(claude は本行を出さないため claude 経路に影響なし)。
     const isCodexQHeader = CODEX_QUESTION_HEADER_RE.test(line)
     // box 内部境界 = ここまでを 1 段落として連結採用。
@@ -990,12 +994,12 @@ function parseDialog(buf, opts = {}) {
   const segStart = Math.max(0, endIdx - DIALOG_SEGMENT_MAX)
   const segment = buf.slice(segStart, endIdx)
 
-  // 2b. v1.17.0 (Phase 3b): codex の複数質問フロー(Question N/M, M>1 = ←/→ で巡回するタブ式
+  // 2b. codex の複数質問フロー(Question N/M, M>1 = ←/→ で巡回するタブ式
   //   相当)は、単一質問として中途半端に注入すると先頭 1 問だけ答えて残りが PC に残る(実機で
-  //   混乱を確認)。完全対応(全問 sweep + タブ登録 + submit all)は Phase 3d。それまでは検出せず
+  //   混乱を確認)。全問 sweep + タブ登録 + submit all が使えない経路では検出せず
   //   (null)PC 側で処理させる(スマホで半端に答える事故を防ぐ)。codex 質問型 endMarker が
   //   立つ場合のみ判定するため claude / codex 承認には無影響。
-  // v1.17.0 (Phase 3d): allowMultiCodex=true のときはこの抑止を外し、現在表示中の 1 問を返す
+  // allowMultiCodex=true のときはこの抑止を外し、現在表示中の 1 問を返す
   // (sweepCodexQuestions が ←/→ 巡回で各問を読むため)。M>1 判定は isCodexMultiQuestion 前段
   // ゲートと同じ共有述語 hasMultiCodexQuestion を使う(あちらは detectDialog 用の前段検出、ここは
   // parseDialog 内の安全ガード)。保守的に「複数質問マーカーが見えたら出さない」= 半端回答事故防止。
@@ -1009,7 +1013,7 @@ function parseDialog(buf, opts = {}) {
 
   // 4. プロンプト抽出
   // 質問末尾は claude/codex 承認 = ASCII '?'、codex 選択肢質問 = 全角 '？'(U+FF1F)。両方探す。
-  // v1.17.0 (Phase 3b): codex プランモードの選択肢質問は丁寧形(「…ください。」)で ? を
+  // codex プランモードの選択肢質問は丁寧形(「…ください。」)で ? を
   // 持たないことがある。質問型 endMarker(enter to submit answer)が立つ場合のみ、最初の
   // 選択肢の直前を prompt 末尾アンカーに代用する。claude / codex 承認は本フォールバックに
   // 入らない(? がある限り従来の ? アンカー不変)。
@@ -1079,7 +1083,7 @@ function parseDialog(buf, opts = {}) {
     new Set(optNums).size === optNums.length && Math.max(...optNums) === optNums.length
   if (!completeFromOne) return null
 
-  // 6. ツール判定。AUQ を「ツール承認シグナルがどれも立たない」と定義する合成判定(W002)。
+  // 6. ツール判定。AUQ を「ツール承認シグナルがどれも立たない」と定義する合成判定。
   //   AskUserQuestion は専用の ●AskUserQuestion() 行を持たず、上方スクロールバックに前ターンの
   //   ●Bash() 等が残る。先に ●Tool() を継承すると誤ツール名(例「Bash uname -a」)を AUQ に
   //   転送してしまう(実機で観測)。一方、prompt 文言("Do you want to")単独依存は Claude Code の
@@ -1124,14 +1128,14 @@ function parseDialog(buf, opts = {}) {
   if (isExitPlanMode) {
     tool = 'ExitPlanMode'
   } else if (codexMode && isCodexCommandApprovalOptions(options)) {
-    // v1.17.0 (Phase 3b / TODO 3): codex コマンド承認は合成判定だと looksLikeAUQ に倒れ
+    // codex コマンド承認は合成判定だと looksLikeAUQ に倒れ
     // AskUserQuestion と誤表示される(prompt "Would you like to run" を APPROVAL_PHRASE_RE が
     // 拾わないため)。全 option がショートカットを持つ = コマンド承認として Bash ラベル + コマンド
     // 本文で表示する(注入経路は別途 option ラベルのショートカット抽出で振り分けるため不変)。
     tool = 'Bash'
     const cmd = extractCodexCommand(segment, qIdx)
     args = cmd.text
-    // 表示側 fail-safe(#Z 秘匿側): コマンド本文を確証できない(断片フレームで `$` 行が未描画 等)
+    // 表示側 fail-safe(取り違え秘匿側): コマンド本文を確証できない(断片フレームで `$` 行が未描画 等)
     // なら、コマンド空欄のブラインド承認になるため承認可能化しない。null を返し次の完全フレームで
     // 再検出させる(injection 側の reRegisterUninjectableDialog と対称の保守的挙動)。5b 完全性
     // ガードが options のみ検証し `$` 行を見ないため、ここで補う。
@@ -1218,12 +1222,12 @@ function parseDialog(buf, opts = {}) {
     // 埋めるだけで両方のガードを同時にすり抜けられる(実行で再現。箱の実コマンドが
     // 1 文字も出ずに `ls -la` がスマホへ出た)。ラベルが 2 本見えている時点で
     // 「どの枠の承認か」が決まらないので、何を表示しても正しさを保証できない。
-    // **多層防御の記録(M6、codex 合意 2026-08-09)**: このガードは上の empty-target と重なる。
-    // ラベル 2 本フレームは lines 空 → box から args 読めず、案A(!box.labelSeen)が lastTool 経由の
+    // **多層防御の記録**: このガードは上の empty-target と重なる。
+    // ラベル 2 本フレームは lines 空 → box から args 読めず、`!box.labelSeen` が lastTool 経由の
     // args も塞ぐため必ず empty-target(!args)にも掛かる。ambiguous-box 固有(ambiguous かつ
     // args あり)は現状 parseDialog では到達不能で、変異テストでこの行を消しても empty-target が
-    // 代替して SURVIVED になる。だが削除しない = 案A や解析順序が将来変わって args 経路が復活した
-    // ときの独立した fail-closed バックアップ。外部契約は「転送不能」であって、unforwardable の
+    // 代替して SURVIVED になる。だが削除しない = `!box.labelSeen` や解析順序が将来変わって
+    // args 経路が復活したときの独立した fail-closed バックアップ。外部契約は「転送不能」であって、unforwardable の
     // 理由文字列(empty-target / ambiguous-box)の優先順位は診断用で仕様外。
     if (box.ambiguous) unforwardable = 'ambiguous-box'
   }
@@ -1241,7 +1245,7 @@ function parseDialog(buf, opts = {}) {
   }
 
   const dlg = { prompt, options, tool, args }
-  // v1.18.0 (Phase 3c): codex 自由記入 option(末尾 (tab))の番号宣言を付与。
+  // codex 自由記入 option(末尾 (tab))の番号宣言を付与。
   // claude / コマンド承認((tab) 不在)は付かず key 自体が出ない = 下流の挙動・body 不変。
   if (codexMode) {
     const fto = codexFreeTextOptions(options)
@@ -1310,7 +1314,7 @@ function isExitPlanScreen(text) {
 }
 
 // フッタ **行そのもの** が ExitPlanMode 型か。
-// v1.18.1 以降、巡回するかどうかの判断は送出側と同じ広い述語(isExitPlanScreen)に
+// 巡回するかどうかの判断は送出側と同じ広い述語(isExitPlanScreen)に
 // 統一したため、この関数は本番経路から呼ばれていない(判定は parseDialog 側の
 // テストで固定されている)。狭い述語に戻すと、開始判断と送出判断が食い違って
 // 「開始できるのに戻れない」画面が生まれるため、戻さないこと。
@@ -1336,7 +1340,7 @@ function hasTabBarText(buf) {
 // "Tab/Arrow keys to navigate" ヘルプが出る形式を検出する。
 //
 // 役割 = 「単一質問として扱ってはいけない画面か」の判定。偽陽性寄りに倒す
-// (誤って単一登録すると、表示中の 1 タブだけが転送されて回答位置がずれる = #Z)。
+// (誤って単一登録すると、表示中の 1 タブだけが転送されて回答位置がずれる = 承認取り違え)。
 // **キーを実際に送ってよいか** の判定には使わない(そちらは tabBarScan の 'tabbed')。
 //
 // 判定は 2 系統の OR:
@@ -1373,7 +1377,7 @@ function isTabbedUiOfDialog(text, dialog) {
 }
 
 // -------------------------------------------------------
-// v1.18.1: タブバー行の読み取り(巡回の 1 回化 / 完全性ゲート / 位置検証の土台)
+// タブバー行の読み取り(巡回の 1 回化 / 完全性ゲート / 位置検証の土台)
 // -------------------------------------------------------
 
 // 選択肢行(`  1. …` / `❯ 1. …`)。本文は **モデル生成 = 信頼できない入力** で、印や
@@ -1828,16 +1832,16 @@ function nextEpoch(state, ev) {
   return { ...prev, absent: 0 }
 }
 
-// v1.12.0 (D1): approval-server.js / approval-ui.html の同名定数と完全同期。
+// approval-server.js / approval-ui.html の同名定数と完全同期。
 // Defense in depth として wrapper 側にも持つ(サーバ防御を信頼しすぎず、
 // 注入直前の最後の関門で再検証)。
 const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
 const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
 
-// v1.16.0 (Phase 3a): codex のコマンド承認 option ラベル末尾に内包されるショートカット
+// codex のコマンド承認 option ラベル末尾に内包されるショートカット
 // 文字を抽出する純関数。codex の承認 TUI は claude と異なり「番号 + Enter」型でなく
 // カーソル(›)+ Enter / ショートカットキー(y/p/esc)型のため、番号を送ると末尾 Enter が
-// 既定 option1(承認)を誤確定する(拒否のはずが承認 = failure #Z 同型)。これを避け、
+// 既定 option1(承認)を誤確定する(拒否のはずが承認 = 承認取り違えと同型)。これを避け、
 // ラベル `Yes, proceed (y)` / `...(p)` / `No, ... (esc)` の末尾括弧からキーを取り出す。
 //   入力例: "Yes, proceed (y)" → { kind: 'char', char: 'y' }
 //           "No, and tell Codex... (esc)" → { kind: 'esc' }
@@ -1853,11 +1857,11 @@ function extractCodexShortcut(optionLabel) {
   return null
 }
 
-// v1.16.0 (Phase 3a): 抽出したショートカットを実際に PTY へ書き込むバイト列へ変換する純関数。
+// 抽出したショートカットを実際に PTY へ書き込むバイト列へ変換する純関数。
 // esc → ESC(\x1b)、char → その文字そのもの。**末尾 \r は付けない**(char 自体が確定
 // ショートカットのため。E2E で「Enter 必須」が判明したときに限り char にだけ \r を足す)。
 // 抽出失敗(null)時は null を返し、呼び出し側は番号 + Enter にフォールバックせず注入を
-// 行わない(reRegister に倒す)= #Z 再発防止の中核。
+// 行わない(reRegister に倒す)= 取り違えの再発防止の中核。
 function resolveCodexInjection(optionLabel) {
   const sc = extractCodexShortcut(optionLabel)
   if (!sc) return null
@@ -1865,7 +1869,7 @@ function resolveCodexInjection(optionLabel) {
   return { bytes: sc.char }
 }
 
-// v1.17.0 (Phase 3b / TODO 3): codex の「コマンド承認」を「選択肢質問(AskUserQuestion)」と
+// codex の「コマンド承認」を「選択肢質問(AskUserQuestion)」と
 // 区別する純関数。コマンド承認の option は必ず全件が末尾ショートカット (y)/(p)/(esc) を持つ
 // (`Yes, proceed (y)` / `...(p)` / `No, ... (esc)`)。一方プランモードの選択肢質問は
 // `春 (Recommended)` / `None of the above ... (tab)` のように末尾が複数文字 = extractCodexShortcut
@@ -1879,7 +1883,7 @@ function isCodexCommandApprovalOptions(options) {
   )
 }
 
-// v1.18.0 (Phase 3c): codex プランモード質問の「自由記入 option」(末尾 (tab))の番号(1-based)を
+// codex プランモード質問の「自由記入 option」(末尾 (tab))の番号(1-based)を
 // 返す純関数。codex は `None of the above … (tab)` を選び Tab を押すと notes 入力欄が開く。この
 // option をスマホで自由記入可にするため、wrapper が detectDialog 時に番号を算出し /request で server
 // へ宣言する(識別 SoT = 本関数 1 箇所、ラベル文字列依存をここに集約。server/UI は宣言を信頼するだけ)。
@@ -1904,7 +1908,7 @@ const CODEX_OPTION_LINE_RE = new RegExp(`(?:^|\\n)[ \\t]*[${CURSOR_CHARS}]?[ \\t
 // (文字列 index ではなく行 index が要る場面がある)。パターンは上と同一に保つ。
 const CODEX_OPTION_LINE_ONLY_RE = new RegExp(`^[ \\t]*[${CURSOR_CHARS}]?[ \\t]*[1-9][.)]`)
 
-// v1.17.0 (Phase 3b): codex プランモードの選択肢質問は丁寧形(「…ください。」等)で末尾に
+// codex プランモードの選択肢質問は丁寧形(「…ください。」等)で末尾に
 // ? / ？ を持たないことがある(実機確認: codex 0.142.x)。その場合の prompt/option 境界
 // アンカーとして「最初の選択肢行の直前にある最後の非空白文字」の index を返す純関数(= ? の
 // 代替。? がある claude/codex 承認は本関数を使わず従来の ? アンカー不変)。選択肢行が無い /
@@ -1922,8 +1926,8 @@ function codexQuestionPromptEnd(segment) {
 // codex は "Would you like to run the following command?"(= prompt, qIdx)の直後に `$ <command>` を
 // 描画し、その下に選択肢が続く。**現ダイアログ領域(prompt 直後 〜 最初の選択肢の手前)に限定**して
 // 抽出する: segment 全体の先頭 `$` を拾うと画面上方に残る別(実行済み)コマンドを誤って拾い、
-// 表示と実際の承認内容が食い違う(#Z 取り違え)。確証できなければ空文字(呼び出し側が承認可能化を
-// 抑止 = #Z 秘匿側の fail-safe)。
+// 表示と実際の承認内容が食い違う(承認取り違え)。確証できなければ空文字(呼び出し側が承認可能化を
+// 抑止 = 取り違え秘匿側の fail-safe)。
 // コマンド行は端末幅で複数行に割れる。1 行目だけを採ると **危険な後半が承認画面から
 // 消える**(実測 cols=80: `echo "..." && rm -rf ~/important` の後半が落ちた)。
 // claude 側 prompt を expandPromptStart が連結しているのと同じ考え方で、構造境界まで
@@ -1983,7 +1987,7 @@ function extractCodexCommand(segment, qIdx) {
   if (head < 0) return { text: '', truncated: false }
   const parts = [lines[head].match(CODEX_CMD_LINE_RE)[1]]
   // 打ち切りは **必ず可視にする**。印を付けずに切ると、承認画面には完結した無害な
-  // コマンドだけが見えて危険な後半が消える(#Z)。自然な終わりだけを無印にする。
+  // コマンドだけが見えて危険な後半が消える(承認取り違え)。自然な終わりだけを無印にする。
   let truncated = false
   for (let k = head + 1; k <= optIdx && k < lines.length; k++) {
     if (k === optIdx) {
@@ -2023,7 +2027,7 @@ function extractCodexCommand(segment, qIdx) {
   return { text: clipped.text, truncated: truncated || clipped.truncated }
 }
 
-// v1.17.0 (Phase 3d): 画面が codex の複数質問フロー(Question N/M, M>1)かを判定する純関数
+// 画面が codex の複数質問フロー(Question N/M, M>1)かを判定する純関数
 // (detectDialog の前段ゲート)。最終 endMarker が codex 質問型(enter to submit answer)で、
 // かつ現ダイアログ領域(末尾マーカー手前 DIALOG_SEGMENT_MAX)に分母 M>1 の "Question N/M" が
 // あれば true。M>1 判定は parseDialog の抑止ガード(:734)と共有述語 hasMultiCodexQuestion を
@@ -2043,7 +2047,7 @@ function isCodexMultiQuestion(buf) {
   return hasMultiCodexQuestion(segment)
 }
 
-// v1.17.0 (Phase 3d): 画面に見えている最新(最後)の "Question N/M" の N と M を返す純関数。
+// 画面に見えている最新(最後)の "Question N/M" の N と M を返す純関数。
 // sweep で Q1 へ戻す回数 (N-1) と巡回の loop bound(M)に使う。見つからなければ null。最後の
 // マッチを採るのは、画面上方に stale な旧ヘッダが残っても最下=現在の問を優先するため。
 function codexQuestionPos(screen) {
@@ -2082,10 +2086,10 @@ function validateMultiAnswer(answers, tabs) {
     const idx = parseInt(num, 10) - 1
     if (idx >= tabs[i].options.length) return null
     const selectedOpt = tabs[i].options[idx]
-    // D1 (codex B002 修正 defense in depth): Chat about this を指す回答は遠隔不能
+    // defense in depth: Chat about this を指す回答は遠隔不能
     if (CHAT_ABOUT_RE.test(selectedOpt)) return null
     if (rawText !== undefined) {
-      // D1 (codex B002 修正 defense in depth): text 添付は Type something 限定
+      // defense in depth: text 添付は Type something 限定
       if (!FREE_TEXT_OPTION_RE.test(selectedOpt)) return null
       const safeText = validateFreeText(rawText)
       if (!safeText) return null
@@ -2124,7 +2128,7 @@ if (typeof module !== 'undefined') {
     isCodexMultiQuestion,
     codexQuestionPos,
     codexMultiKeySequence,
-    // v1.18.1: タブ巡回の 1 回化 / 完全性ゲート / 注入前の位置検証
+    // タブ巡回の 1 回化 / 完全性ゲート / 注入前の位置検証
     findTabBarLine,
     tabBarScan,
     tabbedScreenState,
@@ -2151,8 +2155,8 @@ if (typeof module !== 'undefined') {
     REWIND_STEPS_HARD_CAP,
     SWEEP_STABLE_TICKS,
     DISMISSAL_MS,
-    // v1.18.1: 状態機械テスト用のシーム。実行時には使わない(spawnClaude 経路が
-    // term / headlessTerm を設定する)。#Z(承認取り違え)の不変条件は純関数だけでは
+    // 状態機械テスト用のシーム。実行時には使わない(spawnClaude 経路が
+    // term / headlessTerm を設定する)。承認取り違え防止の不変条件は純関数だけでは
     // 固定できないため、巡回と注入を偽 TUI に対して回せるようにする。
     __test: {
       setTerm: (t) => {
@@ -2240,8 +2244,8 @@ if (typeof module !== 'undefined') {
 //
 // 巡回・再生中は:
 //   - detectDialog の通常パスをガード(tabSweepInProgress / tabReplayInProgress)
-//   - v1.18.1: 巡回中の PC 入力は「巡回を中断して破棄」(旧: バッファ → 完了後 flush)。
-//     再生(replay)中は従来どおりバッファ → 完了後に flush。
+//   - 巡回中の PC 入力は「巡回を中断して破棄」。
+//     再生(replay)中はバッファ → 完了後に flush。
 //
 // 注入する制御コード(Tab/Shift-Tab/Enter)は wrapper 内部生成のみ。
 // HTTP 経路から任意の制御コードが流れ込まないよう validateMultiAnswer で
@@ -2256,7 +2260,7 @@ let tabReplayInProgress = false
 let forwardTabDebt = 0
 const stdinBuffer = []
 
-// v1.18.1: 巡回中に PC 側で操作されたら巡回を即中断する。
+// 巡回中に PC 側で操作されたら巡回を即中断する。
 // 中断後も「整定窓」の間は確定系の入力を捨てる: wrapper が既に送った Tab は取り消せず、
 // その直後に届いた Enter は **移動先のタブ** で確定してしまう(別の質問に勝手に答える事故)。
 // 捨てるのは最大 1 打鍵で、巡回はもう止まっているので押し直せば正常に効く。
@@ -2410,7 +2414,7 @@ async function waitTabStable(
   let nullCount = 0
   while (Date.now() - t0 < timeoutMs) {
     await sleep(80)
-    if (sweepAborted) return null // v1.18.1: ローカル入力で中断 → 以降のキーを打たない
+    if (sweepAborted) return null // ローカル入力で中断 → 以降のキーを打たない
     const d = parseDialog(getScreenText(), parseOpts)
     if (!d) {
       nullCount++
@@ -2442,10 +2446,9 @@ async function waitTabStable(
 }
 
 // Shift+Tab を送って先頭タブ(タブ 1)へフォーカスを戻す。
-// v1.18.1: 旧実装は 3 回固定で、コメント自身が「典型タブ数 2-3 のときは 3 回で十分。
-// タブ数増加時はここを再調整する」と未完了を明記していた。質問タブ 4 個 + Submit では
-// 戻り切らず、巡回開始位置がずれてタブが漏れる / 注入位置が 1 個ずれる原因だった。
-// 回数は画面から数えた質問数に応じて決め、中断されたら途中で止める。
+// 回数は固定値にしないこと。画面から数えた質問数に応じて決め、中断されたら途中で止める。
+// 固定回数(かつてこれは 3 回だった)にすると、質問タブ 4 個 + Submit のような構成で
+// 戻り切らず、巡回開始位置がずれてタブが漏れる / 注入位置が 1 個ずれる。
 // 戻れたかどうかを返す。呼び出し側が結果を見ずに前進すると、開始位置がずれたまま
 // 巡回して Submit まで踏み抜く / 最終位置がずれたまま登録する、という片方向の事故になる。
 async function rewindToFirstTab(steps) {
@@ -2466,8 +2469,8 @@ async function rewindToFirstTab(steps) {
 // 現在の dialog から Tab で順送りしながら各タブを収集する。
 // 1 周完了の判定は「先頭タブと一致」または「直前タブと一致(Submit にフォーカスが
 // 移って Tab で動かなくなった状態)」のいずれか。
-// v1.18.1: 収集数がタブバーから数えた期待値と **完全一致** しない限り null を返す。
-// codex 側 sweepCodexQuestions は既に `tabs.length !== total` で捨てていた(#Z 対策)のに、
+// 収集数がタブバーから数えた期待値と **完全一致** しない限り null を返す。
+// codex 側 sweepCodexQuestions は既に `tabs.length !== total` で捨てていた(取り違え対策)のに、
 // claude 側は `tabs.length >= 2` で登録していた = 非対称だった。半端な登録は
 // 「回答列と Submit が別の位置に注入される」事故に直結するので、揃わなければ転送しない。
 async function sweepTabs() {
@@ -2605,22 +2608,22 @@ async function sweepTabs() {
     // 戻る一手が通ってしまう(中断で返り損ねた分もここで捨てる)。
     forwardTabDebt = 0
     if (sweepAborted) wlog(`tab sweep aborted after ${Date.now() - t0}ms`)
-    // v1.11.2: getScreenText() はステートレス(常に「現在の画面」を返す)なので
+    // getScreenText() はステートレス(常に「現在の画面」を返す)なので
     // 巡回後の特別な後始末は不要。flushStdinBuffer のみ行う。
     flushStdinBuffer()
   }
 }
 
-// v1.17.0 (Phase 3d): ← (左矢印) を n 回送って codex の質問を前方(Q1 方向)へ戻す。各送出後に
+// ← (左矢印) を n 回送って codex の質問を前方(Q1 方向)へ戻す。各送出後に
 // TUI 再描画を待つ sleep を挟む。sweep の前半(現在位置→Q1)と後半(巡回後→Q1 復帰)で共用。
 async function pressLeftArrow(n) {
   for (let i = 0; i < n; i++) {
-    if (!writeKey('\x1b[D')) return // ←(v1.18.1: 中断されたら打ち切る)
+    if (!writeKey('\x1b[D')) return // ←(中断されたら打ち切る)
     await sleep(50)
   }
 }
 
-// v1.17.0 (Phase 3d): codex プランモードの複数質問(Question N/M, M>1)を巡回キャプチャする。
+// codex プランモードの複数質問(Question N/M, M>1)を巡回キャプチャする。
 // sweepTabs の codex 版。claude は ☐✔ タブ式 UI を Tab/Shift+Tab で巡回するが、codex は 1 問ずつ
 // 表示し ←/→ で問を移動する(実機確認: codex 0.142.x、フッタ "←/→ to navigate questions")。
 // 各問は parseDialog(..., {allowMultiCodex:true}) で読む(既定の M>1 抑止を外す)。終了判定は
@@ -2648,7 +2651,7 @@ async function sweepCodexQuestions() {
     const tabs = [first]
     // → で残りの問を順に読む。上限 9(registerMultiDialog / validateMultiAnswer の tabs 上限)。
     for (let i = 1; i < total && i < 9; i++) {
-      if (!writeKey('\x1b[C')) return null // →(v1.18.1: 中断)
+      if (!writeKey('\x1b[C')) return null // →(中断)
       const last = tabs[tabs.length - 1]
       const next = await waitTabStable(600, last.prompt, last.options.length, parseOpts)
       if (sweepAborted) return null
@@ -2661,7 +2664,7 @@ async function sweepCodexQuestions() {
     // 全問(分母 M)を捕捉できなかった場合(waitTabStable が null で break / M>9 で 9 打ち切り)は
     // 半端登録を避けて null を返す → detectDialogSingle が parseDialog 既定(allowMultiCodex=false で
     // M>1 抑止)で PC 側に倒す。2≤tabs.length<M の半端帯で未回答の残り問に submit all の \r が入る
-    // ブラインド承認(#Z 退行)を構造的に閉じる(3 段レビュー security/codex の収束指摘)。
+    // ブラインド承認(承認取り違えの退行)を構造的に閉じる。
     if (tabs.length !== total) return null
     return tabs
   } finally {
@@ -2789,7 +2792,7 @@ async function replayMultiAnswers(answers) {
     }
     await sleep(MULTI_SUBMIT_WAIT_MS)
     term.write('1\r')
-    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    // 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
     return { ok: true }
   } finally {
@@ -2798,7 +2801,7 @@ async function replayMultiAnswers(answers) {
   }
 }
 
-// v1.12.0: スマホからのキャンセル指示を PC TUI の Esc キーで再現する。
+// スマホからのキャンセル指示を PC TUI の Esc キーで再現する。
 // 単一質問・複合質問・Type something 入力モードのいずれの状態でもダイアログ
 // を抜けて通常チャットへ戻る(TUI のフッタ「Esc to cancel」と同等の操作)。
 async function replayCancel() {
@@ -2812,9 +2815,9 @@ async function replayCancel() {
   }
 }
 
-// v1.17.0 (Phase 3d): codex 複数質問の注入キー列を組み立てる純関数(テスト seam)。#Z(承認取り
-// 違え)防止の不変条件を単体で固定する = 中間問は番号のみ(Enter を一切挟まない)/ submit は最後に
-// \r を 1 回だけ。中間で Enter を挟むと別問の既定 option を誤確定しうる(#Z)。answers は
+// codex 複数質問の注入キー列を組み立てる純関数(テスト seam)。
+// 承認取り違え防止の不変条件を単体で固定する = 中間問は番号のみ(Enter を一切挟まない)/ submit は最後に
+// \r を 1 回だけ。中間で Enter を挟むと別問の既定 option を誤確定しうる(承認取り違え)。answers は
 // validateMultiAnswer 通過済の { num }(codex 質問型に Type something は無く a.text は不使用 = 番号
 // のみ = 安全側)。戻り値 = ["1","2",...,"\r"]。replayCodexMultiAnswers がこの列を PTY に流す。
 function codexMultiKeySequence(answers) {
@@ -2823,15 +2826,15 @@ function codexMultiKeySequence(answers) {
   return keys
 }
 
-// v1.17.0 (Phase 3d): codexMultiKeySequence のキー列を PTY に再生する(replayMultiAnswers の codex 版)。
-// 実機 E2E verified(codex 0.142.x, 案A): ある問で番号キーを押すと選択確定 + 自動で次問へ遷移(claude
+// codexMultiKeySequence のキー列を PTY に再生する(replayMultiAnswers の codex 版)。
+// 実機 E2E verified(codex 0.142.x): ある問で番号キーを押すと選択確定 + 自動で次問へ遷移(claude
 // タブ式と同じ)。全問回答が揃うとフッタが "enter to submit all" になり \r で全送信(claude の
 // "数字列 → 1\r" と同型、codex は \r 単独)。3 問バッチで 番号列 [1,3,2] → \r が全問確定・誤確定なしを
-// 実機確認。#Z 不変条件(中間 Enter なし / submit 1 回)は codexMultiKeySequence が純粋化・テスト固定。
+// 実機確認。取り違え防止の不変条件(中間 Enter なし / submit 1 回)は codexMultiKeySequence が純粋化・テスト固定。
 // codex 版の注入前ゲート(claude の verifyAtFirstTab に対応)。codex はタブバーを持たない
 // 代わりに `Question n/m` を描くので、そこから位置と質問数を読む。claude 側だけ検証があり
 // codex 側が無条件だと、巡回から回答到着までの数十秒に PC 側で 1 問答える / ←/→ で移動する
-// だけで番号列が丸ごとずれ、最後の \r で別の質問が確定する(#Z)。
+// だけで番号列が丸ごとずれ、最後の \r で別の質問が確定する(承認取り違え)。
 async function verifyCodexAtFirstQuestion(dialog) {
   const screen = getScreenText()
   // 位置と質問数は **表示領域だけ** から読む。getScreenText はスクロールバック 40 行を
@@ -2963,12 +2966,12 @@ async function resolveStaleRegistration(id, reason) {
 // detectDialog の生存短絡(dismissal タイマー武装阻止)と onDialogDismissed の発火時 veto が共有し、
 // 逐語重複による drift を防ぐ。currentDialog / IS_CODEX のモジュール状態に依存する。
 //
-// v1.18.1: claude のタブ式も対象にする(従来は IS_CODEX 限定で、claude だけ
+// claude のタブ式も対象にする(従来は IS_CODEX 限定で、claude だけ
 // 「Submit フォーカス / Type something 入力で parseDialog が null → 2 秒で resolve-by-cli →
-// 再 sweep」のループが開いていた = 本件の症状)。
+// 再 sweep」のループが開く)。
 // ただし **「タブ UI が見えている」だけでは生存にしない**。見えているのが *この* 依頼か
 // を確かめないと、空白フレーム無しで次のタブ式質問へ遷移したときに旧依頼が延命され、
-// スマホから返ってきた旧質問の回答が新しい UI に注入される(#Z 型)。
+// スマホから返ってきた旧質問の回答が新しい UI に注入される(承認取り違え型)。
 // よって「parse できたなら、それが登録済み tabs のいずれかであること」を要求する。
 // parse できないフレーム(Submit フォーカス等)は判定を保留 = 生存扱い(可視である限り)。
 function isLiveMultiDialog(screen, viewport) {
@@ -3015,7 +3018,7 @@ const TAB_SWEEP_ENABLED = !(_dialogDetection && _dialogDetection.tabSweep === fa
 async function detectDialog() {
   // タブ巡回 / 再生中は通常検出をスキップ(dedup・誤登録を回避)
   if (tabSweepInProgress || tabReplayInProgress) return
-  // v1.18.1: currentDialog を触る処理を 1 本に直列化する。fire-and-forget な呼び出し
+  // currentDialog を触る処理を 1 本に直列化する。fire-and-forget な呼び出し
   // (onPtyData / 400ms tick)が await を跨いで交錯し、二重登録・スロット上書きが
   // 起きるのを構造的に防ぐ。
   return withDialogLock(detectDialogInner)
@@ -3149,7 +3152,7 @@ async function detectDialogInner() {
     }
   }
 
-  // v1.17.0 (Phase 3d): codex の複数質問(Question N/M, M>1)は claude の ☐✔ タブ式 UI を
+  // codex の複数質問(Question N/M, M>1)は claude の ☐✔ タブ式 UI を
   // 持たないため isTabbedDialog では拾えない。専用ゲート isCodexMultiQuestion で検出し、
   // sweepCodexQuestions で ←/→ 巡回 → registerMultiDialog(tool 非依存で流用)。拾えなければ
   // 素通り → detectDialogSingle。そこでは parseDialog 既定(allowMultiCodex=false)が M>1 を
@@ -3186,7 +3189,7 @@ async function detectDialogSingle(screen = getScreenText()) {
   // 替わった場合、下の d が null になることで **旧登録の解決経路まで塞がる**:
   // dismissal タイマーは仕掛かるが onDialogDismissedInner は「画面に parse できる
   // ダイアログがあれば生存」と判断して veto するため(同一性を見ない)、旧 id が永久に
-  // 残る。そこへスマホの回答が届くと、画面上の **別の** ダイアログへ数字 + Enter が入る(#Z)。
+  // 残る。そこへスマホの回答が届くと、画面上の **別の** ダイアログへ数字 + Enter が入る(承認取り違え)。
   // 旧実装は d が非 null だったため必ず resolveCurrentAsCli を通っていた。ここで明示的に
   // 解決して、その経路を復元する。
   if (tabbedNow && currentDialog && !currentDialog.tabs) {
@@ -3195,14 +3198,14 @@ async function detectDialogSingle(screen = getScreenText()) {
     return
   }
 
-  // v1.11.2: 解決済みダイアログ(suppressCurrentDialog で抑制中)は「見えていない」
+  // 解決済みダイアログ(suppressCurrentDialog で抑制中)は「見えていない」
   // 扱いにする。これにより消失タイマー設定パスに落ち、回答後の自然な dismiss が進む。
   const d = parsed && !isSuppressed(parsed) && !tabbedNow ? parsed : null
   if (d) {
     // ダイアログが見えている間は消失タイマーを止める。
     clearTimeout(dismissalTimer)
     dismissalTimer = null
-    blindSince = 0 // v1.18.1: 読めたので blind 計測をリセット
+    blindSince = 0 // 読めたので blind 計測をリセット
 
     // 同一ダイアログ判定: 時間窓内 + オプション数一致 + prompt 類似 で再描画扱い。
     // ConPTY で tool 行が遅れて描画される/prompt 文字が落ちるケースに耐える。
@@ -3259,8 +3262,8 @@ async function detectDialogSingle(screen = getScreenText()) {
   //      codex 専用述語)では回収されない = 実測で 30 tick 生存。
   //      さらに codex の登録は barLabels を持たない(registerMultiDialog に null を渡す)ので
   //      ② も効かない。**codex 側は「バー行が見えている限り無期限に延命」= 既知の非対称**。
-  //   ② バー行の見出し列がこの依頼のものと一致する(isTabbedUiOfDialog)。v1.18.1 で
-  //      足した「バー行だけが残る確認画面」を拾う分で、見出しの一致まで要求する。
+  //   ② バー行の見出し列がこの依頼のものと一致する(isTabbedUiOfDialog)。
+  //      「バー行だけが残る確認画面」まで拾う分、見出しの一致まで要求する。
   //      バー行の有無だけを根拠にすると、モデルが会話ログへ 1 行書くだけで旧依頼が
   //      無期限に生き残り、後から出た別のダイアログへ回答が入る余地になる。
   //
@@ -3344,7 +3347,7 @@ function buildDescription(projectName, tool, args, prompt) {
 // 再描画の dedup は prompt と選択肢の形しか見ない(`dialogShapeMatches`)。それだけだと
 // **コマンド本文が違う別の承認**を「同じダイアログの描き直し」と誤認する: 15 秒以内に
 // 形の同じ Bash 承認が 2 回出ると、スマホには 1 個目(例 `ls`)が出たまま、承認は画面上の
-// 2 個目(例 `rm -rf ~/important`)に入る(#Z)。偽装も攻撃者も要らず通常運用で起きる。
+// 2 個目(例 `rm -rf ~/important`)に入る(承認取り違え)。偽装も攻撃者も要らず通常運用で起きる。
 // 部分描画で tool / args が未確定のフレームは従来どおり許容し(遅れて揃う経路を壊さない)、
 // **両方が確定していて食い違うときだけ** 別ダイアログとして扱う。
 // 選択肢は **順序が意味そのもの**(注入するのは番号)。長さしか見ないと、質問文が同じで
@@ -3400,7 +3403,7 @@ async function registerDialog(d) {
   currentDialog = { ...d, id: null, lastSeenAt: Date.now(), sentDescription: description }
   const gen = bumpDialogGeneration()
   try {
-    // v1.18.0 (Phase 3c): codex 自由記入宣言を server へ。claude は d.freeTextOptions=undefined
+    // codex 自由記入宣言を server へ。claude は d.freeTextOptions=undefined
     // → spread しない = body byte 不変(回帰アサート対象)。
     const resp = await httpRequest('POST', '/request', {
       description,
@@ -3408,7 +3411,7 @@ async function registerDialog(d) {
       ...(d.freeTextOptions ? { freeTextOptions: d.freeTextOptions } : {}),
     })
     // スロットが別物に置き換わっていなければ id を埋める。
-    // v1.18.1: 置き換わっていた場合は採番済み id を明示解決して孤児を残さない。
+    // 置き換わっていた場合は採番済み id を明示解決して孤児を残さない。
     if (
       gen === dialogGeneration &&
       currentDialog &&
@@ -3440,14 +3443,15 @@ function isLostRegistration(err, dialog, id) {
 // singleDialogStillOnScreen はこれを整定リトライで包むだけ(I/O とタイミングを分離)。
 function dialogStillMatchesForInject(now, dialog, projectName) {
   if (!now || !dialog) return false
-  // prompt は **完全一致** を要求する。当初は「文字落ちフレーム登録で完全一致が二度と真に
-  // ならない恒久オーファン」の回避に args 一致時の近似一致を緩めたが、その緩和はどのケースでも
-  // 最終 true を出さない死コードだった(10 周目レビューで判明): 500 字未満は後段の sentDescription
-  // byte 照合が prompt 差を検出して false、500 字超は buildDescription の 500 字クランプで
-  // sentDescription が衝突するが、そこは「削除のみ(文字落ち)」と「追記(別承認)」が原理的に
-  // 弁別不能な領域(W002 追記型残穴)。認可経路に死んだ緩和を残すと将来 append 残穴を無自覚に
-  // 再オープンする footgun になるため削除した。文字落ち登録は reRegisterUninjectableDialog が
-  // 再提示するので恒久オーファンにはならない(スマホ表示はクランプ域で同一 = 摩擦は 1 回)。
+  // prompt は **完全一致** を要求する。args 一致を根拠にした近似一致の緩和は入れないこと:
+  // 500 字未満なら後段の sentDescription byte 照合が prompt 差を検出して false になるが、
+  // 500 字超は buildDescription の 500 字クランプで sentDescription が衝突し、byte 照合では
+  // prompt 差を検出できない。つまりクランプ域を止めているのは下の完全一致だけ。
+  // しかもクランプ域は「削除のみ(文字落ち)」と
+  // 「追記(別承認)」が原理的に弁別不能なので、認可経路にその緩和を置くと追記型の
+  // 取り違えを無自覚に再オープンする footgun になる。
+  // 文字落ちフレームで登録されても reRegisterUninjectableDialog が再提示するため
+  // 恒久オーファンにはならない(スマホ表示はクランプ域で同一 = 摩擦は 1 回)。
   if (!strictDialogIdentity(now, dialog)) return false
   if (!dialogShapeMatches(now, dialog, { exactPrompt: true })) return false
   if (!dialog.sentDescription) return true
@@ -3574,7 +3578,7 @@ async function pollForResponse(id) {
       // タイムアウト（pending）で返ってきただけ → 再ループ
       continue
     }
-    // v1.18.1: 注入判断は detectDialog と同じロックの中で行う。ロック外だと
+    // 注入判断は detectDialog と同じロックの中で行う。ロック外だと
     // 「currentDialog.id === id を確かめた直後に検出側がダイアログを差し替える」
     // 窓が開き、差し替わった別ダイアログへ回答を注入しうる。
     return withDialogLock(() => handleResolvedResponse(id, resp))
@@ -3586,7 +3590,7 @@ async function handleResolvedResponse(id, resp) {
     // resolve された。CLI で既に応答済みなら注入しない。
     if (!currentDialog || currentDialog.id !== id) return
 
-    // v1.12.0: スマホからキャンセル指示が来た場合、Esc キーを TUI に注入して
+    // スマホからキャンセル指示が来た場合、Esc キーを TUI に注入して
     // ダイアログを破棄する。complete/single 両方の経路で使える。
     if (resp.action === 'cancel') {
       // Esc も「いま画面に出ている相手」に入る。別のダイアログへ切り替わった画面に Esc が
@@ -3617,7 +3621,7 @@ async function handleResolvedResponse(id, resp) {
           `multi answers "${JSON.stringify(resp.answers).slice(0, 80)}" は許可された値ではない。注入スキップ。`
         )
       } else {
-        // v1.17.0 (Phase 3d): codex は注入キーが claude と異なる(番号で自動次問 + \r で submit all)
+        // codex は注入キーが claude と異なる(番号で自動次問 + \r で submit all)
         // ため IS_CODEX で振り分ける。claude(IS_CODEX=false)は従来経路で完全不変。
         let injected
         if (IS_CODEX) {
@@ -3654,13 +3658,13 @@ async function handleResolvedResponse(id, resp) {
       wlog(
         `answer "${String(resp.answer).slice(0, 40)}" は許可された値ではない。注入スキップ。`
       )
-      // v1.15.6: サーバーは resolved 済(スマホ不可視)だが wrapper は注入不能。
+      // サーバーは resolved 済(スマホ不可視)だが wrapper は注入不能。
       // 永続オーファンを避けるため現ダイアログを再登録してスマホへ再提示する。
       await reRegisterUninjectableDialog(id, 'answer 不一致')
       return
     }
 
-    // v1.18.1: 単一ダイアログにも **注入直前の画面再検証** を入れる(複合の verifyAtFirstTab と
+    // 単一ダイアログにも **注入直前の画面再検証** を入れる(複合の verifyAtFirstTab と
     // 対称)。これが無いと「スマホに出した依頼」と「いま画面に出ているダイアログ」の対応を
     // 400ms tick の dedup だけが担保することになり、dedup が崩れた瞬間そのまま承認の
     // 取り違えになる。以降の全経路(claude 数字 / claude 自由記入 / codex コマンド承認 /
@@ -3670,41 +3674,41 @@ async function handleResolvedResponse(id, resp) {
       return
     }
 
-    // D1 (codex B003 修正 defense in depth): key が指す option が Chat about this なら注入拒否
+    // defense in depth: key が指す option が Chat about this なら注入拒否
     const selectedOpt = currentDialog.options[parseInt(key, 10) - 1]
     if (CHAT_ABOUT_RE.test(selectedOpt)) {
       wlog(`answer points to "Chat about this" which is not remote-controllable. 注入スキップ。`)
       return
     }
 
-    // v1.17.0 (Phase 3b): codex は注入方式が claude と全く異なるため、claude 用の経路
+    // codex は注入方式が claude と全く異なるため、claude 用の経路
     // (フリーテキスト / 数字 + Enter)より前に最前段で分岐する。IS_CODEX=false の claude では
     // 本ブロックに入らず以降の既存経路が完全不変。振り分けキー = 選択された option ラベルの
     // ショートカット抽出可否(コマンド承認の option は必ず (y/p/esc) を持ち、質問型は持たない)。
     // 判定順は安全性のため固定(① → ② → ③):
-    //   ① ショートカット抽出可 → コマンド承認(ショートカットキーのみ、Enter 不送出 = #Z 回避)
+    //   ① ショートカット抽出可 → コマンド承認(ショートカットキーのみ、Enter 不送出 = 取り違え回避)
     //   ② resp.text あり      → 質問型の自由記入(選択 → Tab → テキスト → Enter)
     //   ③ それ以外(番号選択肢) → 質問型(番号 → Enter)
     // 注: 分類は parseDialog(全 option がショートカット ⟺ Bash)が既に出しているが、注入側は
     //   それに依存せず「選択 option のショートカット抽出可否」で独立に再判定する(defense in depth)。
-    //   分類が万一誤ってもコマンド承認(ショートカット持ち)を番号+Enter 経路に落とさないため = #Z
-    //   再発防止の核。tool ラベル駆動に寄せると分類ミス時に承認が番号+Enter で誤確定しうる。
+    //   分類が万一誤ってもコマンド承認(ショートカット持ち)を番号+Enter 経路に落とさないため。
+    //   承認取り違えの再発防止の核。tool ラベル駆動に寄せると分類ミス時に承認が番号+Enter で誤確定しうる。
     if (IS_CODEX) {
       // ① コマンド承認(選択 option がショートカットを持つ)を最優先で判定。text が添付されて
       //    いてもショートカット専用経路に倒す(Enter 不送出)。これより前に text 経路を置くと、
       //    クライアントが {answer, text} を投げてコマンド承認を番号+Enter 経路に落とし末尾 Enter で
-      //    既定 option1(承認)を誤確定させうる(#Z 同型・API 直叩き迂回)。codex コマンドに
+      //    既定 option1(承認)を誤確定させうる(承認取り違えと同型・API 直叩き迂回)。codex コマンドに
       //    notes は無いので text は無視するのが正(server 側も Type something 限定で text を 400)。
       if (resolveCodexInjection(selectedOpt)) {
         await replayCodexApproval(key, currentDialog.options, id)
         return
       }
       // ② 質問型の自由記入(Tab notes)。①を通過した = 選択 option はショートカットを持たない
-      //    質問型のみ。text 健全性を再検証(defense in depth)。v1.18.0 (Phase 3c) で活性化。
+      //    質問型のみ。text 健全性を再検証(defense in depth)。
       if (resp.text != null) {
-        // defense in depth (v1.18.0 Phase 3c): text 注入は wrapper 自身が宣言した自由記入 option
-        //   (currentDialog.freeTextOptions, 1-based)に限定。server D1 ゲートと対称の二重防御で、
-        //   宣言外 option への text 流し込み(#Z / B001 同型)を wrapper 側でも塞ぐ。
+        // defense in depth: text 注入は wrapper 自身が宣言した自由記入 option
+        //   (currentDialog.freeTextOptions, 1-based)に限定。server 側の text 添付ゲートと対称の二重防御で、
+        //   宣言外 option への text 流し込み(承認取り違えと同型)を wrapper 側でも塞ぐ。
         const keyNum = parseInt(key, 10)
         if (
           !(Array.isArray(currentDialog.freeTextOptions) &&
@@ -3715,7 +3719,7 @@ async function handleResolvedResponse(id, resp) {
         }
         const safeText = validateFreeText(resp.text)
         if (!safeText) {
-          // W001: 入力内容そのものはログに出さない(自由記入に機密が入りうる)。型/長さのみ記録。
+          // 入力内容そのものはログに出さない(自由記入に機密が入りうる)。型/長さのみ記録。
           wlog(
             `codex notes text rejected (type=${typeof resp.text}, len=${
               typeof resp.text === 'string' ? resp.text.length : 'n/a'
@@ -3731,12 +3735,12 @@ async function handleResolvedResponse(id, resp) {
       return
     }
 
-    // v1.12.0: スマホからフリーテキストが添付されている場合の経路(claude)。
+    // スマホからフリーテキストが添付されている場合の経路(claude)。
     // resp.text を validateFreeText で再検証(defense in depth)し、
     // replayFreeText で「キー → モード遷移待ち → 1 文字ずつ → Enter」で注入。
     // text なしの通常経路は従来通り「数字 + Enter」のみ。
     if (resp.text != null) {
-      // D1 (codex B001 修正 defense in depth): text 添付は Type something option 限定
+      // defense in depth: text 添付は Type something option 限定
       if (!FREE_TEXT_OPTION_RE.test(selectedOpt)) {
         wlog(
           `text is attached but selected option "${selectedOpt}" is not "Type something". 注入スキップ。`
@@ -3758,7 +3762,7 @@ async function handleResolvedResponse(id, resp) {
     }
 
     term.write(key + '\r')
-    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
+    // 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制。
     // (旧実装の cleanBuf='' の代替。詳細は suppressCurrentDialog のコメント参照)
     suppressCurrentDialog(currentDialog.prompt)
     wlog(`injected "${key}" for dialog ${id}`)
@@ -3782,13 +3786,12 @@ function validateAnswer(answer, options) {
   return null
 }
 
-// v1.12.0: フリーテキスト送信(Type something 経路)用の defense in depth 検証。
-// v1.12.0 (codex 3rd s2 / D2 反映): server の sanitizeFreeText は現在 strict reject
-// 型(v1.11.x までの「削除整形」から v1.12.0 で挙動変更)= wrapper の本関数と同じ
-// 契約。UI 側は事前削除型(ユーザー入力ミスを優しく整形)。
+// フリーテキスト送信(Type something 経路)用の defense in depth 検証。
+// server の sanitizeFreeText は strict reject 型 = wrapper の本関数と同じ契約。
+// UI 側だけが事前削除型(ユーザー入力ミスを優しく整形)。
 // 検査: 文字列 / 長さ 1〜MAX_FREE_TEXT_LEN / C0 + DEL + C1 制御文字を含まない /
 //      trim 後 length>0(空白のみ拒否)。
-// v1.12.0 (codex 3rd W002 修正): C1 制御文字(\x80-\x9F)も server と統一して拒否。
+// C1 制御文字(\x80-\x9F)も server と統一して拒否する。
 const MAX_FREE_TEXT_LEN = 2000
 const CONTROL_CHARS_RE = /[\x00-\x1F\x7F\x80-\x9F]/
 function validateFreeText(text) {
@@ -3799,7 +3802,7 @@ function validateFreeText(text) {
   return text
 }
 
-// v1.12.0 注入タイミング定数。Claude TUI のテキスト入力欄が値を受け取れる
+// 注入タイミング定数。Claude TUI のテキスト入力欄が値を受け取れる
 // ペース。MODE_TRANSITION_MS は「数字キーで Type something モードへ切替 →
 // 入力欄表示完了」までの待ち。CHAR_INJECT_MS_SLOW は遷移直後のウォームアップ
 // 用(入力欄バッファが安定するまで)、CHAR_INJECT_MS_FAST は定常時。
@@ -3808,7 +3811,7 @@ const CHAR_INJECT_MS_SLOW = 30
 const CHAR_INJECT_MS_FAST = 10
 const CHAR_INJECT_WARMUP = 30 // 最初の N 文字を SLOW、以後 FAST
 
-// v1.12.0: フリーテキストを PTY に「1 文字ずつ + 遅延」で再生する。
+// フリーテキストを PTY に「1 文字ずつ + 遅延」で再生する。
 // 1. 該当数字キー(Type something など)を注入して Claude TUI をテキスト入力モードへ
 // 2. モード遷移完了を待つため sleep MODE_TRANSITION_MS
 // 3. text を 1 文字ずつ term.write、最初 CHAR_INJECT_WARMUP 文字は SLOW、以後 FAST
@@ -3827,7 +3830,7 @@ async function replayFreeText(key, text) {
       i++
     }
     term.write('\r')
-    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    // 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
   } finally {
     tabReplayInProgress = false
@@ -3835,12 +3838,12 @@ async function replayFreeText(key, text) {
   }
 }
 
-// v1.16.0 (Phase 3a): codex のコマンド承認(Yes/proceed・don't-ask・No の 3 択)を注入する。
+// codex のコマンド承認(Yes/proceed・don't-ask・No の 3 択)を注入する。
 // key(番号 "1"〜"9")を option ラベルへ写し、末尾括弧のショートカット(y/p/esc)を抽出して
 // そのキーだけを送る(番号 + Enter は送らない = 既定 option 誤確定を構造的に回避)。
 // 抽出失敗時(option 構成が想定外でショートカットを取れない等)は注入せず、現ダイアログを
 // 再登録(reRegisterUninjectableDialog、404 経路と対称)してスマホ/PC の手動処理に倒す。
-// fail-safe = 承認にも拒否にも勝手に倒さない。これが failure #Z(承認取り違え)再発防止の核。
+// fail-safe = 承認にも拒否にも勝手に倒さない。これが承認取り違えの再発防止の核。
 async function replayCodexApproval(key, options, id) {
   const inj = resolveCodexInjection(options[parseInt(key, 10) - 1])
   if (!inj) {
@@ -3851,7 +3854,7 @@ async function replayCodexApproval(key, options, id) {
   tabReplayInProgress = true
   try {
     term.write(inj.bytes)
-    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    // 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
     wlog(`injected codex shortcut for key="${key}" dialog ${id}`)
   } finally {
@@ -3860,18 +3863,20 @@ async function replayCodexApproval(key, options, id) {
   }
 }
 
-// v1.17.0 (Phase 3b): codex プランモードの選択肢質問(= AskUserQuestion 相当)を注入する。
+// codex プランモードの選択肢質問(= AskUserQuestion 相当)を注入する。
 // コマンド承認(replayCodexApproval)と違い、option ラベルにショートカット文字が無いため、
 // 番号で選択肢へ移動 → Enter で確定(フッタ "enter to submit answer")する。
 // text 付き(自由記入 = Tab notes)は codex 仕様で「選択 → Tab で notes 欄を開く → テキスト →
 // Enter」(フッタ "tab to add notes")。claude の replayFreeText とは Tab の有無/順序が異なる。
-// 注 1: text 経路は Phase 3c へ分離(現状 server の D1 ゲート〔approval-server.js: text は
-//   "Type something" option 限定〕が codex 質問型 option の text を 400 で拒否するため未到達。
-//   3c で UI + server(codex 質問型への安全な text 許可)+ 本経路を一体で出す)。本実装は
-//   defense in depth として残し、ゲート緩和後に即活きる形にしておく。
-// 注 2: 番号キーが「移動」か「即選択確定」か、Enter 要否、Tab notes の順序/待ちは E2E(U1-U3)で
-//   確定する unknown。確定するまでは安全側既定(番号 → Enter)で出す。誤確定の主リスクは
-//   コマンド承認側(#Z)で、質問型は最悪でも誤った選択肢/notes の送信に留まる(承認取り違えでない)。
+// 注 1: text 経路は実運用の経路(宣言済み自由記入 option の notes がここに来る)。
+//   server 側の text 添付ゲート(isSingleTextAllowed)が通すのは「ラベルが `Type something` に
+//   一致する option **または** 宣言済み option」なので、codex 質問型で偶然 `Type something` という
+//   ラベルが出れば宣言外でもゲートを通る。それを止めているのは呼び出し側
+//   (handleResolvedResponse)の freeTextOptions 再検証だけ = 冗長な二重チェックではなく
+//   この経路の実質的な唯一の防壁。削除しないこと。
+// 注 2: 番号キーが「移動」か「即選択確定」か、Enter 要否、Tab notes の順序/待ちは
+//   単一質問の実機 E2E で確定するまで unknown。確定するまでは安全側既定(番号 → Enter)で出す。誤確定の主リスクは
+//   コマンド承認側(承認取り違え)で、質問型は最悪でも誤った選択肢/notes の送信に留まる(承認取り違えでない)。
 async function replayCodexQuestion(key, text, id) {
   tabReplayInProgress = true
   try {
@@ -3890,7 +3895,7 @@ async function replayCodexQuestion(key, text, id) {
     }
     await sleep(MULTI_SUBMIT_WAIT_MS)
     term.write('\r') // enter to submit answer
-    // v1.11.2: 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
+    // 回答済みダイアログを次フレーム描画まで再検出しないよう論理抑制
     if (currentDialog) suppressCurrentDialog(currentDialog.prompt)
     wlog(
       `injected codex question (key="${key}"${
@@ -3904,7 +3909,7 @@ async function replayCodexQuestion(key, text, id) {
 }
 
 // ダイアログが画面から消えた（= β 応答があった）と判定する処理。
-// v1.18.1: タイマーからの発火も detectDialog と同じロックに載せる(状態遷移の直列化)。
+// タイマーからの発火も detectDialog と同じロックに載せる(状態遷移の直列化)。
 function onDialogDismissed() {
   dismissalTimer = null
   return withDialogLock(onDialogDismissedInner)
@@ -3916,13 +3921,13 @@ async function onDialogDismissedInner() {
   // 複数質問は parseDialog 既定が null(codex は M>1 抑止 / claude は Submit フォーカス等)
   // = 下の d チェックをすり抜けて誤 dismiss(resolve-by-cli)し、スマホが持つ id を奪う。
   // まだ画面に出ていれば生存とみなしキャンセル(detectDialog の生存短絡と同じ盲点への
-  // defense in depth)。v1.18.1 で claude のタブ式も対象化。
+  // defense in depth)。claude のタブ式も対象。
   if (isLiveMultiDialog(screen, getViewportText())) return
   // 発火時点で再度 parseDialog して、画面にまだ(抑制対象でない)ダイアログが
   // あればキャンセルしない。
   // ただし **見えているのが登録済みのそれ自身か** を確かめる。同一性を見ずに veto すると、
   // 別のダイアログに替わった画面を「まだ出ている」と誤読して旧登録を永久に生かし、
-  // スマホの回答が別ダイアログへ入る(#Z)。上流の isLiveMultiDialog(複合用)と同じ思想を
+  // スマホの回答が別ダイアログへ入る(承認取り違え)。上流の isLiveMultiDialog(複合用)と同じ思想を
   // 単一にも適用する。
   const d = parseDialog(screen)
   if (d && !isSuppressed(d) && dialogShapeMatches(currentDialog, d)) return
@@ -3936,7 +3941,7 @@ async function resolveCurrentAsCli() {
   bumpDialogGeneration()
   if (d) dialogLifecycleEnded = true
   blindSince = 0
-  // v1.11.2: dismiss 確定したダイアログを次フレーム描画まで再検出しないよう論理抑制。
+  // dismiss 確定したダイアログを次フレーム描画まで再検出しないよう論理抑制。
   // (旧実装の cleanBuf='' の代替。残しておくと次の検出で古い tool 行を拾う原因に)
   if (d && d.prompt) suppressCurrentDialog(d.prompt)
   if (!d || !d.id) return

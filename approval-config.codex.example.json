@@ -3,5 +3,8 @@
   "token": "change-me-to-a-random-string-at-least-32-bytes",
   "target": {
     "command": "codex"
+  },
+  "dialogDetection": {
+    "tabSweep": true
   }
 }

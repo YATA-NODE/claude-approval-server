@@ -382,7 +382,7 @@
       .btn-submit-all:not(:disabled):active {
         opacity: 0.85;
       }
-      /* v1.12.0: ダイアログ全体を Esc 相当で破棄するキャンセルボタン。
+      /* ダイアログ全体を Esc 相当で破棄するキャンセルボタン。
          multi では「すべて送信」の横、single ではボタン群の末尾に並ぶ。 */
       .btn-cancel-dialog {
         flex: 0 0 auto;
@@ -610,7 +610,7 @@
         /* 本文 box は text 選択 UX を優先(上の .hist-expandable * を上書き) */
         cursor: text;
       }
-      /* v1.12.0 フリーテキスト送信モーダル */
+      /* フリーテキスト送信モーダル */
       .modal-overlay {
         position: fixed;
         inset: 0;
@@ -764,12 +764,12 @@
       </div>
     </div>
 
-    <!-- v1.12.0: フリーテキスト送信モーダル(Type something / Chat about this 経路) -->
+    <!-- フリーテキスト送信モーダル(Type something / Chat about this 経路) -->
     <div id="freetext-modal" class="modal-overlay" hidden>
       <div class="modal-card" role="dialog" aria-labelledby="freetext-title" aria-modal="true">
         <h2 id="freetext-title" class="modal-title">テキストを送信</h2>
         <p id="freetext-desc" class="modal-desc"></p>
-        <!-- v1.12.0: maxlength は approval-server.js / claude-wrapper.js MAX_FREE_TEXT_LEN と同期 -->
+        <!-- maxlength は approval-server.js / claude-wrapper.js MAX_FREE_TEXT_LEN と同期 -->
         <textarea
           id="freetext-input"
           class="modal-textarea"
@@ -921,7 +921,7 @@
       // 複合質問の選択状態 { [itemId]: { [tabIndex]: optionNumberString | {num, text} } }
       const selectedAnswers = {}
 
-      // v1.12.0: フリーテキストの長さ上限。approval-server.js / claude-wrapper.js
+      // フリーテキストの長さ上限。approval-server.js / claude-wrapper.js
       // MAX_FREE_TEXT_LEN および textarea[maxlength] と同期(3 箇所 + HTML 属性)
       const MAX_FREE_TEXT_LEN = 2000
 
@@ -1210,7 +1210,7 @@
         div.className = 'req-card' + (isSelected ? ' selected' : '')
         div.dataset.id = item.id
 
-        // v1.18.0 (Phase 3c): 自由記入宣言はカード単位で 1 度だけ束ねる(per-option の使い捨て
+        // 自由記入宣言はカード単位で 1 度だけ束ねる(per-option の使い捨て
         // 空配列確保を避ける)。claude は null = []。
         const fto = item.freeTextOptions || []
         const btnHtml = isSelected
@@ -1220,7 +1220,7 @@
                 // 保持し wrapper / サーバーへの番号と整合させる(複合質問と同方式)。
                 if (CHAT_ABOUT_RE.test(opt)) return ''
                 const num = String(oi + 1)
-                // v1.18.0 (Phase 3c): フリーテキスト判定を render 確定メタ化。Type something に加え
+                // フリーテキスト判定は render 確定メタ化する。Type something に加え
                 // codex 自由記入((tab))= item.freeTextOptions(1-based)宣言で自由記入モーダルを開く。
                 const isFreeText = FREE_TEXT_OPTION_RE.test(opt) || fto.includes(oi + 1)
                 return `<button class="${btnClass(opt, item.options)}" data-id="${item.id}" data-num="${num}" data-answer="${escHtml(opt)}" data-freetext="${isFreeText ? '1' : '0'}">${escHtml(opt)}</button>`
@@ -1248,12 +1248,12 @@
         const subHtml = item.tabs
           .map((tab, ti) => {
             const tabSel = sel[ti]
-            // v1.12.0: tabSel は文字列(数字のみ)or { num, text }(Type something 入力済み)
+            // tabSel は文字列(数字のみ)or { num, text }(Type something 入力済み)
             const selNum = typeof tabSel === 'string' ? tabSel : tabSel && tabSel.num
             const hasText = tabSel && typeof tabSel === 'object' && tabSel.text != null
             const opts = (tab.options || [])
               .map((opt, oi) => {
-                // v1.12.0: Chat about this は遠隔不能なので UI で非表示。
+                // Chat about this は遠隔不能なので UI で非表示。
                 // num は元の oi+1 を保持(wrapper への番号と整合させる)
                 if (CHAT_ABOUT_RE.test(opt)) return ''
                 const num = String(oi + 1)
@@ -1300,7 +1300,7 @@
       }
 
       document.getElementById('queue-list').addEventListener('click', async (e) => {
-        // v1.12.0: ダイアログキャンセル(Esc 相当)
+        // ダイアログキャンセル(Esc 相当)
         const cancelBtn = e.target.closest('button[data-cancel-id]')
         if (cancelBtn && !cancelBtn.disabled) {
           if (!confirm(t('cancelConfirm'))) return
@@ -1320,7 +1320,7 @@
           const ti = multiBtn.dataset.tab
           const num = multiBtn.dataset.num
           const ans = multiBtn.dataset.answer || ''
-          // v1.12.0: Type something / Chat about this はテキスト入力モーダルを開く
+          // Type something / Chat about this はテキスト入力モーダルを開く
           // (送信はその場ではなく、すべての回答が揃ってから「すべて送信」で実施)
           if (FREE_TEXT_OPTION_RE.test(ans)) {
             openFreeTextModal(id, ans, { tab: ti, num })
@@ -1337,13 +1337,13 @@
         if (btn) {
           const label = btn.dataset.answer
           const num = btn.dataset.num
-          // v1.18.0 (Phase 3c): フリーテキスト判定は render 確定メタ(data-freetext)を信頼。
-          // Type something(v1.12.0)に加え codex 自由記入((tab))でも入力モーダルを開く。
+          // フリーテキスト判定は render 確定メタ(data-freetext)を信頼。
+          // Type something に加え codex 自由記入((tab))でも入力モーダルを開く。
           if (btn.dataset.freetext === '1') {
             openFreeTextModal(btn.dataset.id, label, null, num)
             return
           }
-          // v1.15.6: 送信は番号(num)、表示・履歴はラベル(label)。option 本文の
+          // 送信は番号(num)、表示・履歴はラベル(label)。option 本文の
           // 折返し揺れに依存しない安定キーで照合させる(複合質問と同方式)。
           await resolveItem(btn.dataset.id, num, btn.closest('.btn-area'), false, label)
           return
@@ -1395,7 +1395,7 @@
         renderHistory()
       }
 
-      // v1.12.0: ダイアログ全体をキャンセル(PC TUI の Esc 相当)。
+      // ダイアログ全体をキャンセル(PC TUI の Esc 相当)。
       // wrapper が Esc 注入 → ダイアログ消失 → 通常チャットに戻る。
       async function cancelItem(id, btn) {
         btn.disabled = true
@@ -1426,7 +1426,7 @@
         for (let i = 0; i < item.tabs.length; i++) {
           const v = sel[i]
           if (!v) return // 未選択あり → 何もしない
-          // v1.12.0: v は文字列(数字のみ)or { num, text }(Type something 入力済み)
+          // v は文字列(数字のみ)or { num, text }(Type something 入力済み)
           answers.push(typeof v === 'string' ? v : { num: v.num, text: v.text })
         }
         submitBtn.disabled = true
@@ -1474,20 +1474,20 @@
         }
       }
 
-      // v1.12.0: Claude TUI 組み込みフッタ option(Type something / Chat about this)を検出。
+      // Claude TUI 組み込みフッタ option(Type something / Chat about this)を検出。
       // これらの option を押すと wrapper 側で自由入力モードへ遷移するので、UI 側で
       // テキスト入力モーダルを出して "answer + text" をサーバへ送る。
       const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
-      // v1.12.0: Chat about this は遠隔不能(数字キー単独で選べず、選択するとダイアログ
+      // Chat about this は遠隔不能(数字キー単独で選べず、選択するとダイアログ
       // 全体を抜けて通常チャットへ移行する仕様)。UI 側で非表示にし、選びたい場合は
       // 下部の「キャンセル」ボタンで Esc 相当の操作を行う。
       const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
 
       let activeFreeTextItemId = null
       let activeFreeTextAnswer = null
-      // v1.12.0: Multi タブから開いた場合のみ { tab, num }、single なら null
+      // Multi タブから開いた場合のみ { tab, num }、single なら null
       let activeFreeTextMulti = null
-      // v1.15.6: single 経路でサーバーへ送る番号(Multi 経路では null)
+      // single 経路でサーバーへ送る番号(Multi 経路では null)
       let activeFreeTextNum = null
 
       function openFreeTextModal(itemId, answer, multiOpts, singleNum) {
@@ -1538,7 +1538,7 @@
         const sendBtn = document.getElementById('freetext-send')
         // クライアント側 sanitize: 制御文字 + 改行除去(サーバ側でも同様の sanitize)
         const raw = input.value || ''
-        // v1.12.0 (codex 3rd W002 修正): server / wrapper と統一して C1 (\x80-\x9F) も除去
+        // server / wrapper と統一して C1 (\x80-\x9F) も除去
         const clean = raw.replace(/[\x00-\x1F\x7F\x80-\x9F]/g, '')
         if (clean.length === 0) {
           err.textContent = t('freeTextEmpty')
@@ -1552,7 +1552,7 @@
         sendBtn.disabled = true
         const id = activeFreeTextItemId
         const answer = activeFreeTextAnswer
-        // v1.12.0: Multi 経路は state に保存して閉じる(送信は「すべて送信」時)
+        // Multi 経路は state に保存して閉じる(送信は「すべて送信」時)
         if (activeFreeTextMulti) {
           const { tab: mTab, num: mNum } = activeFreeTextMulti
           if (!selectedAnswers[id]) selectedAnswers[id] = {}
@@ -1562,7 +1562,7 @@
           return
         }
         try {
-          // v1.15.6: 送信は番号(activeFreeTextNum)、表示は option ラベル(answer)。
+          // 送信は番号(activeFreeTextNum)、表示は option ラベル(answer)。
           // option 本文の折返し揺れに依存しない安定キーで照合させる。
           await apiFetch(`/resolve/${id}`, {
             method: 'POST',
@@ -1597,7 +1597,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ answer, resolvedBy }),
           })
-          // v1.15.6: answer は送信値(単一質問は番号)。履歴表示は label(ラベル)を
+          // answer は送信値(単一質問は番号)。履歴表示は label(ラベル)を
           // 優先し、未指定(一括承認 'Yes' 等)は従来通り answer を表示。
           pushHistory(getDescription(id), label != null ? label : answer)
           if (!isBulk) {
