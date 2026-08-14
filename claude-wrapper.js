@@ -2197,6 +2197,10 @@ if (typeof module !== 'undefined') {
     codexMultiKeySequence,
     // タブ巡回の 1 回化 / 完全性ゲート / 注入前の位置検証
     findTabBarLine,
+    // read-only export 追加(test-shift-tab-diff.js 用、ロジック変更なし)。
+    // フッタ(終端マーカー最終出現)行 index。shiftTabBlockedReason の footAbsent 判定と
+    // 同じ関数をテスト側からも直接呼べるようにする(手写しして drift させない)。
+    findFooterIndex,
     tabBarScan,
     tabbedScreenState,
     tabbedScreenScan,
