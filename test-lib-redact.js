@@ -237,7 +237,7 @@ console.log('[C7] statusline 混合行のセル run 断片(第2段 (c), webfetch
 // branch 名は「現在チェックアウトされているブランチ」を動的に取得する(featureブランチが
 // 将来消えても壊れないようにするため。repo 名はディレクトリ名から取得し常に安定)。
 // -------------------------------------------------------
-const { redactRawStream, findRawIdentifierLeaks } = require('./tools/lib-redact.js')
+const { redactRawStream, findRawIdentifierLeaks, setRepoIdentifiers } = require('./tools/lib-redact.js')
 const { execFileSync } = require('child_process')
 const path = require('path')
 
@@ -251,13 +251,22 @@ try {
 } catch (_) {
   CURRENT_BRANCH = ''
 }
+// [C8]-[C10] は「登録済みの repo/branch 識別子がマスクされること」の検証。実行環境の
+// branch 状態(CI の detached checkout ではローカル branch が無く、初期の識別子一覧に
+// branch が入らない)に依存しないよう、識別子を明示注入して決定論化する。
+// 復元は restoreDefaultRepoIdentifiers()(C14 節で定義、hoisting で前方から呼べる)。
+const TEST_BRANCH = 'feature/redact-test-branch'
+function injectRepoIdentifiers() {
+  setRepoIdentifiers([REPO_NAME, TEST_BRANCH])
+}
 
 console.log('')
 console.log('[C8] redactRawStream: タイトルバー行(マーカーあり)でマーカーの前(リポ名/ブランチ名)も')
 console.log('     マスクされること。行区切りを \\r にも広げたことで、同じ塊内の無関係な')
 console.log('     前後の行(Fetch(...) / Sonnet 5)は過剰マスクされないことも確認する。')
 {
-  const branch = CURRENT_BRANCH || 'main'
+  const branch = TEST_BRANCH
+  injectRepoIdentifiers()
   // 実際の e2e-raw-webfetch.log で観測された構造(1つの \n 区切りブロックに複数の画面行が
   // \r + 相対カーソル移動で連結される)を模した合成入力。
   const sample =
@@ -281,7 +290,8 @@ console.log('')
 console.log('[C9] redactRawStream: effort マーカーが描画されない「マーカー無しタイトルバー行」')
 console.log('     でもリポ名/ブランチ名が残らないこと(部分再描画で単独行として流れる実例)。')
 {
-  const branch = CURRENT_BRANCH || 'main'
+  const branch = TEST_BRANCH
+  injectRepoIdentifiers()
   const sample = `\x1b[2C\x1b[1A\x1b[38;2;153;153;153m${REPO_NAME} / ${branch}\x1b[39m\r\r\r`
   const out = redactRawStream(sample)
   assertEq('マーカー無しタイトルバー行: 文字数が変わらない', out.length, sample.length)
@@ -293,7 +303,8 @@ console.log('')
 console.log('[C10] redactRawStream: ブランチ名の直後にカーソル位置ジャンプ(空白文字を伴わない)で')
 console.log('      無関係なヒント文が連結される個体でも、境界を誤らずブランチ名だけをマスクする。')
 {
-  const branch = CURRENT_BRANCH || 'main'
+  const branch = TEST_BRANCH
+  injectRepoIdentifiers()
   // 実際の e2e-raw-adv-fakeframe.log で観測された構造: ブランチ名の直後、列ジャンプを挟んで
   // "ctrl+g to edit in VS Code" ヒントが連結される(視覚上の空白はカーソル移動で作られており
   // 文字としては存在しない)。
@@ -307,6 +318,7 @@ console.log('      無関係なヒント文が連結される個体でも、境�
   assertTrue('境界precision: 無関係な隣接語 "ctrl+g" は誤ってマスクされず残る', out.includes('ctrl+g'))
   assertTrue('境界precision: 無関係な隣接語 "edit" は誤ってマスクされず残る', out.includes('edit'))
   assertTrue('境界precision: 無関係な隣接語 "VS" は誤ってマスクされず残る', out.includes('VS'))
+  restoreDefaultRepoIdentifiers()
 }
 
 console.log('')
@@ -379,7 +391,7 @@ console.log('      あっても、マスク対象でない部分は原文のま�
 // (tools/extract-fixture.js 側の fail-close 出力に関する内容は
 // このファイルの対象外)。
 // -------------------------------------------------------
-const { setRepoIdentifiers } = require('./tools/lib-redact.js')
+// setRepoIdentifiers は先頭の require で取得済み。
 
 function restoreDefaultRepoIdentifiers() {
   let branches = []
@@ -447,7 +459,8 @@ console.log('[C16] redactRawStream: 復帰(\\r)を伴わない CSI 垂直移動(
 console.log('      位置指定)でも画面行が切り替わったとみなし、タイトルバーのリポ名/ブランチ名を')
 console.log('      正しくマスクすること(\\r/\\n が無いと選択肢行と誤って同一論理行になる回帰)。')
 {
-  const branch = CURRENT_BRANCH || 'main'
+  const branch = TEST_BRANCH
+  injectRepoIdentifiers()
   const sample =
     '\x1b[38;2;177;185;249m ❯ 1. Yes' + // 選択肢行(別の色)
     '\x1b[1B' + // CSI 垂直移動(カーソル下へ1、復帰 \r を伴わない)
