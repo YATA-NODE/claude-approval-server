@@ -161,6 +161,17 @@ async function main() {
       )
       eq('⑤ description 同梱 → 400', r.status, 400)
       eq('⑤ error message', r.json?.error, 'notice accepts only {kind, reason}')
+
+      // 許可リスト方式の固定: 既知のコンテンツ系フィールドだけでなく、未知キーも拒否する
+      // ({kind, reason} 以外の一切を受理しない = 拒否リストの更新漏れという回帰を封じる)。
+      const rUnknown = await httpJson(
+        base,
+        'POST',
+        '/request',
+        { kind: 'notice', reason: 'rewind-failed', foo: 1 },
+        TEST_TOKEN
+      )
+      eq('⑤b 未知キー同梱 → 400', rUnknown.status, 400)
     }
 
     // -----------------------------------------------------

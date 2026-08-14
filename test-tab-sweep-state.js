@@ -1949,6 +1949,17 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     const rawControlRe = /[\x00-\x1f\x7f\u2028\u2029]/
     assertEq('制御文字 / U+2028 / U+2029 が残っていない', rawControlRe.test(clean), false)
 
+    // 双方向制御文字は範囲の代表でなく対象コードポイントを個別に固定する
+    // (範囲指定の regex が 1 文字ずれても、まとめ regex のテストでは検出できないため)。
+    for (const cp of [0x061c, 0x200e, 0x200f, 0x202a, 0x202c, 0x202e, 0x2066, 0x2068, 0x2069]) {
+      const ch = String.fromCodePoint(cp)
+      assertEq(
+        `U+${cp.toString(16).toUpperCase().padStart(4, '0')} が除去される`,
+        __test.sanitizeLogMessage(`a${ch}b`).includes(ch),
+        false
+      )
+    }
+
     const long = __test.sanitizeLogMessage('x'.repeat(500))
     assertEq('200 文字に切り詰められる', long.length, 200)
   }

@@ -186,6 +186,9 @@ function clampRequestTimeoutMs(timeoutMs) {
   return Number.isFinite(timeoutMs) && timeoutMs > 0 && timeoutMs <= 70000 ? timeoutMs : 70000
 }
 
+// 1 応答の受信上限(下の data ハンドラ参照)。
+const MAX_RESPONSE_BYTES = 1024 * 1024
+
 function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
   const ms = clampRequestTimeoutMs(timeoutMs)
   return new Promise((resolve, reject) => {
@@ -207,12 +210,23 @@ function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
       },
       (res) => {
         let buf = ''
-        res.on('data', (d) => (buf += d))
+        res.on('data', (d) => {
+          buf += d
+          // 応答サイズの上限。deadline は時間の防壁であってサイズの防壁ではない
+          // (期限内に高速送信される巨大応答はメモリへ無制限に積める)。正当な応答は
+          // queue 全件でも数十 KB(全フィールドが登録時に clip 済み)なので 1MB は十分。
+          if (buf.length > MAX_RESPONSE_BYTES) {
+            destroyReq(new Error('response too large'))
+            finalize(() => reject(new Error('response too large')))
+          }
+        })
         // 解除は応答本文の完全受信後のみ(ヘッダー受信時に解除しない)。
         res.on('end', () => {
           if (res.statusCode >= 400) {
             // statusCode を error に持たせ、呼び出し側で 404(登録喪失)等を判別可能にする。
-            const err = new Error(`HTTP ${res.statusCode}: ${buf}`)
+            // message へ載せる応答本文は上限付き抜粋(全文を error に運ぶと、そのまま
+            // ログへ流す呼び出し側で肥大・注入の面になる。無害化は各ログ地点の責務)。
+            const err = new Error(`HTTP ${res.statusCode}: ${String(buf).slice(0, 200)}`)
             err.statusCode = res.statusCode
             return finalize(() => reject(err))
           }
@@ -3127,7 +3141,9 @@ async function resolveStaleRegistration(id, reason, timeoutMs) {
     )
     wlog(`stale registration ${id} resolved (${reason})`)
   } catch (e) {
-    wlog(`stale registration ${id} resolve failed: ${e.message}`)
+    // e.message には HTTP エラー時の応答本文抜粋が含まれる(= サーバー由来の任意文字列)。
+    // notice の TTL / 補償回収もこの経路を通るため、制御・双方向制御文字を除去してから記録する。
+    wlog(`stale registration ${id} resolve failed: ${sanitizeLogMessage(e && e.message)}`)
   }
 }
 

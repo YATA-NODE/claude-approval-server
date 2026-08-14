@@ -1248,10 +1248,18 @@
         const div = document.createElement('div')
         div.className = 'req-card notice-card'
         div.dataset.id = item.id
+        // innerHTML に入れるのは固定 i18n 文言とサーバー生成の時刻だけ。item.id は
+        // HTML 文字列連結でなく dataset / textContent で持つ(現状 id は UUID だが、
+        // 生成方法が将来変わっても XSS sink にならない構築にしておく)。
         div.innerHTML = `
       <p class="req-time">${fmt(item.createdAt)}</p>
       <p class="req-desc">${escHtml(t('noticeText'))} <span class="notice-badge">${escHtml(t('noticeBadge'))}</span></p>
-      <div class="btn-area"><button class="btn-option btn-other" data-notice-ack-id="${item.id}">${escHtml(t('noticeAck'))}</button></div>`
+      <div class="btn-area"></div>`
+        const ackBtn = document.createElement('button')
+        ackBtn.className = 'btn-option btn-other'
+        ackBtn.dataset.noticeAckId = item.id
+        ackBtn.textContent = t('noticeAck')
+        div.querySelector('.btn-area').appendChild(ackBtn)
         return div
       }
 

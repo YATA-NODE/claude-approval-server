@@ -276,13 +276,8 @@ function isSingleTextAllowed(item, answer) {
 
 // notice(kind:'notice')で許可される reason コードの許可リスト(完全一致のみ)。
 const NOTICE_REASONS = ['rewind-failed']
-// approval 依頼が body で受け取るコンテンツ系フィールド。notice はこれらを一切受理しない
-// (余剰フィールド拒否の判定に使う)。**/request の destructuring にフィールドを足したら
-// ここにも足すこと** — 足し忘れると「notice はクライアント由来文字列ゼロ」の保証が静かに弱まる。
-const APPROVAL_CONTENT_FIELDS = ['description', 'options', 'tabs', 'freeTextOptions']
 
 app.post('/request', authenticate, (req, res) => {
-  // フィールドを増やすときは APPROVAL_CONTENT_FIELDS(notice の余剰フィールド拒否)も更新すること。
   const { kind, description, options, tabs, freeTextOptions, reason } = req.body
 
   // kind 一致は文字列 'notice' の完全一致のみ。それ以外(未指定・配列・オブジェクト等の
@@ -293,8 +288,10 @@ app.post('/request', authenticate, (req, res) => {
     if (typeof reason !== 'string' || !NOTICE_REASONS.includes(reason)) {
       return res.status(400).json({ error: 'unknown notice reason' })
     }
-    // 余剰フィールド拒否: item はサーバーが全生成し、クライアント由来文字列をゼロにする。
-    if (APPROVAL_CONTENT_FIELDS.some((k) => req.body[k] !== undefined)) {
+    // 受理フィールドは {kind, reason} だけ = 許可リスト方式で未知キーごと拒否する。
+    // 拒否リスト(description 等の列挙)にすると、将来 /request にフィールドを足したとき
+    // 列挙の更新漏れで「notice はクライアント由来文字列ゼロ」の保証が静かに弱まる。
+    if (Object.keys(req.body).some((k) => k !== 'kind' && k !== 'reason')) {
       return res.status(400).json({ error: 'notice accepts only {kind, reason}' })
     }
     const noticeItem = {
