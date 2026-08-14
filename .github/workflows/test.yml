@@ -1,0 +1,21 @@
+# check 名 "pii-and-tests"(job の name)は branch protection の required status check と
+# 一致させている。job 名・workflow 構成を変えるときは保護設定側も同時に更新すること。
+# 外部 action は actions/checkout のみ・commit SHA 固定で参照する(サプライチェーン面の縮小)。
+# fetch-depth: 0 は range 走査(test-pii-scan.js --range)が全履歴と親 commit を要求するため。
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    name: pii-and-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: npm test
+      - name: range scan (PR commits)
+        if: github.event_name == 'pull_request'
+        run: node test-pii-scan.js --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"

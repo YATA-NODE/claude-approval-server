@@ -1,6 +1,9 @@
 /**
  * test-tab-sweep-state.js — タブ巡回・注入の状態機械テスト
  *
+ * 例示パスは一般名 /home/user に統一する(実在の環境値・実ユーザー名を書かない。
+ * 混入は test-pii-scan.js が npm test で fail させる)。
+ *
  * 純関数テスト(test-parse-dialog.js)では固定できない不変条件を、偽 TUI に対して
  * 実際に巡回・注入を回して確認する。中心は承認取り違えの防止:
  *

@@ -7,6 +7,9 @@
  * 使い方:
  *   node test-parse-dialog.js                       ← ユニットテストのみ
  *   node test-parse-dialog.js /tmp/pty.log          ← ユニットテスト + 実 PTY ログ解析
+ *
+ * 例示パスは一般名 /home/user に統一する(実在の環境値・実ユーザー名を書かない。
+ * 混入は test-pii-scan.js が npm test で fail させる)。
  */
 
 const fs = require('fs')
