@@ -638,10 +638,14 @@ console.log('\n[6p] parseDialog: 罫線未描画でも ●Tool 行を prompt に
     '   2. No',
     ' Esc to cancel',
   ].join('\n')
-  const r = parseDialog(buf)
+  // 罫線未描画 = ラベルも glue も成立しないため tool は確定せず、通常呼び出しは
+  // fail-close(null)になる。ここで検証したいのは「読めるとしても prompt に
+  // 混入しないか」なので screenOnly で読む(意味は変えず経路だけ変える)。
+  const r = parseDialog(buf, { screenOnly: true })
   assertEq('検出できる', !!r, true)
   assertEq('prompt は質問のみ(●Tool 行非混入)', r && r.prompt, 'Do you want to proceed?')
   assertEq('prompt に Authorization が混入しない', r && /Authorization/.test(r.prompt), false)
+  assertEq('通常呼び出しでは転送しない(tool 不明の fail-close)', parseDialog(buf), null)
 }
 
 // -------------------------------------------------------
@@ -660,10 +664,13 @@ console.log('\n[6q] parseDialog: hard-wrap した ●Tool 行の args 続き行�
     '   2. No',
     ' Esc to cancel',
   ].join('\n')
-  const r = parseDialog(buf)
+  // 罫線未描画 = tool 不明で通常呼び出しは fail-close(null)。ここで見たいのは
+  // 「読めるとしても prompt に args 続き行が混入しないか」なので screenOnly で読む。
+  const r = parseDialog(buf, { screenOnly: true })
   assertEq('検出できる', !!r, true)
   assertEq('prompt は質問のみ(args 続き行非混入)', r && r.prompt, 'Do you want to proceed?')
   assertEq('prompt に Authorization が混入しない', r && /Authorization/.test(r.prompt), false)
+  assertEq('通常呼び出しでは転送しない(tool 不明の fail-close)', parseDialog(buf), null)
 }
 
 // -------------------------------------------------------
@@ -680,10 +687,13 @@ console.log('\n[6r] parseDialog: ●Tool 行が →/❯ を含んでも args 続
     '   2. No',
     ' Esc to cancel',
   ].join('\n')
-  const r = parseDialog(buf)
+  // 罫線未描画 = tool 不明で通常呼び出しは fail-close(null)。ここで見たいのは
+  // 「読めるとしても prompt に args 続き行が混入しないか」なので screenOnly で読む。
+  const r = parseDialog(buf, { screenOnly: true })
   assertEq('検出できる', !!r, true)
   assertEq('prompt は質問のみ(→ を含む ●行でも非混入)', r && r.prompt, 'Do you want to proceed?')
   assertEq('prompt に Authorization が混入しない', r && /Authorization/.test(r.prompt), false)
+  assertEq('通常呼び出しでは転送しない(tool 不明の fail-close)', parseDialog(buf), null)
 }
 
 // -------------------------------------------------------
@@ -793,12 +803,14 @@ console.log('\n[6t] parseDialog: ) を含むコマンドを打ち切らない')
     ].join('\n')
   )
   assertEq('切れた本文を完全なコマンドとして出さない', cut && cut.args, 'echo ")" && ls')
-  // 閉じ括弧が未描画(折り返しの続きが未着)のフレームも同じく採用しない
-  const undrawn = parseDialog(
+  // 閉じ括弧が未描画(折り返しの続きが未着)のフレームも同じく採用しない。
+  // tool が確定しないため通常呼び出しは fail-close(null)になるので screenOnly で読む。
+  const undrawnBuf =
     ['● Bash(curl -X POST https://api.example.com/deploy -H', ' Do you want to proceed?', ' ❯ 1. Yes', '   2. No', ' Esc to cancel'].join('\n')
-  )
+  const undrawn = parseDialog(undrawnBuf, { screenOnly: true })
   assertEq('閉じ括弧が未描画なら args を出さない', undrawn && undrawn.args, '')
   assertEq('閉じ括弧が未描画ならツール断定もしない', undrawn && undrawn.tool, 'Unknown')
+  assertEq('閉じ括弧が未描画なら通常呼び出しでは転送しない', parseDialog(undrawnBuf), null)
 }
 
 // -------------------------------------------------------
@@ -3344,6 +3356,51 @@ console.log('\n[64] 外部契約: ラベル 2 本以上のフレームは転送�
     ' Esc to cancel',
   ].join('\n')
   assertEq('[64] ラベル 2 本フレームは転送不能(null)', parseDialog(twoLabels), null)
+}
+
+// -------------------------------------------------------
+// 65. MCP 承認枠の読み取り + 残る未知ツール枠の fail-close(実測 2026-08 の残余対応)。
+// -------------------------------------------------------
+console.log('\n[65] MCP 承認枠の読み取り / 未知ラベル枠の fail-close')
+{
+  // (a) 実機の MCP 承認枠(ラベル行 = 先頭空白 1 + `Tool use`)。BOX_LABELS に無いままだと
+  //     tool='Unknown' / args='' で残余転送されていた形。
+  const mcpBox = [
+    '────────────────',
+    ' Tool use',
+    '',
+    '   playwright - Navigate to a URL(url: "https://example.com/") (MCP)',
+    '   Navigate to a URL',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    "   2. Yes, and don't ask again this session (MCP)",
+    '   3. No, and tell Claude what to do differently (Esc)',
+    ' Esc to cancel',
+  ].join('\n')
+  const r = parseDialog(mcpBox)
+  assertEq('[65a] MCP 承認枠は転送できる', !!r, true)
+  assertEq('[65a] tool=MCP と読める', r && r.tool, 'MCP')
+  assertEq(
+    '[65a] args に対象行を含む',
+    r && r.args.includes('playwright - Navigate to a URL(url: "https://example.com/") (MCP)'),
+    true
+  )
+
+  // (b) ラベルも ●Tool 行も無い枠(BOX_LABELS のどれにも当たらない未知のツール種別)。
+  //     変更前実装ではここが tool='Unknown' / args='' のまま素通りしていた(反証テスト:
+  //     6f を外すと通常呼び出しが null でなくなり FAIL する)。
+  const unknownBox = [
+    '────────────────',
+    ' unknown-mcp-target',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('[65b] 未知ラベル枠は通常呼び出しでは転送しない', parseDialog(unknownBox), null)
+  const screenOnly = parseDialog(unknownBox, { screenOnly: true })
+  assertEq('[65b] screenOnly では読める(タブ巡回への影響ゼロを保つ)', !!screenOnly, true)
+  assertEq('[65b] screenOnly でも tool は断定しない', screenOnly && screenOnly.tool, 'Unknown')
 }
 
 // -------------------------------------------------------

@@ -54,14 +54,14 @@
     "barRowIsCliDrawn": false,
     "parseDialog": {
       "forwardable": true,
-      "tool": "Unknown",
-      "args": "",
+      "tool": "MCP",
+      "args": "playwright - Navigate to a URL(url: \"https://example.com/\") (MCP) Navigate to a URL",
       "optionsCount": 3
     },
     "parseDialogScreenOnly": {
       "readableAsDialog": true,
-      "tool": "Unknown",
-      "args": ""
+      "tool": "MCP",
+      "args": "playwright - Navigate to a URL(url: \"https://example.com/\") (MCP) Navigate to a URL"
     }
   },
   "digest": "1b3b1e4a6ce9eef5f2d0fd3987424e69b6ddbdb80f4ed6189407f29ab6cf4ddd"
