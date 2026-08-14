@@ -25,7 +25,7 @@
 | P7 | tool 結果をモデルが本文へ再出力(生 SGR / CR / OSC) | 画面には ESC が乗らず `[44m` 等が可視文字として残る。CR も上書きに作用していない | x≥2 | **partial**(下記)| `e2e-adv-tooloutput-viamodel.log`(`61ae8cb0930a4587`) |
 | P8 | tool 結果として**直接描画**(Bash の生 SGR) | **付く**(bg / bold / inverse すべて成立) | x≥5(`⎿` の後) | verified | `e2e-adv-tooloutput.log`(`b631cac8b2d7d3d5`) |
 | P9 | tool 結果の生 CR(同上) | 上書きとして作用せず除去 | x≥5 | verified | `e2e-adv-tooloutput.log`(同上) |
-| P10 | P8 の行が `readTabBarRow` / `barRowIsCliDrawn` に受理されるか | **受理される**(8 フレーム連続で `barRowIsCliDrawn()` = true) | x≥5 | verified | `e2e-raw-a2-tabbar-sgr-noecho.log`(`b4221e9cc05aefa2`) |
+| P10 | P8 の行が `readTabBarRow` / `barRowIsCliDrawn` に受理されるか | **受理される**。3 回の取得で候補フレーム **28/28 が `true`**(再現性あり) | x≥5 | verified | `e2e-raw-a2-tabbar-sgr-noecho.log`(`b4221e9cc05aefa2`)/ `e2e-raw-a2-repro1.log` / `e2e-raw-a2-repro2.log` |
 | P10b | 生 SGR **なし**で、CLI がプロンプトのエコー行に付けた背景色 | **受理される**(10 フレームで true)。行の中身は CLI 由来でない | x≥2 | verified | `e2e-raw-a-tabbar-sgr.log`(`482fe5d78acf0d2f`) |
 | P11 | CLI 自身の描画(承認枠・タブバー・確認画面) | **付く** | **罫線行は x=0 から端末幅いっぱい**(cols=80 でも x=0..79)。ラベル行は x=1 から | verified | `docs/attr-dump-*.md` 全 7 本 |
 

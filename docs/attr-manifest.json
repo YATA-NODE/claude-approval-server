@@ -260,6 +260,26 @@
             "kind": "敵対(printf の生 SGR。コマンド文字列が自己衝突する素朴 payload)"
           },
           {
+            "name": "e2e-raw-a2-repro1.log",
+            "bytes": 49894,
+            "sha256": "6db14253aea5f8984c4aa8ba6ef9693637e8ce445c402b4fee69c99f0fd39f8a",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "敵対(背景色ゲート突破・再現試行 1)"
+          },
+          {
+            "name": "e2e-raw-a2-repro2.log",
+            "bytes": 23383,
+            "sha256": "0f1b2443c821b57e6d935aa4448bd33d3675f9f9de0cdd01c3e0b89f65a6ddc5",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "敵対(背景色ゲート突破・再現試行 2)"
+          },
+          {
             "name": "e2e-raw-a2-tabbar-sgr-noecho.log",
             "bytes": 21212,
             "sha256": "b4221e9cc05aefa253d40a059469f109c946f3062e5d8d60e80e25dd5c710405",
@@ -278,6 +298,26 @@
               "rows": 40
             },
             "kind": "敵対(罫線の借用。CLI 由来の x=0 全幅罫線 + モデルが書いた偽選択肢行)"
+          },
+          {
+            "name": "e2e-raw-b-repro1.log",
+            "bytes": 74019,
+            "sha256": "d585aae08b9240f64e68304dad7445723e23d84e1f1c05f07f811d7fcf11aa4d",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "敵対(罫線の借用・再現試行 1)"
+          },
+          {
+            "name": "e2e-raw-b-repro2.log",
+            "bytes": 70465,
+            "sha256": "459c4f769854e79a80e43318dcab5c0e85cbe3dade1a6f99e860642bd2f794c1",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "敵対(罫線の借用・再現試行 2)"
           }
         ]
       }
