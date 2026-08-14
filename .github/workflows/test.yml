@@ -18,6 +18,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - run: npm ci
       - run: npm test
       - name: range scan (PR commits)
         if: github.event_name == 'pull_request'
