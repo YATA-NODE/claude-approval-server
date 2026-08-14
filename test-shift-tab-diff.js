@@ -1,17 +1,16 @@
 /**
- * test-shift-tab-diff.js — Shift+Tab 送出ゲート(shiftTabBlockedReason)の差分テスト
- * (旧スペック検証フェーズ)。
+ * test-shift-tab-diff.js — Shift+Tab 送出ゲート(shiftTabBlockedReason)の差分テスト。
  *
- * 目的: 次のコミットで shiftTabBlockedReason の分岐を変更する(借り返し早期許可を
- * 属性ゲートの後ろへ)前に、現行実装(v1.20.0 = commit 662aaa6 と分岐構造は不変。
- * このブランチでは barRowIsCliDrawn → barRowHasStyledCells の改名のみ)の許可集合が
- * 凍結スペック(下記 headAllowSpec)と一致することを CI で証明する。
+ * 目的: R2(借り返し早期許可を属性ゲートの後ろへ移す)の変更が、旧実装の許可集合の
+ * **部分集合**であり、縮小が「属性を確認できない借り返し」だけに限られることを
+ * 全列挙で固定する。旧スペック(headAllowSpec)の転記の正しさは、ゲート変更前の
+ * コミット(C3a)で `PRODUCTION_SPEC = headAllowSpec` として本テストが CI 緑だったこと
+ * が証明している(二相コミット。旧実装 = v1.20.0 = commit 662aaa6 と分岐構造同一)。
  *
  * フェーズ切替: production の許可集合は PRODUCTION_SPEC が指す関数で表す。
- * 現フェーズは `PRODUCTION_SPEC = headAllowSpec`。次のコミットで実装を newAllowSpec 側へ
- * 切り替えると同時に、ここも `PRODUCTION_SPEC = newAllowSpec` へ変える(C3b)。
- * 切替後も本ファイルの不変条件 (a)(b)(c) はそのまま意味を持つ(head/production の
- * どちらを指しているかに依存しない形で書いてある)。
+ * 現フェーズは `PRODUCTION_SPEC = newAllowSpec`(R2 適用後)。
+ * 本ファイルの不変条件 (a)(b)(c) はフェーズに依存しない形で書いてある
+ * (固定参照 headAllowSpec に対する部分集合・特徴づけ・非劣化)。
  *
  * 比較対象は実装から import せず独立定義する(spec の転記が正しいかを見るのが
  * このテストの意味なので、比較対象が別定義であることが要点)。
@@ -67,8 +66,10 @@ function newAllowSpec(s) {
   return s.dro && s.debt > 0 && s.barLine && s.footAbsent
 }
 
-// 現フェーズ: production ≡ headAllowSpec。C3b で newAllowSpec に切り替える。
-const PRODUCTION_SPEC = headAllowSpec
+// 現フェーズ: production ≡ newAllowSpec(R2 適用後)。
+// 前コミット(C3a)では headAllowSpec を指しており、その CI 緑が「旧スペック転記の正しさ」を
+// 証明している(二相コミット。切替忘れは本テストが FAIL して顕在化する)。
+const PRODUCTION_SPEC = newAllowSpec
 
 // -------------------------------------------------------
 // フェーズ非依存の不変条件。フレーム毎に console へ出すと数万行になるため、
@@ -279,7 +280,9 @@ function evalProduction(s, viewport) {
     assertEq(`${label}: 例外を投げない`, threw, null)
     assertEq(`${label}: headAllowSpec`, headAllowSpec(s), s.expectHead)
     assertEq(`${label}: newAllowSpec`, newAllowSpec(s), s.expectNew)
-    assertEq(`${label}: production(実呼出し) ≡ PRODUCTION_SPEC(現フェーズ=head)`, productionAllow, s.expectHead)
+    // 比較先は必ず PRODUCTION_SPEC(s)(expectHead/expectNew をここに直書きすると
+    // フェーズ切替に追従せず、切替コミットで偽 FAIL / 偽 PASS になる)。
+    assertEq(`${label}: production(実呼出し) ≡ PRODUCTION_SPEC`, productionAllow, PRODUCTION_SPEC(s))
     for (const v of invariantViolations(s, productionAllow)) {
       assertEq(`${label}: 不変条件違反なし(${v})`, false, true)
     }

@@ -1542,11 +1542,12 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
   }
 
   // -------------------------------------------------------
-  console.log('\n[S22] 借りを返す戻り一手は属性ゲートより先に評価する')
+  console.log('\n[S22] 借り返しにも属性ゲートを必須化する(R2)')
   // -------------------------------------------------------
-  // 確認画面でタブバー行の背景色が読めないと、属性ゲートが先に立って「戻る一手」に
-  // 到達できず、未回答のままフォーカスが Submit に残る。借りは wrapper 内部変数で
-  // 外から作れないので、借りを返すだけの一手に CLI 描画の証明を要求する必要はない。
+  // かつては「借りは wrapper 内部変数で外から作れない」を根拠に、借り返しだけ属性ゲート
+  // より先に許可していた。だが送出の可否を決めるのは送出先の画面で、テキストだけでは
+  // 識別できない(偽バー行は会話ログに書ける)。属性を確認できないフレームでは借り返し
+  // でも送らない。代償(戻れない)は sweepTabs の postPcNotice が PC 操作誘導で受ける。
   {
     const confirm = ['☒ T1 ☒ T2 ✔ Submit →', 'Submit your answers?']
     const tui = plainTui(confirm) // styledSpan なし = 属性が読めない画面
@@ -1555,15 +1556,32 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     assertEq('前提: バー行は見えている', findTabBarLine(__test.getViewportText()) !== null, true)
     assertEq('前提: 確認画面は parse できない', parseDialog(__test.getViewportText()), null)
     const v = () => __test.getViewportText()
-    assertEq('借りがあれば戻れる', __test.shiftTabBlockedReason(v(), { debtReturnOk: true }), null)
     assertEq(
-      '巡回の開始判定では借りを理由に緩めない',
+      '属性が読めなければ借りがあっても送らない(R2 の縮小そのもの)',
+      __test.shiftTabBlockedReason(v(), { debtReturnOk: true }) !== null,
+      true
+    )
+    assertEq(
+      '巡回の開始判定でも同様に送らない',
       __test.shiftTabBlockedReason(v()) !== null,
       true
     )
+
+    // 可用性の維持: 属性が読める確認画面なら、借り返しは従来どおり通る
+    // (実機の確認画面は styled=10..16 を持つ = 通常運用の帰り道は塞がない)。
+    const tuiStyled = plainTui(confirm)
+    tuiStyled.styledSpan = () => ({ row: 0, from: 0, to: confirm[0].length - 1 })
+    install(tuiStyled)
+    __test.setForwardTabDebt(2)
+    assertEq('前提: バー行は属性を持つ', __test.barRowHasStyledCells(), true)
+    assertEq(
+      '属性が読めれば借りで戻れる(可用性維持)',
+      __test.shiftTabBlockedReason(v(), { debtReturnOk: true }),
+      null
+    )
     __test.setForwardTabDebt(0)
     assertEq(
-      '借りが無ければ属性ゲートが効く',
+      '属性が読めても借りが無ければ送らない(フッタ無し画面)',
       __test.shiftTabBlockedReason(v(), { debtReturnOk: true }) !== null,
       true
     )
