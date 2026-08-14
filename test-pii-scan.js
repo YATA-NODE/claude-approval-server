@@ -32,6 +32,9 @@ const ALLOWLIST = new Set(['user', 'username', 'alice', 'example', 'xxxxxx', 'bo
 // only passes when BOTH the path is listed AND its current sha256 matches the ledger
 // value; otherwise (unlisted path, or listed path with changed content) it still fails
 // closed as kind=binary, same as before this ledger existed.
+// When adding/updating an entry: visual review is not enough — also scan the raw bytes
+// for text chunks and path-like strings (e.g. strip NULs, then grep the 4 home-path
+// forms and PNG tEXt/iTXt/zTXt markers) before recording the new hash.
 const KNOWN_BINARY_LEDGER = new Map([
   ['docs/images/approval-panel-mobile.png', '765d60874536bdbfec45138e231877741aabcf1a5ca2515b8b7f9763c182620b'],
   ['docs/images/approval-panel-multi-text.png', 'f656c8c6dade576e526621d207bc808ccfc56f25fad51d6613768aa9abf8d2bd'],
