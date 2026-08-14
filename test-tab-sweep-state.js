@@ -2025,25 +2025,25 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
   console.log('\n[N11] httpRequestReal の応答サイズ上限とマルチバイト応答')
   // -------------------------------------------------------
   {
-    // 経路ごとに応答を切り替える実サーバー: /big は 2MB(上限 1MB 超)を即送、
-    // /mb はマルチバイト JSON を 2 チャンクに割って送る(UTF-8 の文字境界とチャンク
-    // 境界をずらし、chunk 単位の暗黙 toString なら破損する形)。
-    // postPcNotice は POST /request 固定のため、ケース切替はサーバー側の呼出回数で行う
-    // (1 回目 = 2MB / 2 回目 = マルチバイト分割)。stub は張らない = httpRequestReal 実物を通す。
-    const mbBody = Buffer.from(JSON.stringify({ id: 'abc', msg: 'こんにちは世界' }), 'utf8')
+    // URL でケースを切り替える実サーバー(stub は張らない = httpRequestReal 実物を通す):
+    //   /request = 2MB(postPcNotice 経由の統合ケース)
+    //   /mb      = マルチバイト JSON を「こ」の途中の byte で 2 チャンクに割って送る
+    //   /exact   = ちょうど MAX_RESPONSE_BYTES / /over = MAX_RESPONSE_BYTES + 1
+    const mbText = 'こんにちは世界'
+    const mbBody = Buffer.from(JSON.stringify({ id: 'abc', msg: mbText }), 'utf8')
     const splitAt = mbBody.indexOf(Buffer.from('こ', 'utf8')[0]) + 1 // マルチバイトの途中で割る
-    let call = 0
     const sizeServer = http.createServer((req, res) => {
       req.socket.on('error', () => {})
-      call++
-      if (call === 1) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end('a'.repeat(2 * 1024 * 1024))
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      if (req.url === '/mb') {
+        res.write(mbBody.subarray(0, splitAt))
+        setTimeout(() => res.end(mbBody.subarray(splitAt)), 30)
         return
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.write(mbBody.subarray(0, splitAt))
-      setTimeout(() => res.end(mbBody.subarray(splitAt)), 30)
+      const MAX = 1024 * 1024 // getHttpConstants と一致することは下で assert
+      if (req.url === '/exact') return res.end('a'.repeat(MAX))
+      if (req.url === '/over') return res.end('a'.repeat(MAX + 1))
+      res.end('a'.repeat(2 * MAX)) // /request(postPcNotice 統合ケース)
     })
     await new Promise((resolve) => sizeServer.listen(0, '127.0.0.1', resolve))
     const port2 = sizeServer.address().port
@@ -2051,20 +2051,30 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     process.env.APPROVAL_PORT = String(port2)
     delete require.cache[require.resolve('./claude-wrapper.js')]
     const fresh2 = require('./claude-wrapper.js')
+    assertEq('テスト内 MAX とproduction 定数が一致', fresh2.__test.getHttpConstants().MAX_RESPONSE_BYTES, 1024 * 1024)
 
-    // 1 回目: 2MB 応答 → 'response too large' で reject → postPcNotice は内部 catch で
+    // 統合ケース: 2MB 応答 → 'response too large' で reject → postPcNotice は内部 catch で
     // 吸収し予約解除(= activeNotice null)。resolve 側に流れない(id 保存されない)。
     await fresh2.__test.postPcNotice('rewind-failed')
     assertEq('2MB 応答は受理されない(activeNotice は null に復旧)', fresh2.__test.getActiveNotice(), null)
 
-    // 2 回目: cooldown を越えてマルチバイト分割応答 → 破損せず JSON.parse でき、
-    // id が保存される(chunk 境界での暗黙 toString なら「こ」が壊れ parse 失敗になる)。
-    let mono = 10_000_000
-    fresh2.__test.setNoticeMonoNow(() => mono)
-    mono += 120_000
-    await fresh2.__test.postPcNotice('rewind-failed')
-    const got = fresh2.__test.getActiveNotice()
-    assertEq('マルチバイト分割応答でも id が正しく読める', got && got.id, 'abc')
+    // マルチバイト分割: msg の原文一致まで確認する(id だけの検証では、chunk 単位の
+    // 暗黙 toString で「こ」が U+FFFD に化けても JSON.parse と id 保存は成功して
+    // しまい、破損を検出できない)。
+    const mbParsed = await fresh2.__test.httpRequestReal('GET', '/mb', null, 5000)
+    assertEq('マルチバイト分割応答の msg が原文と一致(U+FFFD 化しない)', mbParsed && mbParsed.msg, mbText)
+    assertEq('id も読める', mbParsed && mbParsed.id, 'abc')
+
+    // サイズ境界: ちょうど MAX は受理(非 JSON なので raw string で resolve)、+1 byte は拒否。
+    const exact = await fresh2.__test.httpRequestReal('GET', '/exact', null, 5000)
+    assertEq('ちょうど MAX_RESPONSE_BYTES は受理される', typeof exact === 'string' && exact.length, 1024 * 1024)
+    let overErr = null
+    try {
+      await fresh2.__test.httpRequestReal('GET', '/over', null, 5000)
+    } catch (e) {
+      overErr = e
+    }
+    assertEq('MAX_RESPONSE_BYTES + 1 は拒否される', overErr && overErr.message, 'response too large')
 
     sizeServer.close()
     if (savedPort2 === undefined) delete process.env.APPROVAL_PORT

@@ -2323,6 +2323,10 @@ if (typeof module !== 'undefined') {
         noticeMonoNowImpl = fn
       },
       getNoticeConstants: () => ({ NOTICE_COOLDOWN_MS, NOTICE_TTL_MS }),
+      // 実 HTTP 層の直接検証用(サイズ上限の境界値・マルチバイトデコードをテストで
+      // 観測可能にする。stub を張らずに実物を呼ぶ)。
+      httpRequestReal: (...a) => httpRequestReal(...a),
+      getHttpConstants: () => ({ MAX_RESPONSE_BYTES }),
       sanitizeLogMessage: (s) => sanitizeLogMessage(s),
       clampRequestTimeoutMs: (ms) => clampRequestTimeoutMs(ms),
     },
