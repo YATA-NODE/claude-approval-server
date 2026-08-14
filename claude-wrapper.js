@@ -209,19 +209,25 @@ function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
         timeout: ms,
       },
       (res) => {
-        let buf = ''
+        // chunk は Buffer のまま蓄積し、デコードは完了時に 1 回だけ行う。chunk ごとに
+        // 文字列へ暗黙変換すると、UTF-8 のマルチバイト文字が chunk 境界で破損しうる。
+        const chunks = []
+        let receivedBytes = 0
         res.on('data', (d) => {
-          buf += d
-          // 応答サイズの上限。deadline は時間の防壁であってサイズの防壁ではない
-          // (期限内に高速送信される巨大応答はメモリへ無制限に積める)。正当な応答は
-          // queue 全件でも数十 KB(全フィールドが登録時に clip 済み)なので 1MB は十分。
-          if (buf.length > MAX_RESPONSE_BYTES) {
+          // 応答サイズの上限(バイト数で判定。文字数だとマルチバイト応答が実バイトで
+          // 上限を超えて積める)。deadline は時間の防壁であってサイズの防壁ではない。
+          // 正当な応答は queue 全件でも数十 KB(全フィールドが登録時に clip 済み)。
+          receivedBytes += d.length
+          if (receivedBytes > MAX_RESPONSE_BYTES) {
             destroyReq(new Error('response too large'))
             finalize(() => reject(new Error('response too large')))
+            return
           }
+          chunks.push(d)
         })
         // 解除は応答本文の完全受信後のみ(ヘッダー受信時に解除しない)。
         res.on('end', () => {
+          const buf = Buffer.concat(chunks).toString('utf8')
           if (res.statusCode >= 400) {
             // statusCode を error に持たせ、呼び出し側で 404(登録喪失)等を判別可能にする。
             // message へ載せる応答本文は上限付き抜粋(全文を error に運ぶと、そのまま

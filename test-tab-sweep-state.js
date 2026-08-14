@@ -2022,6 +2022,57 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
   }
 
   // -------------------------------------------------------
+  console.log('\n[N11] httpRequestReal の応答サイズ上限とマルチバイト応答')
+  // -------------------------------------------------------
+  {
+    // 経路ごとに応答を切り替える実サーバー: /big は 2MB(上限 1MB 超)を即送、
+    // /mb はマルチバイト JSON を 2 チャンクに割って送る(UTF-8 の文字境界とチャンク
+    // 境界をずらし、chunk 単位の暗黙 toString なら破損する形)。
+    // postPcNotice は POST /request 固定のため、ケース切替はサーバー側の呼出回数で行う
+    // (1 回目 = 2MB / 2 回目 = マルチバイト分割)。stub は張らない = httpRequestReal 実物を通す。
+    const mbBody = Buffer.from(JSON.stringify({ id: 'abc', msg: 'こんにちは世界' }), 'utf8')
+    const splitAt = mbBody.indexOf(Buffer.from('こ', 'utf8')[0]) + 1 // マルチバイトの途中で割る
+    let call = 0
+    const sizeServer = http.createServer((req, res) => {
+      req.socket.on('error', () => {})
+      call++
+      if (call === 1) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end('a'.repeat(2 * 1024 * 1024))
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.write(mbBody.subarray(0, splitAt))
+      setTimeout(() => res.end(mbBody.subarray(splitAt)), 30)
+    })
+    await new Promise((resolve) => sizeServer.listen(0, '127.0.0.1', resolve))
+    const port2 = sizeServer.address().port
+    const savedPort2 = process.env.APPROVAL_PORT
+    process.env.APPROVAL_PORT = String(port2)
+    delete require.cache[require.resolve('./claude-wrapper.js')]
+    const fresh2 = require('./claude-wrapper.js')
+
+    // 1 回目: 2MB 応答 → 'response too large' で reject → postPcNotice は内部 catch で
+    // 吸収し予約解除(= activeNotice null)。resolve 側に流れない(id 保存されない)。
+    await fresh2.__test.postPcNotice('rewind-failed')
+    assertEq('2MB 応答は受理されない(activeNotice は null に復旧)', fresh2.__test.getActiveNotice(), null)
+
+    // 2 回目: cooldown を越えてマルチバイト分割応答 → 破損せず JSON.parse でき、
+    // id が保存される(chunk 境界での暗黙 toString なら「こ」が壊れ parse 失敗になる)。
+    let mono = 10_000_000
+    fresh2.__test.setNoticeMonoNow(() => mono)
+    mono += 120_000
+    await fresh2.__test.postPcNotice('rewind-failed')
+    const got = fresh2.__test.getActiveNotice()
+    assertEq('マルチバイト分割応答でも id が正しく読める', got && got.id, 'abc')
+
+    sizeServer.close()
+    if (savedPort2 === undefined) delete process.env.APPROVAL_PORT
+    else process.env.APPROVAL_PORT = savedPort2
+    delete require.cache[require.resolve('./claude-wrapper.js')]
+  }
+
+  // -------------------------------------------------------
   console.log('\n────────────────────────────────────────')
   console.log(`  passed: ${passed}, failed: ${failed}`)
   console.log('────────────────────────────────────────\n')
