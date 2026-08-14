@@ -121,6 +121,20 @@ function isCiGuardEnforced() {
   return res.status !== 0
 }
 
+function isInvalidRangeArgEnforced() {
+  const res = spawnSync(process.execPath, [__filename, '--range', 'invalid'], {
+    cwd: REPO_ROOT,
+    env: process.env,
+    encoding: 'utf8',
+  })
+  if (res.status === 0) return false
+  // Must fail via the early argv-validation exit, not merely coincide with a non-zero
+  // exit that this repo's real tracked content would produce anyway (this repo currently
+  // has real violations, so exit-code-alone is not proof the argv check itself fired).
+  if (res.stdout && res.stdout.includes('scanned files=')) return false
+  return true
+}
+
 function runSelfTest() {
   let ok = true
   const problems = []
@@ -234,6 +248,48 @@ function runSelfTest() {
       }
     }
 
+    // Symlink target detection: unit-level probes against findSymlinkTargetViolations()
+    // directly (no real on-disk symlink / temp git repo needed). Fragment-joined for the
+    // same self-collision reason as buildRejectCases().
+    {
+      const symName = ['zz', 'synth9'].join('')
+      const symTarget = ['', 'home', symName].join('/')
+      const hits = findSymlinkTargetViolations('fake/symlink/a', symTarget, {
+        localExtra: false,
+        homeDir: '',
+        username: '',
+      })
+      if (!hits.some((v) => v.kind === 'content' && v.pattern === 'posix' && v.name === symName)) {
+        ok = false
+        problems.push('symlink target scan: home-path-shaped target not detected')
+      }
+
+      const allowedTarget = ['', 'home', 'alice'].join('/')
+      const allowedHits = findSymlinkTargetViolations('fake/symlink/b', allowedTarget, {
+        localExtra: false,
+        homeDir: '',
+        username: '',
+      })
+      if (allowedHits.length !== 0) {
+        ok = false
+        problems.push('symlink target scan: allowlisted target incorrectly flagged')
+      }
+
+      // self-value(homeDir) path, using synthetic (non-real) opts so this probe never
+      // touches the real OS homedir/username. Target intentionally does not match any of
+      // the 4 shape regexes, isolating the raw-substring self-value branch.
+      const plainTarget = ['', 'mnt', 'x', 'shared'].join('/')
+      const selfHits = findSymlinkTargetViolations('fake/symlink/c', plainTarget, {
+        localExtra: true,
+        homeDir: plainTarget,
+        username: 'no-match-sentinel',
+      })
+      if (!selfHits.some((v) => v.pattern === 'self-value')) {
+        ok = false
+        problems.push('symlink target scan: self-value(homeDir) not detected in target')
+      }
+    }
+
     // Non-exposure: none of the reject-case names may appear in the captured output of
     // the real reportViolation() path exercised above.
     const joined = buffer.join('\n')
@@ -257,6 +313,11 @@ function runSelfTest() {
     problems.push('CI guard subprocess did not exit non-zero')
   }
 
+  if (!isInvalidRangeArgEnforced()) {
+    ok = false
+    problems.push('invalid --range value did not fail closed via the early argv-validation exit')
+  }
+
   if (!ok) for (const p of problems) console.error(`[self-test] ${p}`)
   return ok
 }
@@ -265,6 +326,26 @@ function runSelfTest() {
 // Step 2 + 3: HEAD walk (tracked file paths + contents) with a local-only
 // "self-value" layer (own homedir literal / own username inside a path shape).
 // ---------------------------------------------------------------------------
+
+// Pure detection logic for a tracked symlink: the git blob content of a symlink IS the
+// link-target string (not the bytes of whatever it points to), so that string is what gets
+// scanned -- readFileSync would silently follow the link (or throw on a dangling target),
+// missing the actual tracked content entirely. Kept separate from scanHead()'s git/fs I/O
+// so the self-test can exercise it directly without needing a real on-disk symlink.
+function findSymlinkTargetViolations(relPath, target, opts) {
+  const violations = []
+  for (const h of findHomePathIdentifiers(target)) {
+    if (!ALLOWLIST.has(h.name)) {
+      violations.push({ kind: 'content', pattern: h.form, name: h.name, path: relPath })
+    } else if (opts.localExtra && h.name === opts.username) {
+      violations.push({ kind: 'content', pattern: 'self-value', name: h.name, path: relPath })
+    }
+  }
+  if (opts.localExtra && opts.homeDir && target.includes(opts.homeDir)) {
+    violations.push({ kind: 'content', pattern: 'self-value', path: relPath })
+  }
+  return violations
+}
 
 function scanHead() {
   const localExtra = !isCI()
@@ -292,11 +373,38 @@ function scanHead() {
     }
 
     const abs = path.join(REPO_ROOT, relPath)
+    let lst
+    try {
+      lst = fs.lstatSync(abs)
+    } catch (e) {
+      reportViolation('binary', 'unreadable', { path: relPath })
+      continue
+    }
+
+    if (lst.isSymbolicLink()) {
+      let target
+      try {
+        target = fs.readlinkSync(abs)
+      } catch (e) {
+        reportViolation('binary', 'unreadable', { path: relPath })
+        continue
+      }
+      for (const v of findSymlinkTargetViolations(relPath, target, { localExtra, homeDir, username })) {
+        reportViolation(v.kind, v.pattern, { name: v.name, path: v.path })
+      }
+      continue
+    }
+
     let buf
     try {
       buf = fs.readFileSync(abs)
     } catch (e) {
-      continue // unreadable (e.g. dangling symlink); not a PII finding
+      // Unlike the old behavior, an unreadable regular tracked file fails closed instead
+      // of being silently skipped (a real symlink is handled above via readlinkSync, which
+      // does not require the target to exist, so this branch is now only reached for
+      // genuine read failures on a non-symlink entry, e.g. permissions).
+      reportViolation('binary', 'unreadable', { path: relPath })
+      continue
     }
     if (buf.includes(0)) {
       if (!isKnownBinary(relPath, buf)) {
@@ -336,18 +444,42 @@ function scanHead() {
 // Step 4: --range <base>..<head> commit/diff scan (opt-in)
 // ---------------------------------------------------------------------------
 
-function parseRangeArg(argv) {
-  for (let i = 0; i < argv.length; i++) {
-    let val = null
-    if (argv[i] === '--range' && argv[i + 1] !== undefined) val = argv[i + 1]
-    else if (argv[i].startsWith('--range=')) val = argv[i].slice('--range='.length)
-    if (val !== null) {
-      const idx = val.indexOf('..')
-      if (idx === -1) return null
-      return { base: val.slice(0, idx), head: val.slice(idx + 2) }
+// Strict CLI parsing: anything not recognized, or a --range value that isn't a well-formed
+// <base>..<head> (missing '..', empty base, empty head), is a usage error -- not silently
+// treated as "no --range given". SHA/ref values are not secret and may appear in the error.
+function parseArgs(argv) {
+  let range = null
+  let i = 0
+  while (i < argv.length) {
+    const arg = argv[i]
+    let rawValue
+    let step
+    if (arg === '--range') {
+      if (i + 1 >= argv.length) {
+        return { ok: false, message: '--range requires a value (<base>..<head>)' }
+      }
+      rawValue = argv[i + 1]
+      step = 2
+    } else if (arg.startsWith('--range=')) {
+      rawValue = arg.slice('--range='.length)
+      step = 1
+    } else {
+      return { ok: false, message: `unrecognized argument: ${arg}` }
     }
+
+    const idx = rawValue.indexOf('..')
+    if (idx === -1) {
+      return { ok: false, message: `--range value must contain '..': ${rawValue}` }
+    }
+    const base = rawValue.slice(0, idx)
+    const head = rawValue.slice(idx + 2)
+    if (!base || !head) {
+      return { ok: false, message: `--range value must have a non-empty base and head: ${rawValue}` }
+    }
+    range = { base, head }
+    i += step
   }
-  return null
+  return { ok: true, range }
 }
 
 function scanRange(base, head) {
@@ -498,14 +630,19 @@ function computePolicyVersion() {
 // ---------------------------------------------------------------------------
 
 function main() {
+  const parsedArgs = parseArgs(process.argv.slice(2))
+  if (!parsedArgs.ok) {
+    console.error(`pii-scan: ${parsedArgs.message}`)
+    process.exit(1)
+  }
+
   const selfTestOk = runSelfTest()
 
   const scannedCount = scanHead()
 
-  const rangeArg = parseRangeArg(process.argv.slice(2))
   let rangeOk = true
-  if (rangeArg) {
-    rangeOk = scanRange(rangeArg.base, rangeArg.head)
+  if (parsedArgs.range) {
+    rangeOk = scanRange(parsedArgs.range.base, parsedArgs.range.head)
   }
 
   console.log(`scanned files=${scannedCount} violations=${violationCount}`)
