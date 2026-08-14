@@ -318,6 +318,26 @@
               "rows": 40
             },
             "kind": "敵対(罫線の借用・再現試行 2)"
+          },
+          {
+            "name": "e2e-raw-mcp-gdrive-list.log",
+            "bytes": 19227,
+            "sha256": "cd21f9c096dfbb2607f7dda5e6faa14a4e6293ef55c58432996f0d2572e1d1ee",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "真正(MCP / Google Drive list_recent_files。ラベル行 = \" Tool use\")"
+          },
+          {
+            "name": "e2e-raw-mcp-pw-snapshot.log",
+            "bytes": 17401,
+            "sha256": "016c28af14bb12fad45f9d7f71c29f3221b66c363adcfcc233d918a4996d310e",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "真正(MCP / playwright browser_snapshot。ラベル行 = \" Tool use\")"
           }
         ]
       }
