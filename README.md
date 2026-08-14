@@ -295,12 +295,13 @@ function codex {
 > ⚠️ **権限拡張の注記**: 上記の防御層により注入経路は厳格にホワイトリスト化されていますが、本ツールの認証トークン(`approval-config.json` 内の値)を保持している人は **`Type something` 経路、および codex の Tab notes(自由記入)経路を通じて対象 CLI に任意テキストを送信できます**。トークンの取り扱い(共有しない / セッション後の `approval-config.json` 削除)に注意してください。送信した本文は同一ブラウザのメモリ内に最大 1 時間残ります(履歴展開で表示可能)。共有端末で使う場合は使用後にタブを閉じてください。
 
 > ⚠️ **残っているリスクの注記**: 上の防御層は「スマホから何が送れるか」を絞るものです。
-> これとは別に、**ラベルの無い承認枠（`WebFetch` / MCP 系）では、スマホに出る表示を
-> すり替えられる余地**と、**対象を読み取れないため別の承認と同一視される余地**が残っています。
-> 内容と現時点の運用（ラベルの無い枠のうち実測で転送されたのは MCP 系です。MCP の承認は PC 側で
-> 内容を確認してから答えてください。`WebFetch` の枠は実測では検出されずスマホに出ませんでした）は
+> これとは別に、**ラベルの無い承認枠（`WebFetch` 系）では、スマホに出る表示をすり替えられる
+> 余地**が残っています（唯一の手掛かりである `● Tool(...)` 行は、モデルが作れるため）。
+> `WebFetch` の枠は実測では検出されずそもそもスマホに出ません。MCP の承認枠は v1.20.0 から
+> ラベル行（`Tool use`）で同定して対象を読み取るようになり、同定できない枠は転送されなくなり
+> ました（fail-close）。内容と現時点の運用は
 > [承認の表示内容は「承認枠の中身」から読みます](#承認の表示内容は承認枠の中身から読みます)
-> の「このバージョンで塞ぎ切れていないこと」③⑩ を参照してください。
+> の「このバージョンで塞ぎ切れていないこと」③ を参照してください。
 
 ## スマートフォン UI の機能
 
@@ -376,7 +377,7 @@ OS ごとのビルド環境を確認してください。
 
 ### ツール名が `[Unknown]` と表示されることがある
 
-PTY はダイアログを複数フレームに分けて描画します。ツール名を含む `● Tool(args)` 行がプロンプトより遅れて届くと、先に検出した「プロンプトのみ」のフレームで依頼を登録し、同一ダイアログの再描画は dedup で無視するため、サーバー側の表示は `[Unknown]` のままになります。承認・拒否の動作には影響しません。重複登録の発生よりもこちらを許容する設計です。
+**v1.19.x までの挙動です。** PTY はダイアログを複数フレームに分けて描画します。ツール名を含む `● Tool(args)` 行がプロンプトより遅れて届くと、先に検出した「プロンプトのみ」のフレームで依頼を登録し、同一ダイアログの再描画は dedup で無視するため、サーバー側の表示は `[Unknown]` のままになります。承認・拒否の動作には影響しません。重複登録の発生よりもこちらを許容する設計です。**v1.20.0 からはツールを同定できないフレームを転送しないため、新規の依頼が `[Unknown]` になることはありません。**
 
 ### スマホ側のオプション表示で空白が詰まって見える
 
@@ -404,7 +405,24 @@ v1.19.0 以降、**巡回はタブバーが出現時から動いていないと�
 
 なお v1.19.0 以降、タブバーは画面下端のフッタを起点に探します。画面にタブバーらしい行が複数見えて本物を特定できないときは、キーを 1 バイトも送らずに転送を諦めます（PC で回答してください）。この状態はラッパーのログに `tab bar ambiguous` として記録されます。
 
-さらに v1.19.0 以降、**巡回は「CLI が描いたタブバー」が見えているときだけ始まります**。会話ログにタブバーらしい行とタブ移動のヒントが流れているだけの状態ではキーを一切送りません（Claude が出力した文章だけで巡回が始まり、通常の入力欄へ Shift+Tab が送られるのを防ぐため）。判定にはタブバー行のセル属性（選択中タブの背景色）を使うため、**背景色を報告しない端末ではタブ式がスマホへ転送されません**（PC で回答してください）。この状態はログに `タブバーが CLI 描画でない` として記録されます。
+さらに v1.19.0 以降、**巡回は「タブバー行に背景色のセルがある」ときだけ始まります**。会話ログに**背景色を持たない**タブバーらしい行とタブ移動のヒントが流れているだけの状態ではキーを一切送りません（Claude が素のテキストや markdown 装飾で出した文章だけで巡回が始まり、通常の入力欄へ Shift+Tab が送られるのを防ぐため）。**ただし Bash の `printf` で生の ANSI エスケープを通した経路では、この条件が成立することを実測しました**（他のツール・他の出力経路は未確認。下の「この判定の保証範囲」を参照）。判定にはタブバー行のセル属性（選択中タブの背景色）を使うため、**背景色を報告しない端末ではタブ式がスマホへ転送されません**（PC で回答してください）。この状態はログに `タブバーが CLI 描画でない` として記録されます。
+
+> **この判定の保証範囲（2026-08-14 の実測で更新）**
+>
+> **背景色のセルがあることは「真正な CLI のタブバー UI 行」である証明にはなりません。** この判定は、真正なタブバー行と「背景色が付いた別の行」を区別できません。実測環境では、モデルが通常の会話ログへ出した素のテキストや markdown 装飾だけでは判定を通せませんでしたが、**同じ文字列でも背景色付きの行として描かれれば通ります**。確認した 2 経路:
+>
+> | 経路 | 誰が中身を決めるか | 判定の突破 | 実際のキー送信 |
+> |---|---|---|---|
+> | ① Bash の `printf` で生の ANSI エスケープ（背景色）を実行結果として画面へ通す | **モデル**（実行内容を書くのはモデル） | **確認済み** | **未確認** |
+> | ② 色付き出力を使わず、CLI 自身が背景色付きで描くプロンプトのエコー行 | 利用者（あなたが打った文字列） | 確認済み | 未確認 |
+>
+> ①は**モデルが中身を決められる**ので攻撃面になりえますが、確認できたのは「判定を突破するところまで」で、そこから実際にキーが送られるところまでは確認していません。
+>
+> ②は攻撃経路ではありませんが、**「背景色 = 真正なタブバー」という前提が成り立たないことの反証**です。
+>
+> **どこまで実測したか（誤読を避けるため）**: 確認したのは **録画を再生してこの判定（`barRowIsCliDrawn`）が `true` になるところまで**です。**実機で巡回が起動して実際にキーが送られるところまでは確認していません**（別の条件も通る必要があるため）。また、背景色があればどんな行でも通るわけではなく、その行が**タブ印を 2 つ以上含み `Submit` を含み選択肢行でない**という条件も同時に満たし、かつ画面内で**候補が 1 本だけ**である必要があります。測定環境は Claude Code 2.1.226 系 / WSL2 / `TERM=xterm-256color` / node v20 / `@xterm/headless` 6.0.0 の 1 つのみ。他の制御列（DCS / C1 / BS など）、他の tool 経由の出力、他の CLI バージョンは未測定です。
+>
+> ⚠️ **未信頼の内容を扱う場合の推奨**: モデルが読む・実行するものに他人が用意した内容（外部から取得したファイル、Web の内容、他人のリポジトリ等）が混ざりうる運用、つまり**プロンプトインジェクションを想定する場合**は、**`dialogDetection.tabSweep` に `false` を設定して巡回を止め、タブ式の質問は PC で回答してください**。対象は 2 経路あります。**claude 側**は上の経路①（モデルが色付き出力でこの判定を通せる)、**codex 側**は「既知の制約」⑤のとおり**巡回の起動判断に CLI 描画の確認そのものが無く画面の文字列だけに依存する**ため、いずれも同じ設定で止めます。
 
 ```json
 {
@@ -424,7 +442,9 @@ v1.19.0 以降、ツール名とコマンドは **承認枠の中に描かれた
 
 **承認枠の同定が曖昧なフレームは転送しません**。罫線もラベルもモデルが本文に書ける文字なので、コマンド本文の中に「罫線だけの行 + `Bash command` + 無害なコマンド」を書くと枠の境界をずらせます（実際のコマンドが 1 文字も出ないまま承認できました）。**ラベルらしい行が 2 つ以上見えるフレームは転送しません**。また 500 文字を超えるコマンド本文も転送しません（切ると別コマンドが同じ表示・同じ依頼に潰れるため）。いずれも PC 側では従来どおり回答できます。
 
-**このバージョンで塞ぎ切れていないこと**: ①端末の折り返しで作られる「偽の行頭」②タブバーが CLI 描画かの判定が背景色依存であること ③**ラベルの無い承認枠（`WebFetch` / MCP 系）では `● Tool(...)` 行が唯一の手掛かりで、その行はモデルが作れるため表示をすり替えられる余地が残ること**（ただし画面のどこかに `Bash command` 等の見出し語が 1 行でも残っていると、枠の切り出し失敗と区別できないため転送しません。この見出し語の検知は画面＝表示領域 + スクロールバック 40 行の範囲に限られ、本文を長くして見出し語を画面外へ押し出すとこの fail-close は外れます＝実行確認、ただしそこから実機で表示すり替えに至るかは未確認。実機で確認した範囲では `WebFetch` の枠は終端マーカーを持たずそもそも検出されず、MCP の枠は検出されるがツール名と対象を読み取れません。いずれも 1 例ずつの観測）④承認枠の同定がテキストのみに依存していること（セル属性による同定は次のリリース）⑤巡回中の「戻す一手」だけは属性を確認せずに送られること(claude)。**codex の複数質問では巡回キー(←/→)に CLI 描画の確認そのものが無いこと**(タブバーという CLI 描画の証拠を持たないため、巡回の起動判断が画面の文字列だけに依存する) ⑥説明行を含めて表示するため、描画の進行中に依頼が出し直されることがあること ⑦**折り返した質問文の前半がコマンド本文として表示され、端末幅が変わると同じ承認が別依頼として出し直されうること** ⑧**コマンド本文の引用符（`"` / `'`）が奇数個で閉じていない承認枠は転送しないこと**（ラベルの無い枠でのみ発生、fail-close）⑨**codex の複数質問フロー（`Question 1/N`）ではスマホからのキャンセル（Esc）が送られず PC 側の操作になること**（承認・拒否の回答はスマホから可能）⑩**ラベルの無い承認枠（`WebFetch` / MCP 系）は対象を読み取れないため、実行内容が違っても同一の依頼と判定され、続けて別の MCP 承認が出た場合に 1 つ目への回答で 2 つ目が確定する余地があること**（MCP 系の承認は PC 側で内容を確認してから答えてください）。
+**v1.20.0 以降、MCP ツールの承認枠（ラベル行 `Tool use`）も同定できるようになりました**。`tool='MCP'` として、枠内に描かれた対象行（`サーバ名 - ツール名(引数)`）を読み取ります。実測は 2 サーバ × 3 ツールでラベルが verbatim 一致した範囲です（他ベンダ製サーバ・ロケール差・CLI バージョン依存は未確認）。あわせて、**ラベルでも `● Tool(...)` 行でも同定できず tool が確定しない承認枠は転送しなくなりました（fail-close）**。従来 `tool='Unknown'` のまま転送されていたこの残余は、このバージョンからスマホに出なくなり、PC 側での操作が必要になります。
+
+**このバージョンで塞ぎ切れていないこと**: ①端末の折り返しで作られる「偽の行頭」②タブバーが CLI 描画かの判定が背景色依存で、**実測で 2 経路の反例が確認されていること**（色付きのコマンド出力を通す経路 / CLI 自身が描くプロンプトのエコー行。上の「この判定の保証範囲」を参照）③**ラベルの無い承認枠（`WebFetch` 系）では `● Tool(...)` 行が唯一の手掛かりで、その行はモデルが作れるため表示をすり替えられる余地が残ること**（ただし画面のどこかに `Bash command` 等の見出し語が 1 行でも残っていると、枠の切り出し失敗と区別できないため転送しません。この見出し語の検知は画面＝表示領域 + スクロールバック 40 行の範囲に限られ、本文を長くして見出し語を画面外へ押し出すとこの fail-close は外れます＝実行確認、ただしそこから実機で表示すり替えに至るかは未確認。実機で確認した範囲では `WebFetch` の枠は終端マーカーを持たずそもそも検出されません（従来どおり 1 例の観測）。**MCP の枠は v1.20.0 からラベル行で同定して対象を読み取ります**（詳細は上記「v1.20.0 以降、MCP ツールの承認枠…」を参照）。ラベルでも `● Tool(...)` 行でも同定できない枠は転送しません（fail-close、同参照）④承認枠の同定がテキストのみに依存していること（セル属性による同定は次のリリース）⑤巡回中の「戻す一手」だけは属性を確認せずに送られること(claude)。**codex の複数質問では巡回キー(←/→)に CLI 描画の確認そのものが無いこと**(タブバーという CLI 描画の証拠を持たないため、巡回の起動判断が画面の文字列だけに依存する) ⑥説明行を含めて表示するため、描画の進行中に依頼が出し直されることがあること ⑦**折り返した質問文の前半がコマンド本文として表示され、端末幅が変わると同じ承認が別依頼として出し直されうること** ⑧**コマンド本文の引用符（`"` / `'`）が奇数個で閉じていない承認枠は転送しないこと**（ラベルの無い枠でのみ発生、fail-close）⑨**codex の複数質問フロー（`Question 1/N`）ではスマホからのキャンセル（Esc）が送られず PC 側の操作になること**（承認・拒否の回答はスマホから可能）⑩**（v1.20.0 で解消）ラベルの無い承認枠は対象を読み取れないため、実行内容が違っても同一の依頼と判定される余地があったこと**。MCP の承認枠は v1.20.0 からラベル行で対象を読み取るため、引数だけが異なる連続した MCP 承認は別の依頼として扱われます（引数の異なる 2 枠を同一性判定に掛けると別ダイアログと判定されることを実行で確認済み）。同定できない枠はそもそも転送されなくなった（fail-close、上記参照）ため、読み取れないまま同一視される経路自体がなくなりました。
 
 ## 対応プラットフォーム
 
@@ -436,7 +456,7 @@ v1.19.0 以降、ツール名とコマンドは **承認枠の中に描かれた
 | codex CLI | CLI | — |
 | スマホブラウザ | iOS Safari、Android Chrome | その他 |
 
-※ **タブ式（claude の ☐/✔ タブ UI）の転送は、PC 側のターミナルが背景色を報告することに依存します。** タブバーが CLI の描画かどうかを、選択中タブの背景色（セル属性）で判定しているためです。背景色を報告しないターミナルではタブ式ダイアログがスマホへ転送されません（PC で回答してください）。単一質問の転送は影響を受けません。**codex CLI の複数質問（`Question N/M`）はタブバーを持たずこの判定を通らないため、背景色を報告しないターミナルでも転送されます**（止めたい場合は `dialogDetection.tabSweep` に `false` を設定してください）。詳細はトラブルシューティングの「タブ式の複合質問でタブが動くのが気になる」を参照してください。
+※ **タブ式（claude の ☐/✔ タブ UI）の転送は、PC 側のターミナルが背景色を報告することに依存します。** 選択中タブ相当の行に背景色のセルがあることを巡回の起動条件にしているためです（この条件は**真正な CLI のタブバー UI 行であることを保証しません**。上の「この判定の保証範囲」を参照）。背景色を報告しないターミナルではタブ式ダイアログがスマホへ転送されません（PC で回答してください）。単一質問の転送は影響を受けません。**codex CLI の複数質問（`Question N/M`）はタブバーを持たずこの判定を通らないため、背景色を報告しないターミナルでも転送されます**（止めたい場合は `dialogDetection.tabSweep` に `false` を設定してください）。詳細はトラブルシューティングの「タブ式の複合質問でタブが動くのが気になる」を参照してください。
 
 ## ライセンス
 
@@ -745,13 +765,14 @@ After the one-time setup:
 > ⚠️ **Authorization scope notice**: the defense layers above strictly whitelist what reaches the PTY, but anyone holding the auth token (value of `APPROVAL_TOKEN` in `approval-config.json`) **can send arbitrary text to the target CLI via the `Type something` path or the codex Tab-notes free-text path**. Treat the token accordingly: do not share it, and remove `approval-config.json` once your session is over. The typed body stays in the same browser's memory for up to one hour (revealable via history expansion). Close the tab after use on shared devices.
 
 > ⚠️ **Remaining-risk notice**: the layers above restrict *what the phone can send*. Separately from
-> that, **approval boxes without a label (`WebFetch` / MCP tools) leave room for the phone-side
-> display to be swapped**, and **their target cannot be read, so two different ones can end up
-> treated as the same request**. See items (3) and (10) under "Known gaps in this version" in
+> that, **approval boxes without a label (`WebFetch` tools) leave room for the phone-side
+> display to be swapped** (the only signal, an `● Tool(...)` line, can be produced by the model).
+> The `WebFetch` box was not detected at all on the machine we recorded, so it never reaches the
+> phone. MCP approval boxes are now identified from their label row (`Tool use`) since v1.20.0 and
+> their target is read, and boxes that cannot be identified are no longer forwarded (fail-close).
+> See item (3) under "Known gaps in this version" in
 > [What the phone shows is read from inside the approval box](#what-the-phone-shows-is-read-from-inside-the-approval-box)
-> for the details and the current workaround (of the label-less boxes, only MCP ones were observed
-> to reach the phone — answer those on the PC after checking what they do; the `WebFetch` box was
-> not detected at all on the machine we recorded).
+> for the details.
 
 ## Smartphone UI features
 
@@ -819,7 +840,7 @@ Make sure you launched the target CLI through `claude-wrapper.js`, not plain `cl
 
 ### Tool name sometimes shows as `[Unknown]`
 
-PTYs render the approval dialog across multiple frames. If the frame containing the tool-name line (`● Tool(args)`) arrives after the prompt line, the wrapper registers the request from the earlier "prompt only" frame and treats subsequent frames as redraws via dedup, so the server keeps the `[Unknown]` label. Approve / reject still works correctly. This trade-off is intentional — preferable to duplicate registrations.
+**This describes behavior through v1.19.x.** PTYs render the approval dialog across multiple frames. If the frame containing the tool-name line (`● Tool(args)`) arrives after the prompt line, the wrapper registers the request from the earlier "prompt only" frame and treats subsequent frames as redraws via dedup, so the server keeps the `[Unknown]` label. Approve / reject still works correctly. This trade-off is intentional — preferable to duplicate registrations. **Since v1.20.0, frames whose tool cannot be identified are not forwarded at all, so a new request can no longer show up as `[Unknown]`.**
 
 ### Option labels look like `Yes,allowalleditsduringthissession(shift+tab)` (no spaces)
 
@@ -847,7 +868,24 @@ Since v1.19.0 **the sweep only starts while the tab bar has not changed since th
 
 Since v1.19.0 the tab bar is located starting from the footer at the bottom of the screen. If several tab-bar-like lines are visible and the real one cannot be identified, the wrapper sends no keys at all and gives up on forwarding (answer on the PC). The wrapper log records this as `tab bar ambiguous`.
 
-Also since v1.19.0, **the sweep only starts while a tab bar drawn by the CLI is visible.** A tab-bar-like line and a navigation hint scrolling by in the conversation are not enough — the wrapper sends no keys in that state (this prevents text Claude itself printed from starting a sweep and sending Shift+Tab into the ordinary input). The check uses cell attributes of the tab bar row (the background color of the selected tab), so **terminals that do not report background colors will not forward tabbed dialogs to the phone** (answer them on the PC). The log records this as `タブバーが CLI 描画でない`.
+Also since v1.19.0, **the sweep only starts while the tab bar row has background-colored cells.** A tab-bar-like line and a navigation hint scrolling by in the conversation **without background color** are not enough — the wrapper sends no keys in that state (this prevents plain text or markdown formatting that Claude itself printed from starting a sweep and sending Shift+Tab into the ordinary input). **However, the condition *was measured to be met* when raw ANSI escapes are passed through via Bash `printf`** (other tools and other output paths are untested; see "What this check does and does not guarantee" below). The check uses cell attributes of the tab bar row (the background color of the selected tab), so **terminals that do not report background colors will not forward tabbed dialogs to the phone** (answer them on the PC). The log records this as `タブバーが CLI 描画でない`.
+
+> **What this check does and does not guarantee (updated 2026-08-14 after measurement)**
+>
+> **Background-colored cells are not proof that the row is a genuine CLI tab-bar UI row.** This check cannot tell a genuine tab bar apart from any other row that happens to carry a background color. In the measured environment, plain text or markdown formatting that the model printed into the ordinary conversation log did not pass the check — but **the very same string does pass once it is drawn on a background-colored row**. The two paths confirmed:
+>
+> | Path | Who controls the content | Check bypassed | Keys actually sent |
+> |---|---|---|---|
+> | ① Passing raw ANSI escapes (background color) through as a Bash `printf` result | **The model** (it writes what gets run) | **Confirmed** | **Not confirmed** |
+> | ② No colored output — the CLI's own background-painted prompt echo row | You (the string you typed) | Confirmed | Not confirmed |
+>
+> ① is an attack surface because **the model controls the content**, but what was confirmed stops at "the check is bypassed" — not that keys are then actually sent.
+>
+> ② is not an attack path, but it **disproves the premise that "background color implies a genuine tab bar"**.
+>
+> **How far this was actually measured (to avoid over-reading it)**: what was confirmed is **replaying a recording until this check (`barRowIsCliDrawn`) returns `true`**. **It was not confirmed on a live machine that a sweep then starts and keys are actually sent** (other conditions must also pass). Also, not every background-colored row passes: the row must additionally **contain two or more tab marks, contain `Submit`, and not be an option line**, and it must be the **only such candidate** on screen. One environment was measured: Claude Code 2.1.226 series / WSL2 / `TERM=xterm-256color` / node v20 / `@xterm/headless` 6.0.0. Other control sequences (DCS / C1 / BS), output through other tools, and other CLI versions are untested.
+>
+> ⚠️ **Recommended when handling untrusted content**: if what the model reads or runs can contain content authored by someone else (files fetched from outside, web content, someone else's repository, …) — that is, **whenever you assume prompt injection is possible** — **set `dialogDetection.tabSweep` to `false` to stop sweeping and answer tabbed questions on the PC**. This covers two paths: on the **claude** side, path ① above (the model can pass this check using colored output); on the **codex** side, per known gap (5), **the decision to sweep has no CLI-drawn check at all and rests on screen text alone**. The same setting stops both.
 
 ```json
 {
@@ -867,7 +905,9 @@ Before injecting an answer from the phone, the wrapper also checks that **the di
 
 **Frames where the approval box cannot be identified unambiguously are not forwarded.** Rule lines and labels are ordinary characters a model can write, so writing `───` + `Bash command` + a harmless command inside the command text can move the box boundary (the real command reached the phone not at all). **Frames with two or more label-like lines are not forwarded**, and neither is command text longer than 500 characters (cutting it collapses different commands into the same display and the same request). Both cases can still be answered on the PC.
 
-**Known gaps in this version**: (1) a "fake line start" produced by terminal wrapping; (2) the CLI-drawn tab bar check relies on background color; (3) **for approval boxes without a label (`WebFetch` / MCP tools) the `● Tool(...)` line is the only signal, and a model can produce that line — so the display can be swapped for those approvals** (such a box is not forwarded when a heading word like `Bash command` is visible anywhere on screen, since that is indistinguishable from a failed box extraction; this heading-word check only covers the screen — viewport + 40 lines of scrollback — so making the body long enough to push the heading word off-screen defeats this fail-close: confirmed for the guard itself, but whether a real display swap follows is unverified; on the machine we recorded, the `WebFetch` box carries no end marker and is not detected at all, and the MCP box is detected but its tool name and target cannot be read — single observations each); (4) identifying the approval box still relies on text alone (cell-attribute identification is a later release); (5) the single "give back the Tab" keystroke during sweeping is sent without the CLI-drawn attribute check (and in the codex multi-question flow the sweep keys ←/→ carry no CLI-drawn check at all — there is no tab bar to prove the CLI drew it, so the decision to sweep rests on screen text alone); (6) the description line is included in the displayed command, so a request can be re-issued while the box is still being drawn; (7) **the first line of a wrapped question is shown as part of the command, so resizing the terminal can re-issue the same approval as a new request**; (8) **approval boxes whose command text has an odd number of quotes (`"` / `'`) are not forwarded** (label-less boxes only; fail-close); (9) **in the codex multi-question flow (`Question 1/N`), a cancel (Esc) from the phone is not sent and must be done on the PC** (approve/reject still work from the phone); (10) **label-less approval boxes (`WebFetch` / MCP) cannot be told apart even when they do different things, so a second MCP approval may be settled by answering the first** (answer MCP approvals on the PC after checking what they do).
+**Since v1.20.0, MCP tool approval boxes (label row `Tool use`) are identified too.** They are read as `tool='MCP'`, with the target line drawn inside the box (`serverName - toolName(args)`) used as the argument text. Measured across 2 servers × 3 tools with verbatim label matches (other vendors, locales, and CLI versions are unverified). **Approval boxes where neither the label nor an `● Tool(...)` line can pin down the tool are no longer forwarded** (fail-close). Approvals that used to be forwarded with `tool='Unknown'` no longer reach the phone in this version and must be answered on the PC.
+
+**Known gaps in this version**: (1) a "fake line start" produced by terminal wrapping; (2) the CLI-drawn tab bar check relies on background color, and **two counterexamples have now been measured** (colored command output passed through, and the CLI's own background-painted prompt echo row — see "What this check does and does not guarantee" above); (3) **for approval boxes without a label (`WebFetch` tools) the `● Tool(...)` line is the only signal, and a model can produce that line — so the display can be swapped for those approvals** (such a box is not forwarded when a heading word like `Bash command` is visible anywhere on screen, since that is indistinguishable from a failed box extraction; this heading-word check only covers the screen — viewport + 40 lines of scrollback — so making the body long enough to push the heading word off-screen defeats this fail-close: confirmed for the guard itself, but whether a real display swap follows is unverified; on the machine we recorded, the `WebFetch` box carries no end marker and is not detected at all — single observation. **MCP approval boxes are identified from their label row since v1.20.0 and their target is read** (see "Since v1.20.0, MCP tool approval boxes…" above); boxes that neither a label nor an `● Tool(...)` line can identify are no longer forwarded (fail-close, see the same note)); (4) identifying the approval box still relies on text alone (cell-attribute identification is a later release); (5) the single "give back the Tab" keystroke during sweeping is sent without the CLI-drawn attribute check (and in the codex multi-question flow the sweep keys ←/→ carry no CLI-drawn check at all — there is no tab bar to prove the CLI drew it, so the decision to sweep rests on screen text alone); (6) the description line is included in the displayed command, so a request can be re-issued while the box is still being drawn; (7) **the first line of a wrapped question is shown as part of the command, so resizing the terminal can re-issue the same approval as a new request**; (8) **approval boxes whose command text has an odd number of quotes (`"` / `'`) are not forwarded** (label-less boxes only; fail-close); (9) **in the codex multi-question flow (`Question 1/N`), a cancel (Esc) from the phone is not sent and must be done on the PC** (approve/reject still work from the phone); (10) **(resolved in v1.20.0) label-less approval boxes could not be told apart even when they did different things, so a second approval could be settled by answering the first**. MCP approval boxes now read their target since v1.20.0, so consecutive MCP approvals with different arguments are treated as separate requests (confirmed by running two boxes differing only in arguments through the identity check and observing them compare as different dialogs). Boxes whose tool cannot be identified are no longer forwarded at all (fail-close, see above), so the path that let an unread target be conflated with another no longer exists.
 
 ## Supported platforms
 
@@ -879,7 +919,7 @@ Before injecting an answer from the phone, the wrapper also checks that **the di
 | codex CLI | CLI | — |
 | Mobile browser | iOS Safari, Android Chrome | others |
 
-Note: **forwarding tabbed dialogs (claude's ☐/✔ tab UI) depends on your PC terminal reporting background colors.** Whether the tab bar was drawn by the CLI is decided from the background color (cell attribute) of the selected tab, so terminals that do not report background colors never forward tabbed dialogs to the phone (answer them on the PC). Single-question dialogs are unaffected. **The codex CLI multi-question flow (`Question N/M`) has no tab bar and does not go through this check, so it is still forwarded on terminals that report no background colors** (set `dialogDetection.tabSweep` to `false` to stop it). See "The tabs move on their own in multi-question dialogs" under Troubleshooting for details.
+Note: **forwarding tabbed dialogs (claude's ☐/✔ tab UI) depends on your PC terminal reporting background colors.** The sweep starts only when the row that looks like the selected tab carries background-colored cells, so terminals that do not report background colors never forward tabbed dialogs to the phone (answer them on the PC). **That condition does not guarantee the row is a genuine CLI tab-bar UI row** — see "What this check does and does not guarantee" above. Single-question dialogs are unaffected. **The codex CLI multi-question flow (`Question N/M`) has no tab bar and does not go through this check, so it is still forwarded on terminals that report no background colors** (set `dialogDetection.tabSweep` to `false` to stop it). See "The tabs move on their own in multi-question dialogs" under Troubleshooting for details.
 
 ## License
 

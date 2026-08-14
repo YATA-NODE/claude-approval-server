@@ -6,6 +6,12 @@ This file keeps version-specific history out of the README. Japanese and English
 
 # リリースノート（日本語）
 
+## v1.20.0+
+
+- MCP ツールの承認枠（ラベル行 `Tool use`）を同定し、`tool='MCP'` として枠内の対象行（`サーバ名 - ツール名(引数)`）をスマホへ転送できるようにしました。実測は 2 サーバ × 3 ツールでラベルの verbatim 一致を確認した範囲です（他ベンダ製サーバ・ロケール差・CLI バージョン依存は未確認）。
+- ラベルでも `● Tool(...)` 行でも同定できない承認枠は転送しなくなりました（fail-close）。**従来 `tool='Unknown'` のまま転送されていた承認は、このバージョンからスマホに出なくなり、PC 側での操作が必要になります**。タブ巡回・Shift+Tab の挙動は変わりません。
+- `npm test` に公開物向けの PII スキャナ（home パス内のユーザー名など環境由来識別子を検出）を追加し、GitHub Actions（check 名 `pii-and-tests`）で PR ごとに実行するようにしました。開発者向けの変更で、利用者側の挙動には影響しません。
+
 ## v1.19.0+
 
 - タブ式の複合質問（AskUserQuestion）が出ているときに、PC 側で回答するとタブが勝手に回り続ける不具合を修正しました。タブの巡回は「1 回の出現につき 1 回」だけになります。
@@ -100,6 +106,12 @@ This file keeps version-specific history out of the README. Japanese and English
 ---
 
 # Release Notes (English)
+
+## v1.20.0+
+
+- The wrapper now identifies MCP tool approval boxes (label row `Tool use`) and forwards them to the phone as `tool='MCP'`, reading the target line inside the box (`serverName - toolName(args)`). Measured across 2 servers × 3 tools with verbatim label matches (other vendors, locales, and CLI versions are unverified).
+- **Approval boxes that cannot be identified from either the label or an `● Tool(...)` line are no longer forwarded** (fail-close). **Approvals that used to be forwarded with `tool='Unknown'` no longer reach the phone in this version and must be answered on the PC.** Tab sweeping and Shift+Tab behavior are unchanged.
+- Added a PII scanner to `npm test` that flags environment-derived identifiers (such as usernames embedded in home-directory paths) in tracked files, and wired it into GitHub Actions (check name `pii-and-tests`) to run on every PR. This is a developer-facing change with no effect on end-user behavior.
 
 ## v1.19.0+
 

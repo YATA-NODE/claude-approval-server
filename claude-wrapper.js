@@ -546,6 +546,7 @@ const BOX_LABELS = [
   { re: /Update|Edit/i, tool: 'Edit', action: false },
   { re: /Delete/i, tool: 'Bash', action: false },
   { re: /Search|Grep/i, tool: 'Grep', action: false },
+  { re: /Tool\s*use/i, tool: 'MCP', action: false },
 ]
 // **行全体アンカー**で判定する。ラベル語は普通の英単語なので、行の一部に現れただけで
 // 「ここが箱のラベル行」と決めると、コマンド本文に書いた単語で枠の境界を動かせる。
@@ -1199,16 +1200,14 @@ function parseDialog(buf, opts = {}) {
     // 6d. **対象が空のツール承認は承認可能化しない**(codex 側 `if (!args) return null` と対称)。
     //   何を実行するのかが見えないまま「はい」を押せる状態を作らない。描画途中(ラベルだけ
     //   先に出てコマンド行が未着)なら次の完全フレームで再検出されるし、PC 側には全文がある。
-    //   条件を `tool !== 'Unknown'` にしてはいけない: BOX_LABELS は Bash/Write/Edit/Read/Grep
-    //   しか持たないので、WebFetch や MCP 系の承認箱は **恒久的に** tool='Unknown' / args='' に
-    //   なり、そのままスマホへ「何をするか不明の承認」が出続ける(実行で確認)。
+    //   条件を `tool !== 'Unknown'` にしてはいけない: ラベルが見えているのに対象行が
+    //   まだ描画されていない(描画途中)フレームでも `label` は付き `tool` は確定するため、
+    //   `tool` の確定だけでは「対象を読めた」ことの証明にならない。
     //   判定は「**対象を持つツール承認**だと分かる根拠が立っているか」で行う。
     //   `hasShiftTab` は入れない: タブ式の各タブも option 領域に shift+tab ヒントを持つため、
     //   入れるとタブ式ダイアログが丸ごと転送されなくなる(実行で確認)。
-    //   **残余**: BOX_LABELS にも ACTION_LABEL_RE にも無いツール(WebFetch / MCP 系)の承認箱で、
-    //   `● Tool()` 行が密着していない場合は tool='Unknown' / args='' のまま転送される。
-    //   これを塞ぐには「箱はあるが対象を読めない」を判定する必要があり、タブ式の箱と
-    //   区別する手段が今のテキスト経路には無い(属性チャネル = 別リリース)。
+    //   BOX_LABELS にも ACTION_LABEL_RE にも無いツール種別で `● Tool()` 行の継承も
+    //   成立しない場合は `tool` が 'Unknown' のまま残るが、これは下の 6f が一括で塞ぐ。
     //   **窓に依存しないこと**: 旧実装は `hasActionLabel`(prompt 直上 200 字)だけを根拠に
     //   していたため、本文を長くしてラベルを窓の外へ押し出すだけでガードが外れた(実行で再現。
     //   スマホには `[Unknown]` と無関係な行だけが出て、実体は `rm -rf ~` を承認できた)。
@@ -1230,6 +1229,12 @@ function parseDialog(buf, opts = {}) {
     // args 経路が復活したときの独立した fail-closed バックアップ。外部契約は「転送不能」であって、unforwardable の
     // 理由文字列(empty-target / ambiguous-box)の優先順位は診断用で仕様外。
     if (box.ambiguous) unforwardable = 'ambiguous-box'
+    // 6f. 残余の fail-close: ラベルも ●Tool 継承も成立せず tool が確定しないまま抜けた
+    //   (BOX_LABELS に無いツール種別の枠で、glue した ●Tool 行も無い等)。この形は
+    //   上の 6d/ambiguous-box のどのガードにも掛からず tool='Unknown' / args='' が
+    //   素通りしていた(実測: MCP 系ツールの枠で再現)。「何のツールか分からない」を
+    //   読めない扱いにする(fail-close)。
+    if (tool === 'Unknown' && !unforwardable) unforwardable = 'unknown-tool'
   }
 
   // **転送してよいか**の判定はここ 1 箇所に集める。理由は code(`truncated` / `empty-target` /
@@ -1781,8 +1786,10 @@ function countStyledCells(line) {
   return n
 }
 
-// タブバー行が **CLI に描かれた行** か。巡回も位置検証も PTY へキーを送るので、
-// 送ってよい相手かをテキストではなくセル属性で確かめる。
+// タブバー候補行に **背景色セルがあるか** を返すだけの述語。名前に反して
+// 「CLI が描いた行か」の判定ではなく、**安全な送信先であることの確認にもならない**
+// (下記の反例 2 経路)。巡回も位置検証も PTY へキーを送るため、テキストだけを
+// 根拠にするよりは絞れる、という位置づけに留まる。**認可の境界として再利用しないこと**。
 //
 // テキストだけを根拠にすると、モデルが会話ログへ「偽のタブバー + タブ移動ヒント付き
 // フッタ」を書くだけで巡回が起動する(実ダイアログ非表示でも成立)。そのときキーは
@@ -1794,9 +1801,23 @@ function countStyledCells(line) {
 // 確認画面でも同様。会話ログの行は 0 個。
 //
 // **限界**: モデルの出力に markdown の太字を混ぜると、その行は太字属性を持つ(実機で確認、
-// 28 セル)。だから太字は数えない。背景色まで乗せられる経路(色付きのコマンド出力を
-// そのまま画面へ通す 等)があれば偽装は成立するので、これは「素のテキストと markdown
-// 装飾では作れない」までの保証であって、属性の偽造不能性を主張するものではない。
+// 28 セル)。だから太字は数えない。
+//
+// **背景色セルの存在は「真正な CLI のタブバー UI 行」である証明にならない**。
+// 本述語は真正なタブバー行と「背景色が付いた別の行」を区別できない(区別できないのは
+// CLI ではなく、この述語を根拠に使う側)。測定した環境では、モデルが会話ログへ出した
+// 素のテキスト / markdown 装飾だけでは通らなかったが、**同じ文字列でも背景色付きの行に
+// 描かれれば通る**。反例 2 経路:
+//   (a) コマンドの実行結果として生の SGR をそのまま画面へ通すと、その行に背景色が付く。
+//       録画再生で readTabBarRow がその行を選び、本述語が 8 フレーム連続で true になった。
+//       **中身を決めるのはモデル = 直接の攻撃面**。
+//   (b) 生の SGR を使わなくても、CLI 自身がプロンプトのエコー行を背景色付きで描くため、
+//       その行の文字列が isTabBarLine を満たすと本述語は true になる(10 フレームで観測)。
+//       中身を決めるのは利用者なので攻撃面ではないが、上記の前提が崩れている反証になる。
+// 測定環境は Claude Code 2.1.226 系 / WSL2 / TERM=xterm-256color / node v20 /
+// @xterm/headless 6.0.0 の 1 つだけ。直接描画は Bash の printf 経由のみを試した。
+// 他の制御列(DCS / C1 / BS 等)・他の tool 経由・他の CLI 版は未測定。
+// **述語名が示唆する保証は無い**(実体は「背景色セルが 1 つ以上ある」でしかない)。
 function barRowIsCliDrawn() {
   if (!headlessTerm) return false
   try {
@@ -1958,6 +1979,7 @@ const UNFORWARDABLE_REASON = {
   truncated: 'コマンド本文が打ち切られている',
   'empty-target': '対象が空のツール承認',
   'codex-unreadable': 'codex コマンド本文を読み切れない',
+  'unknown-tool': '未知のツール種別の承認枠',
 }
 let lastUnforwardableKey = null
 function logUnforwardableOnce(code, args) {

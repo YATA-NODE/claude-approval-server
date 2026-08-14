@@ -1,6 +1,9 @@
 /**
  * test-tab-sweep-state.js — タブ巡回・注入の状態機械テスト
  *
+ * 例示パスは一般名 /home/user に統一する(実在の環境値・実ユーザー名を書かない。
+ * 混入は test-pii-scan.js が npm test で fail させる)。
+ *
  * 純関数テスト(test-parse-dialog.js)では固定できない不変条件を、偽 TUI に対して
  * 実際に巡回・注入を回して確認する。中心は承認取り違えの防止:
  *
@@ -700,7 +703,9 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     // 巡回の必要条件を **CLI が描くフッタ** のタブ移動ヒントに置いて構造的に弾く。
     const tui = plainTui([
       '● 例: ← ☐ a ☐ b ✔ Submit →',
-      '● Bash(rm -rf /tmp/x)',
+      '────────────────',
+      ' Bash command',
+      ' rm -rf /tmp/x',
       ' Do you want to proceed?',
       ' ❯ 1. Yes',
       '   2. No',
@@ -951,7 +956,10 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
       'Esc to cancel',
     ]
     // 前提固定: 差替先は「読める = 注入先になりうる画面」かつバー行を持たない。
-    assertEq('差替先は通常の承認として読める', parseDialog(plain.join('\n')) !== null, true)
+    // 罫線未描画で tool は確定しないため、読めるかどうかは screenOnly で見る
+    // (このケースは tool 不明の通常呼び出しでは転送しない = fail-close の対象でもある)。
+    assertEq('差替先は通常の承認として読める', parseDialog(plain.join('\n'), { screenOnly: true }) !== null, true)
+    assertEq('差替先は通常呼び出しでは転送しない(tool 不明の fail-close)', parseDialog(plain.join('\n')), null)
     assertEq('差替先にタブバーは無い', findTabBarLine(plain.join('\n')), null)
     const tui = new FakeTui(mkTabs(4))
     tui.focus = 2 // 途中のタブから始まる = 巡回前に戻す必要がある
@@ -977,8 +985,10 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
       '   2. No',
       'Esc to cancel',
     ]
-    // 前提固定: バー行が見えていて、かつ読める画面 = 解錠条件のうち parse だけが弁別する
-    assertEq('差替先は読める(= 注入先になりうる)', parseDialog(swapped.join('\n')) !== null, true)
+    // 前提固定: バー行が見えていて、かつ読める画面 = 解錠条件のうち parse だけが弁別する。
+    // 罫線未描画で tool は確定しないため、読めるかどうかは screenOnly で見る。
+    assertEq('差替先は読める(= 注入先になりうる)', parseDialog(swapped.join('\n'), { screenOnly: true }) !== null, true)
+    assertEq('差替先は通常呼び出しでは転送しない(tool 不明の fail-close)', parseDialog(swapped.join('\n')), null)
     assertEq('差替先にもバー行は見えている', findTabBarLine(swapped.join('\n')) !== null, true)
     const tui = new FakeTui(mkTabs(4))
     install(tui)
