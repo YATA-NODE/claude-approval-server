@@ -92,6 +92,13 @@ const POSIX_HOME_PATH_RE = /(\/home\/|\/Users\/)([^/\s"'|\uFFFF]+)/g
 // 確認されていない。
 const WIN_HOME_PATH_RE = /((?:[A-Za-z]:|\\\\[^\\\s"'\uFFFF]+)\\[Uu]sers\\)([^\\/\s"'|\uFFFF]+)/gi
 
+// WSL home path form: /mnt mount prefix + a single drive letter + the Windows Users
+// directory. Only the "Users" literal folds case (matches [Uu][Ss][Ee][Rr][Ss]
+// independently per letter); drive letter and name segment stay as-is, unlike
+// WIN_HOME_PATH_RE which applies a blanket `i` flag. Name char class reused from
+// POSIX_HOME_PATH_RE (same '/' separator convention).
+const WSL_HOME_PATH_RE = /(\/mnt\/[A-Za-z]\/[Uu][Ss][Ee][Rr][Ss]\/)([^/\s"'|\uFFFF]+)/g
+
 // ---- repo 名 / branch 名(HOME_USER と同列の「環境固有識別子」) ----
 // tools/lib-redact.js は本番コード(claude-wrapper.js / approval-server.js)からは
 // require されないツール専用モジュールのため、git への依存を許容する(取得失敗時は
@@ -522,7 +529,7 @@ function findIdentifierRanges(normalized) {
       idx += HOME_USER_NFKC.length
     }
   }
-  for (const re of [POSIX_HOME_PATH_RE, WIN_HOME_PATH_RE]) {
+  for (const re of [POSIX_HOME_PATH_RE, WIN_HOME_PATH_RE, WSL_HOME_PATH_RE]) {
     re.lastIndex = 0
     let m
     while ((m = re.exec(normalized)) !== null) {
@@ -1198,6 +1205,8 @@ function stripControlTokensToText(s) {
  * 文字列に
  * POSIX/Windows の home パス形状(`/home/<name>` `/Users/<name>` `C:\Users\<name>`
  * `\\host\Users\<name>`)が、**現在のユーザーかどうかに関わらず**含まれているかを判定する。
+ * WSL の home パス形状(/mnt マウント接頭辞 + ドライブ文字 + Users ディレクトリ)も同様に
+ * 対象とする。
  *
  * findRawIdentifierLeaks() は現在の OS ユーザー(HOME_USER)を基準に検査するため、
  * 別ユーザーの home パス(例: `manifest_ref` 等のメタデータに紛れ込んだ
@@ -1214,7 +1223,69 @@ function hasAnyHomePathShape(s) {
   const t = String(s)
   POSIX_HOME_PATH_RE.lastIndex = 0
   WIN_HOME_PATH_RE.lastIndex = 0
-  return POSIX_HOME_PATH_RE.test(t) || WIN_HOME_PATH_RE.test(t)
+  WSL_HOME_PATH_RE.lastIndex = 0
+  return POSIX_HOME_PATH_RE.test(t) || WIN_HOME_PATH_RE.test(t) || WSL_HOME_PATH_RE.test(t)
+}
+
+/**
+ * 文字列から home パスの出現を全て列挙する(POSIX、macOS、Windows のドライブ文字または
+ * UNC 接頭辞(区切りは / も同一視)、WSL の /mnt マウント接頭辞、の4形式)。
+ * findIdentifierRanges() はマスク用の位置情報を返すが、こちらは形式別に name を返す
+ * 検出専用関数(tools/test-pii-scan.js が使う)。
+ */
+// Judgment-only name re-slice. The shared masking REs (POSIX_HOME_PATH_RE etc.) keep a
+// wide negated char class on purpose (redact() must swallow trailing junk so nothing
+// visually leaks). For judgment (violation vs not), that width causes false positives:
+// a broad-class capture like "alice`" or "alice#valid-id" no longer string-equals the
+// allowlisted "alice". This re-slices from the same start position with a strict
+// identifier-segment class and returns null when the first character isn't a segment
+// character at all (e.g. "<user>" starts with "<", "${homeUser}" starts with "$").
+const STRICT_NAME_SEGMENT_RE = /^[A-Za-z0-9._-]+/
+
+function strictNameSegment(broadName) {
+  const m = STRICT_NAME_SEGMENT_RE.exec(broadName)
+  return m ? m[0] : null
+}
+
+function findHomePathIdentifiers(s) {
+  const t = String(s)
+  const out = []
+
+  POSIX_HOME_PATH_RE.lastIndex = 0
+  let m
+  while ((m = POSIX_HOME_PATH_RE.exec(t)) !== null) {
+    const name = strictNameSegment(m[2])
+    if (name) out.push({ form: m[1] === '/home/' ? 'posix' : 'macos', name })
+  }
+
+  WSL_HOME_PATH_RE.lastIndex = 0
+  while ((m = WSL_HOME_PATH_RE.exec(t)) !== null) {
+    const name = strictNameSegment(m[2])
+    if (name) out.push({ form: 'wsl', name })
+  }
+
+  // Windows は2パスで判定する。①元の t にそのまま適用(生の単一バックスラッシュ表記や、
+  // 本物の UNC 2連続バックスラッシュ接頭辞を正しく拾う)。②二重バックスラッシュ(JSON
+  // エスケープ由来)を単一へ畳み、区切り '/' も '\' と同一視した正規化コピーにも適用する
+  // (JSON エスケープ形・/ 区切り形を拾う)。①を先に畳み込むと本物の UNC 接頭辞まで
+  // 単一バックスラッシュへ縮退し、UNC 検出が失われるため2パスに分ける。同一の一致文字列
+  // (m[0])は重複計上しない(name 再スライス前の広いマッチ全体で dedup する)。
+  const winMatched = new Set()
+  WIN_HOME_PATH_RE.lastIndex = 0
+  while ((m = WIN_HOME_PATH_RE.exec(t)) !== null) {
+    winMatched.add(m[0])
+    const name = strictNameSegment(m[2])
+    if (name) out.push({ form: 'windows', name })
+  }
+  const winNormalized = t.replace(/\\\\/g, '\\').replace(/\//g, '\\')
+  WIN_HOME_PATH_RE.lastIndex = 0
+  while ((m = WIN_HOME_PATH_RE.exec(winNormalized)) !== null) {
+    if (winMatched.has(m[0])) continue
+    const name = strictNameSegment(m[2])
+    if (name) out.push({ form: 'windows', name })
+  }
+
+  return out
 }
 
 /**
@@ -1333,6 +1404,7 @@ module.exports = {
   filterPrintableRuns,
   findRawIdentifierLeaks,
   hasAnyHomePathShape,
+  findHomePathIdentifiers,
   scanForSecrets,
   tokenizeAnsi,
   redactRawStream,

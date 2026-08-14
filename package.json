@@ -5,7 +5,7 @@
   "main": "approval-server.js",
   "scripts": {
     "start": "node approval-server.js",
-    "test": "node test-parse-dialog.js && node test-tab-sweep-state.js && node test-config-keys.js && node test-lib-redact.js && node test-attr-fixtures.js"
+    "test": "node test-parse-dialog.js && node test-tab-sweep-state.js && node test-config-keys.js && node test-lib-redact.js && node test-attr-fixtures.js && node test-pii-scan.js"
   },
   "keywords": [
     "claude-code",
