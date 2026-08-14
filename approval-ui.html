@@ -315,6 +315,29 @@
       [data-theme='dark'] .req-card.multi-card {
         border-left-color: #ff9f0a;
       }
+      /* notice(kind:'notice')カード。承認ではない一方向の情報カードなので
+         控えめなグレーで承認系カードと視覚的に区別する。 */
+      .req-card.notice-card {
+        border-left-color: #8e8e93;
+        cursor: default;
+      }
+      [data-theme='dark'] .req-card.notice-card {
+        border-left-color: #98989d;
+      }
+      .notice-badge {
+        display: inline-block;
+        background: #8e8e93;
+        color: #fff;
+        border-radius: 8px;
+        padding: 1px 8px;
+        font-size: 11px;
+        font-weight: 600;
+        margin-left: 6px;
+        vertical-align: middle;
+      }
+      [data-theme='dark'] .notice-badge {
+        background: #98989d;
+      }
       .multi-badge {
         display: inline-block;
         background: #ff9500;
@@ -847,6 +870,12 @@
           // 履歴展開時のラベル
           tabLabel: (n) => `タブ ${n}`,
           selectedLabel: '選択',
+          // notice(kind:'notice')。承認ではないスマホ向け情報カード。
+          // item 由来の文字列を使わず、常にこの固定文言を表示する。
+          noticeText:
+            '複合質問(タブ式)をスマホへ転送できませんでした。PC の Claude Code 画面で直接回答してください。',
+          noticeAck: '確認しました',
+          noticeBadge: 'お知らせ',
         },
         en: {
           tabTitle: 'Agent Approval Panel',
@@ -905,6 +934,12 @@
           // history expansion labels
           tabLabel: (n) => `Tab ${n}`,
           selectedLabel: 'Selected',
+          // notice(kind:'notice'). Not an approval, a one-way info card for the phone.
+          // Never render item-derived strings, always show this fixed text.
+          noticeText:
+            'A tabbed multi-question dialog could not be forwarded to your phone. Please answer it directly in Claude Code on your PC.',
+          noticeAck: 'Acknowledged',
+          noticeBadge: 'Notice',
         },
       }
 
@@ -1196,12 +1231,28 @@
 
         el.innerHTML = ''
         items.forEach((item) => {
-          if (Array.isArray(item.tabs) && item.tabs.length > 0) {
+          if (item.kind === 'notice') {
+            el.appendChild(renderNoticeCard(item))
+          } else if (Array.isArray(item.tabs) && item.tabs.length > 0) {
             el.appendChild(renderMultiCard(item))
           } else {
             el.appendChild(renderSingleCard(item))
           }
         })
+      }
+
+      // notice(kind:'notice')専用カード。承認ではない一方向の情報カードなので、
+      // item 由来の文字列(item.reason 等)は一切 DOM に入れず、固定 i18n 文言のみを
+      // 表示する。ボタンは確認(Ack)1 個のみ。
+      function renderNoticeCard(item) {
+        const div = document.createElement('div')
+        div.className = 'req-card notice-card'
+        div.dataset.id = item.id
+        div.innerHTML = `
+      <p class="req-time">${fmt(item.createdAt)}</p>
+      <p class="req-desc">${escHtml(t('noticeText'))} <span class="notice-badge">${escHtml(t('noticeBadge'))}</span></p>
+      <div class="btn-area"><button class="btn-option btn-other" data-notice-ack-id="${item.id}">${escHtml(t('noticeAck'))}</button></div>`
+        return div
       }
 
       function renderSingleCard(item) {
@@ -1300,6 +1351,19 @@
       }
 
       document.getElementById('queue-list').addEventListener('click', async (e) => {
+        // notice(kind:'notice')の確認(Ack)ボタン。承認ではないので answer は
+        // 常に固定文字列 'OK' を送る(既存 resolveItem を再利用)。
+        const noticeAckBtn = e.target.closest('button[data-notice-ack-id]')
+        if (noticeAckBtn && !noticeAckBtn.disabled) {
+          await resolveItem(
+            noticeAckBtn.dataset.noticeAckId,
+            'OK',
+            noticeAckBtn.closest('.btn-area'),
+            false,
+            t('noticeAck')
+          )
+          return
+        }
         // ダイアログキャンセル(Esc 相当)
         const cancelBtn = e.target.closest('button[data-cancel-id]')
         if (cancelBtn && !cancelBtn.disabled) {
@@ -1348,8 +1412,8 @@
           await resolveItem(btn.dataset.id, num, btn.closest('.btn-area'), false, label)
           return
         }
-        // 単一質問カード選択(複合質問カードはトグル不要なので除外)
-        const card = e.target.closest('.req-card:not(.multi-card)')
+        // 単一質問カード選択(複合質問カード・notice カードはトグル不要なので除外)
+        const card = e.target.closest('.req-card:not(.multi-card):not(.notice-card)')
         if (card) {
           selectedId = selectedId === card.dataset.id ? null : card.dataset.id
           await fetchQueue()
@@ -1363,6 +1427,9 @@
         try {
           const items = await apiFetch('/queue')
           for (const item of items) {
+            // notice は一括承認の対象外(options=['OK'] で 'Yes' が通らない = 400 で
+            // 一括承認全体が中断してしまうため、個別確認に委ねる)
+            if (item.kind === 'notice') continue
             // 複合質問は一括承認の対象外(個別タブの選択が必要)
             if (Array.isArray(item.tabs) && item.tabs.length > 0) continue
             await resolveItem(item.id, 'Yes', null, true)
