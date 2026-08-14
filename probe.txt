@@ -1,0 +1,1 @@
+log at /home/zqxprobe/file.txt
