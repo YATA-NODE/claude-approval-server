@@ -1019,7 +1019,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     const tui = new FakeTui(mkTabs(4), { swapToCliDrawn: true })
     install(tui)
     tui.swapTo = otherDialog
-    assertEq('前提: 差替先のバーは CLI 描画として扱われる', __test.barRowIsCliDrawn(), true)
+    assertEq('前提: 差替先のバーは CLI 描画として扱われる', __test.barRowHasStyledCells(), true)
     tui.swapTo = null
     let forwards = 0
     tui.onWrite = (d, t) => {
@@ -1076,10 +1076,10 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     // 前提固定: 偽端末が「CLI が描いた行」と「素のテキスト」を作り分けられていること。
     const drawn = new FakeTui(mkTabs(3))
     install(drawn)
-    assertEq('CLI 描画のバーは属性を持つ', __test.barRowIsCliDrawn(), true)
+    assertEq('CLI 描画のバーは属性を持つ', __test.barRowHasStyledCells(), true)
     const flat = new FakeTui(mkTabs(3), { cliDrawn: false })
     install(flat)
-    assertEq('素のテキストのバーは属性を持たない', __test.barRowIsCliDrawn(), false)
+    assertEq('素のテキストのバーは属性を持たない', __test.barRowHasStyledCells(), false)
   }
   {
     // 実ダイアログが 1 つも無い画面。モデルが会話ログへ偽バー + タブ移動ヒントつきフッタを
@@ -1135,7 +1135,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     // 1 行でゲートが通ってしまう。数えるのは背景色だけ。
     const tui = new FakeTui(mkTabs(3), { cliDrawn: false, modelBold: true })
     install(tui)
-    assertEq('太字だけのバーは CLI 描画とみなさない', __test.barRowIsCliDrawn(), false)
+    assertEq('太字だけのバーは CLI 描画とみなさない', __test.barRowHasStyledCells(), false)
     const got = await __test.sweepTabs()
     assertEq('太字の偽バーでは巡回しない', got, null)
     assertEq('太字の偽バーへキーを送らない', tui.writes, [])
@@ -1592,7 +1592,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     install(tui)
     __test.setForwardTabDebt(2)
     const vp = __test.getViewportText()
-    assertEq('前提: バー行は CLI 描画として読める', __test.barRowIsCliDrawn(), true)
+    assertEq('前提: バー行は CLI 描画として読める', __test.barRowHasStyledCells(), true)
     assertEq('前提: このフレームは転送しない', parseDialog(vp), null)
     assertEq(
       '描画途中の承認画面へは借り返しの一手も送らない',
@@ -1625,7 +1625,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     __test.setForwardTabDebt(2)
     const vp = __test.getViewportText()
     assertEq('前提: 重畳フレームは読めない', parseDialog(vp), null)
-    assertEq('前提: バー行は CLI 描画', __test.barRowIsCliDrawn(), true)
+    assertEq('前提: バー行は CLI 描画', __test.barRowHasStyledCells(), true)
     assertEq(
       '読めないだけの承認画面には送らない',
       __test.shiftTabBlockedReason(vp, { debtReturnOk: true }) !== null,

@@ -1,11 +1,11 @@
 /**
- * tools/lib-fixture-frame.js — `approval-attr-fixture/v1` の生成(extract-fixture.js)と
+ * tools/lib-fixture-frame.js — `approval-attr-fixture/v2` の生成(extract-fixture.js)と
  * 再現検証(verify-fixture.js)が共有する「1 フレームぶんの dialog 判定を実行して
  * 比較可能な状態オブジェクトを作る」ロジック。
  *
  * 2 箇所に同じ判定ロジックを別々に書くと drift する(tools/lib-cellattrs.js のコメントと
  * 同じ教訓)ため、ここへ集約する。判定は production の関数(frameOf / readTabBarRow /
- * __test.barRowIsCliDrawn / __test.getScreenText / __test.getViewportText / parseDialog)を
+ * __test.barRowHasStyledCells / __test.getScreenText / __test.getViewportText / parseDialog)を
  * そのまま呼ぶだけで、ここでも手写ししない。
  */
 'use strict'
@@ -67,7 +67,12 @@ function captureFrameState(claudeWrapper, frameOf, term, rows, opts = {}) {
     barRow = claudeWrapper.readTabBarRow(buf, rows)
   } catch (_) {}
   const barFound = !!(barRow && typeof barRow.y === 'number')
-  const cliDrawn = claudeWrapper.__test.barRowIsCliDrawn()
+  // フィールド名 cliDrawn は旧称由来のまま据え置き。中身は barRowHasStyledCells() の出力。
+  // 据え置きの理由は「既存 fixture に保存済みの digest 値(comparableFields から算出)と
+  // 再生成時の値がキー名変更だけでずれる無用な diff を避ける」ため。correctness の要請ではない
+  // (digest は extract-fixture が同一プロセス内で before/after を突き合わせるだけの write-only 値で、
+  // verify-fixture.js は読まない)。
+  const cliDrawn = claudeWrapper.__test.barRowHasStyledCells()
   const screenText = claudeWrapper.__test.getScreenText()
   const full = claudeWrapper.parseDialog(screenText)
   const screenOnly = claudeWrapper.parseDialog(screenText, { screenOnly: true })

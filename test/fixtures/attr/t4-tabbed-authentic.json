@@ -1,5 +1,5 @@
 {
-  "schema": "approval-attr-fixture/v1",
+  "schema": "approval-attr-fixture/v2",
   "id": "t4-tabbed-authentic",
   "kind": "tabbed",
   "label": "authentic",
@@ -75,7 +75,7 @@
   "expected_verdict": {
     "frameOf": true,
     "readTabBarRow": true,
-    "barRowIsCliDrawn": true,
+    "barRowHasStyledCells": true,
     "parseDialog": {
       "forwardable": false,
       "tool": null,

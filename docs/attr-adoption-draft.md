@@ -1,5 +1,7 @@
 # 採否表(案C Phase 0 → Phase 0.5 go/no-go の判定材料)
 
+> 用語注(2026-08-14): `barRowIsCliDrawn` はこの日の改名で `barRowHasStyledCells` になった(v1.20.0 までは旧称)。本書以外の docs/attr-*.md は当時のツール出力の記録であり旧称のまま。
+
 master plan が go/no-go の必須材料として要求する表。**この表だけで判定できる**ことを目標に、
 各行に corpus 参照(録画名 + sha256 先頭 16 桁)と再現回数を持たせる。
 
@@ -12,7 +14,7 @@ master plan が go/no-go の必須材料として要求する表。**この表�
   別途担保が要るので、**1 回の再生は再現性の測定ではない**。本表の `verified` は
   「その条件で観測できた」であって「常にそうなる」ではない。
 - 判定は **production の関数をそのまま呼んで**再現している(`parseDialog` / `readTabBarRow` /
-  `__test.barRowIsCliDrawn` / `frameOf`)。述語の手写しはしていない。
+  `__test.barRowHasStyledCells` / `frameOf`)。述語の手写しはしていない。
 - 対象環境 = `docs/attr-manifest.json` の `env-2026-08-10`(Claude Code 2.1.226 系 / node v20 /
   @xterm/headless 6.0.0 / TERM=xterm-256color)。**単一環境・単一 CLI 版の観測**であり、
   他の版・他の端末・他の tool 経路へ一般化しない。
@@ -42,7 +44,7 @@ master plan(`~/.claude/plans/sonnet-codex-tender-sedgewick.md`)から、判定�
 | 前景色 #B1B9F9(罫線・ラベル・選択中と同色) | **不採用** | モデルの markdown インラインコードで同色になる | verified | `e2e-adv-pilot4-markdown.log`(`57513ccb…`)/ `e2e-adv-pilot6-rule.log`(`3cb75b31…`) |
 | bold=1(ラベル行) | **不採用** | モデルの markdown 太字 | verified | `e2e-adv-pilot4-markdown.log`(同上) |
 | 色 + bold の組(ラベル行の完全一致) | **不採用** | `**\`語\`**` で同時に取れる | verified | `e2e-adv-pilot7-boldwrap.log`(`043651bd…`) |
-| 背景色セル > 0(`barRowIsCliDrawn` の現行根拠) | **不採用** | ①Bash 結果の生 SGR ②生 SGR 無しでも CLI がプロンプトのエコー行に背景色を付ける | verified | `e2e-raw-a2-tabbar-sgr-noecho.log`(`b4221e9c…`)/ `e2e-raw-a-tabbar-sgr.log`(`482fe5d7…`) |
+| 背景色セル > 0(`barRowHasStyledCells` の現行根拠) | **不採用** | ①Bash 結果の生 SGR ②生 SGR 無しでも CLI がプロンプトのエコー行に背景色を付ける | verified | `e2e-raw-a2-tabbar-sgr-noecho.log`(`b4221e9c…`)/ `e2e-raw-a-tabbar-sgr.log`(`482fe5d7…`) |
 | inverse(反転) | **不採用** | Bash 結果の生 SGR で作れる(実機の CLI は inverse を使わないので、そもそも真正側の signal でもない) | verified | `e2e-adv-tooloutput.log`(`b631cac8…`) |
 | 構造(`frameOf` = 選択肢ブロック → 上向き罫線) | **不採用** | モデル出力だけで満たせる | verified | `e2e-raw-adv-fakeframe.log`(manifest 登録済)|
 | **罫線が x=0 始まり + 端末幅いっぱい** | **不採用** | 画面に残った **CLI 由来の罫線を借用**できる | verified | `e2e-raw-b-borrow.log`(`a4d01e4c…`)frame #65 |
@@ -79,12 +81,12 @@ tool 結果は `⎿` の後(x≥5)から描かれ、7 通りの攻撃すべて�
 > ただし wrapper は毎フレーム判定するため、**「安定して誘発できない」ことを防御の根拠にはできない**
 > = 述語を作り直す理由としては十分。
 
-### 1.2 `barRowIsCliDrawn` の前提が壊れている
+### 1.2 `barRowHasStyledCells` の前提が壊れている
 
 この述語は「背景色セルがある = CLI が描いた行 = 信用できる」という含意で使われている。
 実測では、**CLI は "自分が描いた行" と "内容が CLI 由来の行" を区別しない**:
 
-- Bash 結果として直接描画された生 SGR の行 → 背景色が付く → `barRowIsCliDrawn()` = true。
+- Bash 結果として直接描画された生 SGR の行 → 背景色が付く → `barRowHasStyledCells()` = true。
   **frame #29-36 の 8 フレーム連続**(全 36 フレーム中)で、選ばれた行は y=12 `⎿  ☐ Q1  ☐ Q2  ✔ Submit`。
   **再現性 = 3 回取得して 3 回とも 100%**(元 8/8 / repro1 12/12 / repro2 8/8 = 候補フレーム
   28/28 すべてで true)。`readTabBarRow` は毎回同じ tool 結果行を選んだ。
@@ -102,7 +104,7 @@ tool 結果は `⎿` の後(x≥5)から描かれ、7 通りの攻撃すべて�
 | T1 claude ツール承認(ラベル有り) | ラベル(`BOX_LABELS`)で同定して転送 | 属性を AND で追加 | **現行維持**(属性は追加の AND にしか使えない) | 属性は単独では根拠にならない。AND 方向の追加なら受理集合は狭まるが、**「安全性が下がらない」と言えるのは既存条件への純粋な AND で、fallback も行選択の変更も伴わない場合に限る**(可用性低下を迂回するための緩和分岐を足した時点で成り立たない)|
 | T2 WebFetch(ラベル無し) | 終端マーカー欠如で**検出されない** | 属性で同定して転送 | **暫定 fail-close(転送しない)** | Phase 0 で評価した属性シグナルはどれも単独では使えず、構造も借用で偽装可。加えて**現時点では独立オラクルを確認できていない**(§3 の未調査経路が埋まれば再判定)|
 | T3 MCP(ラベル無し) | `tool='Unknown'` / `args=''` のまま**転送される残余** | 属性で同定して転送 | **暫定 fail-close(転送しない)= 残余を閉じる** | 同上。ただし **T3 は現に開いている経路**なので、案C の成否と独立に閉じる価値がある(§5 の C)|
-| T4 タブ式 | `barRowIsCliDrawn`(背景色 > 0)を通過したフレームでのみ巡回 | 同述語を頑健化(R3) | **R3 は現方向では不成立**。ゲートの根拠を作り直す必要がある | 背景色 > 0 が採用不能(§1.2) |
+| T4 タブ式 | `barRowHasStyledCells`(背景色 > 0)を通過したフレームでのみ巡回 | 同述語を頑健化(R3) | **R3 は現方向では不成立**。ゲートの根拠を作り直す必要がある | 背景色 > 0 が採用不能(§1.2) |
 | T5 確認画面 | 属性が読めないフレームで戻れない回帰あり | Profile B で fail-close + PC 操作誘導 | **Profile B の fail-close 自体は作動する**(実測)| タブバー行が消えるフレームで属性検証が通らず、送出しない挙動になる |
 
 出典: `docs/attr-dump-*.md`(全行属性ダンプ 7 本)と `test/fixtures/attr/` の 7 fixture。
@@ -318,7 +320,7 @@ master plan の規定どおり、**勝手に縮小リリースせず、中止 / 
 
 | # | 内容 | 規模 | 優先度の根拠 |
 |---|---|---|---|
-| A | **README / production コメントの「既知の制約」の是正**。現行の `barRowIsCliDrawn` 注記は「素のテキストと markdown 装飾では作れない」までの保証を主張しているが、**実測で 2 経路の反例が出た**(§1.2)。利用者向けの記述が実態より強い。**是正文には「確認した版・環境・経路(Bash の `printf` 経由)」と「未測定の制御列(DCS / C1 / BS など)」を併記**し、新しい記述が別の過剰主張にならないようにする | 小(docs 中心)| 出荷済み v1.19.0 の**記述の正確性**の問題。利用者が保証の範囲を誤認する |
+| A | **README / production コメントの「既知の制約」の是正**。現行の `barRowHasStyledCells` 注記は「素のテキストと markdown 装飾では作れない」までの保証を主張しているが、**実測で 2 経路の反例が出た**(§1.2)。利用者向けの記述が実態より強い。**是正文には「確認した版・環境・経路(Bash の `printf` 経由)」と「未測定の制御列(DCS / C1 / BS など)」を併記**し、新しい記述が別の過剰主張にならないようにする | 小(docs 中心)| 出荷済み v1.19.0 の**記述の正確性**の問題。利用者が保証の範囲を誤認する |
 | B | **戻す一手の無条件許可の廃止(R2 単独)**。属性の議論と切り離しても、`forwardTabDebt > 0` による属性ゲート迂回を消すこと自体は安全側 | 中(実装 + 確認画面の PC 操作誘導が対) | 識別不能な誤送出経路を 1 本消せる。ただし可用性代償の手当てが要る |
 | C | **T3(MCP)の Unknown 転送残余を閉じる**。現行は `tool='Unknown'` / `args=''` のまま**転送される**(§2)。案C はこれを属性同定で置き換える計画だったが、同定が成立しないなら **fail-close に倒すだけでも既知の経路が 1 本閉じる** | 小〜中(判定 1 箇所 + 回帰テスト) | **A / B と違い、これは現に開いている経路**。案C の成否と独立に閉じられる。互換性影響 = 従来 Unknown で転送されていた承認が PC 操作に戻る(可用性の代償を README に明記する) |
 
@@ -372,9 +374,10 @@ C は「今すぐ閉じる」か「オラクル調査の結果を待つ」かを
 
 ### Phase 1 へ持ち越すメモ
 
-- `barRowIsCliDrawn` という名前自体が「CLI が描いた = 信用できる」という誤った含意を運んでいる。
-  実体は「背景色セルが 1 つ以上ある」でしかない。**述語名を実体に合わせる**(例 `hasStyledCells`)+
-  「描画の主体」と「内容の出所」を別概念として扱うことを設計時に検討する。
+- 旧称 `barRowIsCliDrawn` という名前自体が「CLI が描いた = 信用できる」という誤った含意を
+  運んでいた。実体は「背景色セルが 1 つ以上ある」でしかない。**述語名を実体に合わせる**提案は
+  本改名(2026-08-14、`barRowHasStyledCells`)で実行済み。残るのは「描画の主体」と「内容の出所」を
+  別概念として扱う設計の検討(Phase 1)。
 
 ## 6. 証拠の再検証手順(第三者が同じ判断を再現するために)
 
@@ -386,7 +389,7 @@ C は「今すぐ閉じる」か「オラクル調査の結果を待つ」かを
 | fixture だけで判定が再現すること | `node tools/verify-fixture.js test/fixtures/attr`(7/7 PASS)| **可能**(fixture はリポ内)|
 | 各録画の同一性 | `docs/attr-manifest.json` の `recordings.files` / `supplementary_recordings.files` に **完全な sha256 と bytes** がある。手元の録画と `sha256sum` で突き合わせる | 録画が要る |
 | #8(借用)の再現 | `e2e-raw-b-borrow.log` を cols=120 rows=40 / chunk=512 で再生し、frame #65 で `frameOf` が成立、その `iRule` 行が x=0..119 / fg=`rgb:8947848` であることを見る | 録画が要る |
-| #9(背景色ゲート)の再現 | `e2e-raw-a2-tabbar-sgr-noecho.log` を同条件で再生し、frame #29-36 で `readTabBarRow` が y=12 を選び `__test.barRowIsCliDrawn()` が true になることを見る | 録画が要る |
+| #9(背景色ゲート)の再現 | `e2e-raw-a2-tabbar-sgr-noecho.log` を同条件で再生し、frame #29-36 で `readTabBarRow` が y=12 を選び `__test.barRowHasStyledCells()` が true になることを見る | 録画が要る |
 | 属性の観測(P2-P6)| 該当 pilot 録画を再生し、`fg=rgb:11647481`(#B1B9F9)/ `bold=1` の run を探す | 録画が要る |
 
 **限界**: 録画を持たない第三者は、fixture 7 件で再現できる範囲までしか監査できない。

@@ -1742,7 +1742,7 @@ function logScreenFacts() {
       // 選択タブが **背景色** で描かれているセル数(実機で反転は全セル 0 = 使われていない)。
       // **太字は数えない**: モデルが markdown の太字で書いた行が同じ属性を持つため、数えると
       // 会話ログ 1 行でゲートが通る(実機で太字 28 セル / 背景色 0 セルを観測)。
-      // ゲート(barRowIsCliDrawn)と同じ countStyledCells を共有する = 観測とゲートがずれない。
+      // ゲート(barRowHasStyledCells)と同じ countStyledCells を共有する = 観測とゲートがずれない。
       styled = countStyledCells(buf.getLine(row.y))
     }
     wlog(
@@ -1786,6 +1786,7 @@ function countStyledCells(line) {
   return n
 }
 
+// 旧称 barRowIsCliDrawn(〜v1.20.0)。docs/attr-dump-*.md 等の測定記録は旧称のまま。
 // タブバー候補行に **背景色セルがあるか** を返すだけの述語。名前に反して
 // 「CLI が描いた行か」の判定ではなく、**安全な送信先であることの確認にもならない**
 // (下記の反例 2 経路)。巡回も位置検証も PTY へキーを送るため、テキストだけを
@@ -1818,7 +1819,7 @@ function countStyledCells(line) {
 // @xterm/headless 6.0.0 の 1 つだけ。直接描画は Bash の printf 経由のみを試した。
 // 他の制御列(DCS / C1 / BS 等)・他の tool 経由・他の CLI 版は未測定。
 // **述語名が示唆する保証は無い**(実体は「背景色セルが 1 つ以上ある」でしかない)。
-function barRowIsCliDrawn() {
+function barRowHasStyledCells() {
   if (!headlessTerm) return false
   try {
     const buf = headlessTerm.buffer.active
@@ -1826,7 +1827,7 @@ function barRowIsCliDrawn() {
     if (!row || typeof row.y !== 'number') return false
     return countStyledCells(buf.getLine(row.y)) > 0
   } catch (e) {
-    wlog(`barRowIsCliDrawn error: ${e.message}`)
+    wlog(`barRowHasStyledCells error: ${e.message}`)
     return false
   }
 }
@@ -2238,7 +2239,7 @@ if (typeof module !== 'undefined') {
       getViewportText: () => getViewportText(),
       activeTabIndex: () => activeTabIndex(),
       // 偽端末が「CLI が描いた行」を再現できているかをテスト側で前提固定するための口。
-      barRowIsCliDrawn: () => barRowIsCliDrawn(),
+      barRowHasStyledCells: () => barRowHasStyledCells(),
     },
     // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
     BOX_CHARS,
@@ -2381,7 +2382,7 @@ function shiftTabBlockedReason(viewport, { debtReturnOk = false } = {}) {
   // モデルが会話ログに書いた行がそのまま「フッタ」になる(実行で確認)。テキストで
   // 相手を確かめられない以上、**CLI が描いた行かどうか**を要求する。
   // viewport 引数だけでなく現在のバッファを読む点に注意(テキストには属性が無いため)。
-  if (!barRowIsCliDrawn()) return 'タブバーが CLI 描画でない(会話ログの偽バーと区別できない)'
+  if (!barRowHasStyledCells()) return 'タブバーが CLI 描画でない(会話ログの偽バーと区別できない)'
   if (hasTabNavFooter(viewport)) return null
   return 'タブ式のフッタが無い(送ってよい画面か確認できない)'
 }
@@ -2597,7 +2598,7 @@ async function sweepTabs() {
     const reviewVp = getViewportText()
     const endedAtReview =
       isReviewScreenText(reviewVp) &&
-      barRowIsCliDrawn() &&
+      barRowHasStyledCells() &&
       !hasTabNavFooter(reviewVp) &&
       !screenHasDialog(reviewVp)
     if (endedAtReview) wlog('tab sweep: Submit の確認画面に出た(復帰を試みる)')
