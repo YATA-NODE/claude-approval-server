@@ -37,6 +37,7 @@ const os = require('os')
 const path = require('path')
 const http = require('http')
 const crypto = require('crypto')
+const { performance } = require('perf_hooks')
 
 // -------------------------------------------------------
 // 設定読み込み
@@ -179,9 +180,18 @@ function httpRequest(method, urlPath, body, timeoutMs) {
   return (httpRequestImpl || httpRequestReal)(method, urlPath, body, timeoutMs)
 }
 
+// 不正な ms(NaN / 0 以下 / 70000 超)は 70000 に丸める。無期限化と即時破棄の
+// 両方向を封じる。本体を export しない代わりに、この純関数だけ __test seam から検証する。
+function clampRequestTimeoutMs(timeoutMs) {
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 && timeoutMs <= 70000 ? timeoutMs : 70000
+}
+
 function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
+  const ms = clampRequestTimeoutMs(timeoutMs)
   return new Promise((resolve, reject) => {
     const data = body ? Buffer.from(JSON.stringify(body)) : null
+    let settled = false
+    let destroyed = false
     const req = http.request(
       {
         hostname: '127.0.0.1',
@@ -193,28 +203,62 @@ function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
           'x-secret-token': SECRET_TOKEN,
           ...(data ? { 'Content-Length': data.length } : {}),
         },
-        timeout: timeoutMs,
+        timeout: ms,
       },
       (res) => {
         let buf = ''
         res.on('data', (d) => (buf += d))
+        // 解除は応答本文の完全受信後のみ(ヘッダー受信時に解除しない)。
         res.on('end', () => {
           if (res.statusCode >= 400) {
             // statusCode を error に持たせ、呼び出し側で 404(登録喪失)等を判別可能にする。
             const err = new Error(`HTTP ${res.statusCode}: ${buf}`)
             err.statusCode = res.statusCode
-            return reject(err)
+            return finalize(() => reject(err))
           }
           try {
-            resolve(JSON.parse(buf))
+            const parsed = JSON.parse(buf)
+            finalize(() => resolve(parsed))
           } catch (_) {
-            resolve(buf)
+            finalize(() => resolve(buf))
           }
         })
+        res.on('error', (e) => finalize(() => reject(e)))
       }
     )
-    req.on('error', reject)
-    req.on('timeout', () => req.destroy(new Error('request timeout')))
+    // 終了処理を 1 箇所に集約する。end / req error / res error / 早期 close / deadline の
+    // どれが先に来ても冪等(settled 後の resolve/reject は無視)。
+    function finalize(action) {
+      if (settled) return
+      settled = true
+      clearTimeout(dl)
+      action()
+    }
+    // destroy も 1 回だけに絞る(inactivity timeout と絶対 deadline の両方から
+    // 呼ばれうるため、二重 destroy を自前のフラグで防ぐ)。
+    function destroyReq(err) {
+      if (destroyed) return
+      destroyed = true
+      req.destroy(err)
+    }
+    // 呼出開始起点の絶対 deadline。既存の timeout オプションは非活動タイマーのため
+    // 断続応答で回避できる。経過時間そのもので打ち切る安全弁を別に持つ。
+    // 打ち切り 2 経路(deadline / 非活動 timeout)はどちらも destroy + 直接 finalize の
+    // 同形にする: destroy → 'error' 発火の cascade に依存しない(destroy 済み stream は
+    // error を emit しない場合がある)。二重呼出は settled / destroyed フラグが吸収する。
+    const dl = setTimeout(() => {
+      destroyReq(new Error('request deadline'))
+      finalize(() => reject(new Error('request deadline')))
+    }, ms)
+    dl.unref?.()
+    req.on('error', (e) => finalize(() => reject(e)))
+    req.on('timeout', () => {
+      destroyReq(new Error('request timeout'))
+      finalize(() => reject(new Error('request timeout')))
+    })
+    // 応答完了(finalize 済み)より前に接続が切れた場合の安全網。正常完了後の
+    // close は finalize が既に settled 済みなので no-op。
+    req.on('close', () => finalize(() => reject(new Error('request closed before response'))))
     if (data) req.write(data)
     req.end()
   })
@@ -2207,6 +2251,13 @@ if (typeof module !== 'undefined') {
         // 前のケースが張った抑制窓を持ち越すとゲートが素通りし、テストが
         // 「通ったつもり」になる(巡回しなかったのを latch の効果と誤読する)。
         suppressedPrompt = null
+        // notice 状態も前のケースから持ち越さない(cooldown / TTL / 差替時計が
+        // 次のケースへ漏れると「発行できたはずが cooldown で握りつぶされた」等の
+        // 誤判定になる)。
+        if (activeNotice && activeNotice.timer) clearTimeout(activeNotice.timer)
+        activeNotice = null
+        lastNoticeAtMono = null
+        noticeMonoNowImpl = () => performance.now()
       },
       // latch は純関数 nextEpoch だけでは固定できない(欠陥は ev を組み立てる
       // 呼び出し側にあった)。検出 tick そのものを回せるようにする。
@@ -2240,6 +2291,16 @@ if (typeof module !== 'undefined') {
       activeTabIndex: () => activeTabIndex(),
       // 偽端末が「CLI が描いた行」を再現できているかをテスト側で前提固定するための口。
       barRowHasStyledCells: () => barRowHasStyledCells(),
+      // PC 操作誘導 notice のテスト用シーム。
+      postPcNotice: (...a) => postPcNotice(...a),
+      clearNotice: (...a) => clearNotice(...a),
+      getActiveNotice: () => activeNotice,
+      setNoticeMonoNow: (fn) => {
+        noticeMonoNowImpl = fn
+      },
+      getNoticeConstants: () => ({ NOTICE_COOLDOWN_MS, NOTICE_TTL_MS }),
+      sanitizeLogMessage: (s) => sanitizeLogMessage(s),
+      clampRequestTimeoutMs: (ms) => clampRequestTimeoutMs(ms),
     },
     // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
     BOX_CHARS,
@@ -2290,6 +2351,73 @@ const stdinBuffer = []
 let sweepAborted = false
 let abortSettleUntil = 0
 const ABORT_SETTLE_MS = 300
+
+// -------------------------------------------------------
+// PC 操作誘導 notice(rewind 失敗時)
+// -------------------------------------------------------
+// notice は承認ではない = 注入経路に絶対に接続しない。スマホへ「PC で操作して」の
+// 情報カードを出すだけ。
+//   activeNotice: null / 予約オブジェクト(発行ごとに new した一意の参照)
+//                 / { id: 実ID文字列, timer: TTL タイマー(unref 済み) }
+//                 timer を別変数にせず実 ID 状態のフィールドで持つ = 「対で保持する」規約を
+//                 コメントでなく構造で保証する(片方だけ更新する事故を型的に不可能にする)
+//   lastNoticeAtMono: 単調時計値。POST 失敗でも戻さない(失敗連打も抑止する)
+let activeNotice = null
+let lastNoticeAtMono = null
+const NOTICE_COOLDOWN_MS = 60_000
+const NOTICE_TTL_MS = 30 * 60 * 1000
+const NOTICE_HTTP_TIMEOUT_MS = 5000
+// テストから差し替え可能にする(実行時は performance.now() をそのまま使う)。
+let noticeMonoNowImpl = () => performance.now()
+
+// 制御文字・双方向制御文字(LRM/RLM/LRE-PDF/LRI-PDI 等)をログへ流さない無害化。
+// notice 経路の catch でのみ使う(POST 失敗メッセージは相手サーバー由来の任意文字列)。
+function sanitizeLogMessage(s) {
+  return String(s)
+    .replace(/[\x00-\x1f\x7f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .slice(0, 200)
+}
+
+// 同期関数(await なし)。判定と予約を同一同期区間で行うことで、check-then-act 競合を
+// 構造的に不成立にする(async 関数内で await をまたぐと、その間に別呼出が同じ条件を
+// 通り抜けうる)。
+function tryReserveNotice(reservation, nowMono) {
+  if (activeNotice !== null) return false // reservation / 実ID とも発行中扱い
+  if (lastNoticeAtMono !== null && nowMono - lastNoticeAtMono < NOTICE_COOLDOWN_MS) return false
+  lastNoticeAtMono = nowMono // 予約は失敗でも戻さない
+  activeNotice = reservation
+  return true
+}
+
+async function postPcNotice(reason) {
+  const reservation = { kind: 'notice-reservation' } // 参照同一性が鍵(固定 sentinel 禁止 = ABA 対策)
+  if (!tryReserveNotice(reservation, noticeMonoNowImpl())) return
+  try {
+    const resp = await httpRequest('POST', '/request', { kind: 'notice', reason }, NOTICE_HTTP_TIMEOUT_MS)
+    if (!(resp && safeIdPath(resp.id))) throw new Error('invalid notice id') // 保存前検証
+    if (activeNotice === reservation) {
+      const timer = setTimeout(() => clearNotice(resp.id, 'notice ttl'), NOTICE_TTL_MS)
+      timer.unref?.()
+      activeNotice = { id: resp.id, timer }
+    } else {
+      // 発行中にクリアされていた(補償): 孤児 notice を即時回収する。
+      resolveStaleRegistration(resp.id, 'notice cancelled while in flight', NOTICE_HTTP_TIMEOUT_MS)
+    }
+  } catch (e) {
+    wlog(`pc notice post failed: ${sanitizeLogMessage(e && e.message)}`)
+  } finally {
+    if (activeNotice === reservation) activeNotice = null // 自分の予約だけ解除
+  }
+}
+
+// 全クリア経路共通(TTL / タブ UI 消失 / テスト)。捕捉した実 ID とだけ比較する。
+function clearNotice(capturedId, why) {
+  if (activeNotice && activeNotice.id === capturedId) {
+    clearTimeout(activeNotice.timer)
+    activeNotice = null
+  }
+  resolveStaleRegistration(capturedId, why, NOTICE_HTTP_TIMEOUT_MS) // 内部 catch 完備の既存関数
+}
 
 // 巡回中 / 整定窓中の stdin chunk の扱いを決める純関数。
 //   - chunk 全体が単独の Ctrl-C / 単独の Esc → そのまま通す(中断操作であって確定ではない)
@@ -2610,6 +2738,8 @@ async function sweepTabs() {
     // 未回答のまま Submit が確定する画面」に置き去りになる。その組み合わせは作らない。
     if (!sentAllBack) {
       wlog('tab sweep: 巡回後に先頭へ戻せなかった(転送しない)')
+      // await しない: sweep の finally を遅らせない(detect 抑止時間を HTTP と無関係にする)。
+      postPcNotice('rewind-failed').catch((e) => wlog(`pc notice unexpected: ${sanitizeLogMessage(e && e.message)}`))
       return null
     }
     // 正常終了は「Submit に着いて読めなくなった」場合だけ。形状衝突による打ち切りも、
@@ -2970,7 +3100,7 @@ async function registerMultiDialog(tabs, projectName, barSig = null, reRegisterC
 }
 
 // 世代交代で行き場を失った登録を明示的に解決する(サーバー側の孤児 request を残さない)。
-async function resolveStaleRegistration(id, reason) {
+async function resolveStaleRegistration(id, reason, timeoutMs) {
   if (!id) return
   const path = safeIdPath(id)
   if (!path) {
@@ -2978,10 +3108,15 @@ async function resolveStaleRegistration(id, reason) {
     return
   }
   try {
-    await httpRequest('POST', `/resolve/${path}`, {
-      answer: 'resolved-by-cli',
-      resolvedBy: 'cli',
-    })
+    await httpRequest(
+      'POST',
+      `/resolve/${path}`,
+      {
+        answer: 'resolved-by-cli',
+        resolvedBy: 'cli',
+      },
+      timeoutMs
+    )
     wlog(`stale registration ${id} resolved (${reason})`)
   } catch (e) {
     wlog(`stale registration ${id} resolve failed: ${e.message}`)
@@ -3132,6 +3267,11 @@ async function detectDialogInner() {
     identityBroken,
     dialogEnded: endedNow,
   })
+  // タブ UI が連続して見えなくなったら notice も片付ける(id を持つ実 ID 状態のみ、
+  // reservation 段階では触らない)。
+  if (activeNotice && activeNotice.id && !tabbedNow && tabbedEpoch.absent >= EPOCH_ABSENT_TICKS) {
+    clearNotice(activeNotice.id, 'tab ui gone')
+  }
 
   // タブ式の判定: parseDialog が non-null かつ実タブバーが一意に決まるなら sweep に進む。
   // 「1 回の出現につき 1 回だけ」= latch。回数制限が無いと条件が揃うたびに巡回し直す

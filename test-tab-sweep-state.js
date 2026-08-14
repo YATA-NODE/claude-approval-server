@@ -15,6 +15,7 @@
  */
 
 const fs = require('fs')
+const http = require('http')
 const {
   __test,
   DISMISSAL_MS,
@@ -1643,6 +1644,352 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     const occurrences = src.split('\\x1b[Z').length - 1
     assertEq('生の Shift+Tab は定数定義の 1 箇所だけ', occurrences, 1)
     assertEq('writeShiftTab が唯一の送出口', /function writeShiftTab\(\)/.test(src), true)
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N1] rewind 失敗で PC notice を 1 回だけ発行する(承認経路には繋がない)')
+  // -------------------------------------------------------
+  {
+    // S16 と同じ前提: 確認画面が戻る一手を受け付けないモデルにし、巡回後の rewind を
+    // 失敗させる(sweepTabs の「巡回後に先頭へ戻せなかった」分岐を実際に踏ませる)。
+    const tui = new FakeTui(mkTabs(4), { confirmRefusesShiftTab: true })
+    install(tui)
+    let seenBody = null
+    __test.setHttpStub((method, p, body) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') {
+        seenBody = body
+        return Promise.resolve({ id: 'notice-n1' })
+      }
+      return Promise.reject(new Error('unexpected call in N1'))
+    })
+    httpCalls.length = 0
+    const got = await __test.sweepTabs()
+    assertEq('rewind 失敗で sweepTabs は null', got, null)
+    assertEq('POST /request が 1 回だけ', httpCalls.filter((c) => c === 'POST /request').length, 1)
+    assertEq('body は notice 単体', seenBody, { kind: 'notice', reason: 'rewind-failed' })
+    assertEq('GET /status は 1 度も飛ばない', httpCalls.some((c) => c.startsWith('GET /status')), false)
+    assertEq('currentDialog は null のまま', __test.getCurrentDialog(), null)
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N2] 並行 100 呼出でも POST はちょうど 1 回(check-then-act 競合が構造的に不成立)')
+  // -------------------------------------------------------
+  {
+    install(plainTui(['dummy']))
+    let postCount = 0
+    let deferredResolve = null
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') {
+        postCount++
+        return new Promise((resolve) => {
+          deferredResolve = resolve
+        })
+      }
+      return Promise.resolve({})
+    })
+    httpCalls.length = 0
+    const calls = Array.from({ length: 100 }, () => __test.postPcNotice('rewind-failed'))
+    assertEq('同期区間の 100 呼出で POST は既に 1 回だけ発行済み', postCount, 1)
+    deferredResolve({ id: 'concurrent-1' })
+    await Promise.all(calls)
+    assertEq('解決後も POST はちょうど 1 回', postCount, 1)
+    assertEq('実 ID 状態に落ち着く', __test.getActiveNotice() && __test.getActiveNotice().id, 'concurrent-1')
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N3] POST reject から復旧 / cooldown 内は再発行しない / cooldown 明けで再発行できる')
+  // -------------------------------------------------------
+  {
+    install(plainTui(['dummy']))
+    let postCount = 0
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') {
+        postCount++
+        return Promise.reject(new Error('boom'))
+      }
+      return Promise.resolve({})
+    })
+    let now = 1000
+    __test.setNoticeMonoNow(() => now)
+
+    await __test.postPcNotice('rewind-failed')
+    assertEq('POST reject 後 activeNotice は null', __test.getActiveNotice(), null)
+    assertEq('POST は 1 回発行された', postCount, 1)
+
+    await __test.postPcNotice('rewind-failed') // cooldown 内の再呼出
+    assertEq('cooldown 内は POST しない', postCount, 1)
+
+    now += __test.getNoticeConstants().NOTICE_COOLDOWN_MS
+    await __test.postPcNotice('rewind-failed')
+    assertEq('cooldown を過ぎれば再発行できる', postCount, 2)
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N4] 非 2xx / 不正 id 応答から復旧し、不正 id は /resolve の宛先に使われない')
+  // -------------------------------------------------------
+  {
+    install(plainTui(['dummy']))
+    let now = 5000
+    __test.setNoticeMonoNow(() => now)
+
+    // 失敗応答の 3 型を同一手順で検証する(応答内容だけが差分なのでテーブル + ループ)。
+    const badResponses = [
+      {
+        label: '非 2xx',
+        respond: () => {
+          const err = new Error('HTTP 500: fail')
+          err.statusCode = 500
+          return Promise.reject(err)
+        },
+      },
+      { label: 'id 無し応答', respond: () => Promise.resolve({}) },
+      { label: '不正 id 応答', respond: () => Promise.resolve({ id: '../evil' }) },
+    ]
+    for (const { label, respond } of badResponses) {
+      __test.setHttpStub((method, p) => {
+        httpCalls.push(`${method} ${p}`)
+        if (method === 'POST' && p === '/request') return respond()
+        return Promise.reject(new Error('unexpected call'))
+      })
+      httpCalls.length = 0
+      await __test.postPcNotice('rewind-failed')
+      assertEq(`${label}でも activeNotice は null に復旧`, __test.getActiveNotice(), null)
+      assertEq(`${label}時に /resolve は飛ばない`, httpCalls.some((c) => c.startsWith('POST /resolve')), false)
+      now += __test.getNoticeConstants().NOTICE_COOLDOWN_MS
+    }
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N5] 応答逆転: 旧発行がクリアされても新しい予約は無傷')
+  // -------------------------------------------------------
+  {
+    install(plainTui(['dummy']))
+    let now = 9000
+    __test.setNoticeMonoNow(() => now)
+
+    let oldResolve = null
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') {
+        return new Promise((resolve) => {
+          oldResolve = resolve
+        })
+      }
+      if (method === 'POST' && p.startsWith('/resolve/')) return Promise.resolve({})
+      return Promise.reject(new Error('unexpected call'))
+    })
+    httpCalls.length = 0
+
+    const oldCall = __test.postPcNotice('rewind-failed') // 旧 POST 保留(reservation 段階)
+    const reservationStage = __test.getActiveNotice()
+    assertEq('旧発行は reservation 段階(id 未確定)', reservationStage && reservationStage.id, undefined)
+    assertEq('ここまでで POST /request は 1 回(旧発行そのもの)', httpCalls, ['POST /request'])
+
+    // reservation 段階(id 未確定)なので clearNotice(undefined, ...) は id 一致で局所クリアの
+    // みが起きる(resolveStaleRegistration は id が falsy なので no-op = 実通信は発生しない)。
+    httpCalls.length = 0
+    __test.clearNotice(undefined, 'reservation cleared for test')
+    assertEq('reservation はクリアされて null', __test.getActiveNotice(), null)
+    assertEq('reservation 段階のクリアは実通信を伴わない', httpCalls, [])
+
+    now += __test.getNoticeConstants().NOTICE_COOLDOWN_MS
+
+    let newResolve = null
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') {
+        return new Promise((resolve) => {
+          newResolve = resolve
+        })
+      }
+      if (method === 'POST' && p.startsWith('/resolve/')) return Promise.resolve({})
+      return Promise.reject(new Error('unexpected call'))
+    })
+    const newCall = __test.postPcNotice('rewind-failed') // 新しい予約
+    const freshReservation = __test.getActiveNotice()
+    assertEq('新しい予約が成立', freshReservation !== null, true)
+
+    httpCalls.length = 0
+    oldResolve({ id: 'old-id' }) // 旧 POST がここで初めて解決する(応答逆転)
+    await oldCall
+    assertEq(
+      '旧応答 id へ補償 resolve が 1 回飛ぶ',
+      httpCalls.filter((c) => c === 'POST /resolve/old-id').length,
+      1
+    )
+    assertEq('activeNotice は新予約のまま無傷(参照同一性)', __test.getActiveNotice() === freshReservation, true)
+
+    newResolve({ id: 'new-id' })
+    await newCall
+    assertEq('新発行は正常に実 ID 状態へ遷移', __test.getActiveNotice() && __test.getActiveNotice().id, 'new-id')
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N6] TTL: clearNotice で実 ID をクリアし、404 応答でもクリアは成立する')
+  // -------------------------------------------------------
+  {
+    install(plainTui(['dummy']))
+    let now = 20000
+    __test.setNoticeMonoNow(() => now)
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') return Promise.resolve({ id: 'ttl-1' })
+      if (method === 'POST' && p === '/resolve/ttl-1') {
+        const err = new Error('HTTP 404: not found')
+        err.statusCode = 404
+        return Promise.reject(err)
+      }
+      return Promise.reject(new Error('unexpected call'))
+    })
+    httpCalls.length = 0
+    await __test.postPcNotice('rewind-failed')
+    assertEq('発行成功で実 ID 状態になる', __test.getActiveNotice() && __test.getActiveNotice().id, 'ttl-1')
+
+    __test.clearNotice('ttl-1', 'notice ttl')
+    assertEq('clearNotice で null に戻る', __test.getActiveNotice(), null)
+    assertEq('POST /resolve/ttl-1 が飛ぶ', httpCalls.some((c) => c === 'POST /resolve/ttl-1'), true)
+
+    now += __test.getNoticeConstants().NOTICE_COOLDOWN_MS
+    httpCalls.length = 0
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') return Promise.resolve({ id: 'ttl-2' })
+      return Promise.reject(new Error('unexpected call'))
+    })
+    await __test.postPcNotice('rewind-failed')
+    assertEq('時計を進めれば再発行できる', __test.getActiveNotice() && __test.getActiveNotice().id, 'ttl-2')
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N7] クリア直後の新発行が旧クリアと混線しない')
+  // -------------------------------------------------------
+  {
+    install(plainTui(['dummy']))
+    let now = 30000
+    __test.setNoticeMonoNow(() => now)
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') return Promise.resolve({ id: 'old-real' })
+      if (method === 'POST' && p === '/resolve/old-real') return Promise.resolve({})
+      return Promise.reject(new Error('unexpected call'))
+    })
+    await __test.postPcNotice('rewind-failed')
+    assertEq('旧実 ID 状態が成立', __test.getActiveNotice() && __test.getActiveNotice().id, 'old-real')
+
+    httpCalls.length = 0
+    __test.clearNotice('old-real', 'tab ui gone')
+    assertEq('旧クリア直後は null', __test.getActiveNotice(), null)
+    assertEq('旧クリアの resolve は旧 id 宛のみ', httpCalls, ['POST /resolve/old-real'])
+
+    now += __test.getNoticeConstants().NOTICE_COOLDOWN_MS
+    httpCalls.length = 0
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') return Promise.resolve({ id: 'new-real' })
+      return Promise.reject(new Error('unexpected call'))
+    })
+    await __test.postPcNotice('rewind-failed')
+    assertEq('新発行は無傷で実 ID 状態になる', __test.getActiveNotice() && __test.getActiveNotice().id, 'new-real')
+    assertEq('新発行の直後も old-real 宛の resolve は増えない', httpCalls.filter((c) => c === 'POST /resolve/old-real'), [])
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N8] 連続失敗 3 サイクルでも毎回 null に復帰する')
+  // -------------------------------------------------------
+  {
+    install(plainTui(['dummy']))
+    let now = 40000
+    __test.setNoticeMonoNow(() => now)
+    let postCount = 0
+    __test.setHttpStub((method, p) => {
+      httpCalls.push(`${method} ${p}`)
+      if (method === 'POST' && p === '/request') {
+        postCount++
+        return Promise.reject(new Error('boom'))
+      }
+      return Promise.reject(new Error('unexpected call'))
+    })
+    for (let i = 0; i < 3; i++) {
+      await __test.postPcNotice('rewind-failed')
+      assertEq(`サイクル ${i + 1}: activeNotice は null に復帰`, __test.getActiveNotice(), null)
+      now += __test.getNoticeConstants().NOTICE_COOLDOWN_MS
+    }
+    assertEq('POST は計 3 回', postCount, 3)
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N9] sanitizeLogMessage は制御文字 / 行分離子を無害化し 200 字に切り詰める')
+  // -------------------------------------------------------
+  {
+    // U+2028 (LINE SEPARATOR) を制御文字と混ぜる。検証用正規表現は g フラグなし
+    // (lastIndex 罠回避)。
+    const dirty = 'boom\x00\x1f\x7f\u2028next\u2029end'
+    const clean = __test.sanitizeLogMessage(dirty)
+    const rawControlRe = /[\x00-\x1f\x7f\u2028\u2029]/
+    assertEq('制御文字 / U+2028 / U+2029 が残っていない', rawControlRe.test(clean), false)
+
+    const long = __test.sanitizeLogMessage('x'.repeat(500))
+    assertEq('200 文字に切り詰められる', long.length, 200)
+  }
+
+  // -------------------------------------------------------
+  console.log('\n[N10] httpRequestReal の絶対 deadline')
+  // -------------------------------------------------------
+  {
+    // 入口検証(ms のクランプ)は小さな純関数を直接検証する(実装本体は export しない)。
+    assertEq('NaN は 70000 に丸まる', __test.clampRequestTimeoutMs(NaN), 70000)
+    assertEq('-1 は 70000 に丸まる', __test.clampRequestTimeoutMs(-1), 70000)
+    assertEq('1e9 は 70000 に丸まる', __test.clampRequestTimeoutMs(1e9), 70000)
+    assertEq('70000 はそのまま', __test.clampRequestTimeoutMs(70000), 70000)
+    assertEq('妥当な値はそのまま', __test.clampRequestTimeoutMs(3000), 3000)
+
+    // 実ローカルサーバー(ephemeral port)を立て、ヘッダーだけ返したあと断続的に
+    // 小さなチャンクを送り続ける(= 非活動タイマーは繰り返しリセットされる)。それでも
+    // 絶対 deadline が経過時間そのもので打ち切ることを確かめる。
+    const stubServer = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.flushHeaders()
+      req.socket.on('error', () => {})
+      const iv = setInterval(() => {
+        try {
+          res.write(' ')
+        } catch (_) {}
+      }, 800)
+      res.on('close', () => clearInterval(iv))
+      req.on('close', () => clearInterval(iv))
+    })
+    await new Promise((resolve) => stubServer.listen(0, '127.0.0.1', resolve))
+    const port = stubServer.address().port
+    const savedPort = process.env.APPROVAL_PORT
+    process.env.APPROVAL_PORT = String(port)
+    delete require.cache[require.resolve('./claude-wrapper.js')]
+    const fresh = require('./claude-wrapper.js')
+
+    const t0 = Date.now()
+    let threw = null
+    try {
+      // postPcNotice は NOTICE_HTTP_TIMEOUT_MS(5000ms)で httpRequestReal を呼ぶ。
+      // 断続応答があっても非活動タイマーではなく絶対 deadline で打ち切られるはず。
+      await fresh.__test.postPcNotice('deadline-test')
+    } catch (e) {
+      threw = e
+    }
+    const elapsed = Date.now() - t0
+    assertEq('postPcNotice は例外を外に投げない(内部 catch で吸収)', threw, null)
+    assertEq(
+      'NOTICE_HTTP_TIMEOUT_MS(5000ms)前後で解放される(断続応答でも無期限化しない)',
+      elapsed >= 4900 && elapsed < 9000,
+      true
+    )
+    assertEq('deadline 後 activeNotice は解放されて null', fresh.__test.getActiveNotice(), null)
+
+    stubServer.close()
+    if (savedPort === undefined) delete process.env.APPROVAL_PORT
+    else process.env.APPROVAL_PORT = savedPort
+    delete require.cache[require.resolve('./claude-wrapper.js')]
   }
 
   // -------------------------------------------------------
