@@ -147,6 +147,139 @@
       "reproduction_counts": {
         "replay_deterministic": 1,
         "live_capture": 2
+      },
+      "supplementary_recordings": {
+        "purpose": "補助検証(採否表・分類表の出典)専用の録画。corpus(recordings.files)と違い幾何がファイルごとに異なるため、geometry を各要素に持たせる。fixture の生成元ではない。",
+        "storage": "ローカルのみ(.gitignore の e2e-*.log)",
+        "files": [
+          {
+            "name": "e2e-adv-pilot-glyph.log",
+            "bytes": 13573,
+            "sha256": "44d6a674efd16f4611570feb6448a2e3d2ab9731826b0787de58599f07b66828",
+            "geometry": {
+              "cols": 120,
+              "rows": 30
+            },
+            "kind": "敵対パイロット(グリフ出力)"
+          },
+          {
+            "name": "e2e-adv-pilot2.log",
+            "bytes": 18472,
+            "sha256": "7247faa054cee23e49855682c79c1361de87857f00d8c9abcfd609b0d6f1133e",
+            "geometry": {
+              "cols": 120,
+              "rows": 30
+            },
+            "kind": "敵対パイロット(素のテキストで枠を描く)"
+          },
+          {
+            "name": "e2e-adv-pilot4-markdown.log",
+            "bytes": 15135,
+            "sha256": "57513ccba3f015d2bdd3880a8f55fa27146de8fdb5445745666e92ff15655e12",
+            "geometry": {
+              "cols": 120,
+              "rows": 30
+            },
+            "kind": "敵対(markdown 装飾で前景色・bold・underline を得る)"
+          },
+          {
+            "name": "e2e-adv-pilot5-inlinecode.log",
+            "bytes": 14477,
+            "sha256": "9c88484c9836609e80ccf36b8f5e214ed16727940972f503de886409accf08df",
+            "geometry": {
+              "cols": 120,
+              "rows": 30
+            },
+            "kind": "敵対(インラインコード単独)"
+          },
+          {
+            "name": "e2e-adv-pilot6-rule.log",
+            "bytes": 16641,
+            "sha256": "3cb75b3148139453195d7571a9f2e8f9c0f0c5b54d8491ba7f85d6d1e8eb51ee",
+            "geometry": {
+              "cols": 120,
+              "rows": 30
+            },
+            "kind": "敵対(罫線行とラベル行の色を偽装)"
+          },
+          {
+            "name": "e2e-adv-pilot7-boldwrap.log",
+            "bytes": 16073,
+            "sha256": "043651bdf931e1b540a967e6daa221ab4210c1a568cbedff2d379075a2461ce1",
+            "geometry": {
+              "cols": 120,
+              "rows": 30
+            },
+            "kind": "敵対(色+bold の同時取得 / 300 文字の折り返し)"
+          },
+          {
+            "name": "e2e-adv-pilot8-hr.log",
+            "bytes": 14818,
+            "sha256": "5984a3f1361ab6276c6b7ea48893e4e86a3956d9c10a9e4915da79f52c4eb519",
+            "geometry": {
+              "cols": 120,
+              "rows": 30
+            },
+            "kind": "敵対(markdown 水平線 / 表 / 見出し)"
+          },
+          {
+            "name": "e2e-adv-pilot9-borrow.log",
+            "bytes": 13887,
+            "sha256": "2a3982e51a838127745e9e67f52700f35e89d290a1d37675af9b3427a582e83c",
+            "geometry": {
+              "cols": 120,
+              "rows": 30
+            },
+            "kind": "敵対(罫線借用の初回試行。未発火に終わった)"
+          },
+          {
+            "name": "e2e-adv-tooloutput-viamodel.log",
+            "bytes": 18554,
+            "sha256": "61ae8cb0930a45873e81eed8dd70c800586a0ebc3634e82603514b0686298a0d",
+            "geometry": "未記録(観測時の幾何が文書に残っていない)",
+            "kind": "敵対(生 SGR を含むファイルを cat させモデル本文へ再出力)"
+          },
+          {
+            "name": "e2e-adv-tooloutput.log",
+            "bytes": 20154,
+            "sha256": "b631cac8b2d7d3d5e256133476bdf4cdaa849fd278a5464be086c8efefb2222d",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "敵対(Bash printf の生 SGR を直接描画)"
+          },
+          {
+            "name": "e2e-raw-a-tabbar-sgr.log",
+            "bytes": 21394,
+            "sha256": "482fe5d78acf0d2f1e305f1818252e59767d20b729ebaae70fb7a5b898ca7488",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "敵対(printf の生 SGR。コマンド文字列が自己衝突する素朴 payload)"
+          },
+          {
+            "name": "e2e-raw-a2-tabbar-sgr-noecho.log",
+            "bytes": 21212,
+            "sha256": "b4221e9cc05aefa253d40a059469f109c946f3062e5d8d60e80e25dd5c710405",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "敵対(印をバイトエスケープで隠し、tool 結果行だけを候補にした payload)"
+          },
+          {
+            "name": "e2e-raw-b-borrow.log",
+            "bytes": 84795,
+            "sha256": "a4d01e4c2e477c33c451c68476196ef157f17955e05455699b003e437f4e00d9",
+            "geometry": {
+              "cols": 120,
+              "rows": 40
+            },
+            "kind": "敵対(罫線の借用。CLI 由来の x=0 全幅罫線 + モデルが書いた偽選択肢行)"
+          }
+        ]
       }
     }
   ]
