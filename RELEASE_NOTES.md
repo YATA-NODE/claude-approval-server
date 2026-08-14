@@ -11,6 +11,7 @@ This file keeps version-specific history out of the README. Japanese and English
 - タブ式複合質問を巡回した後、確認画面から戻れず転送を諦めたときに、スマホへ「PC で操作してください」という notice カードを表示するようになりました。notice は承認ではなく、選択肢・自由記入・タブを持たない一方向の情報表示で、「確認しました」で消えるだけです（PTY への注入経路には接続しません）。PC 側でタブ UI が消えたとき / wrapper 側の 30 分 TTL / サーバー側の backstop（pending 60 分経過後、次回 GC 走査で削除。GC は 5 分間隔のため通常最大 65 分程度）のいずれかで自動的に消えます。
 - 確認画面から先頭タブへ戻る Shift+Tab（借り返し）にも、背景色セルの属性検証が必須になりました（R2）。従来は借りがあれば属性検証より先に許可していましたが、「属性を確認できないフレームでは Shift+Tab を送らない」を例外なしの不変条件にするための変更です。代償として、確認画面で属性が読めない過渡フレームでは戻れなくなりますが、その場合は上記の notice で PC 操作を案内します（録画 corpus の再生で確認画面フレームはすべて属性が読め、通常運用での可用性低下は観測されていません）。
 - wrapper の全 HTTP 呼び出し（`httpRequestReal`）に、呼び出し開始を起点とする絶対 deadline（既定 70 秒）を追加しました。従来の `timeout` は無応答が続いた時間だけを見る非活動タイマーだったため、断続的に応答が来る相手だと打ち切られないことがありました。利用者の操作には影響しません。
+- 同じ関数に、1 回の応答につき 1MB の受信上限を追加しました。超過した応答は切断され、その呼び出しは失敗として扱われます(正当な応答はキュー全件でも数十 KB 程度のため、通常運用での影響は想定していません)。
 - 内部関数 `barRowIsCliDrawn` を `barRowHasStyledCells` に改名しました（挙動は変わりません）。
 
 ## v1.20.0+
@@ -119,6 +120,7 @@ This file keeps version-specific history out of the README. Japanese and English
 - When the wrapper cannot rewind back to the first tab after sweeping a tabbed multi-question dialog and gives up forwarding, the phone now shows a "please use the PC" notice card. A notice is not an approval: it has no options, free text, or tabs, and tapping "Acknowledged" simply dismisses it (it never connects to the PTY injection path). It clears itself automatically when the tab UI disappears on the PC, after a 30-minute TTL on the wrapper side, or via a server-side backstop (removed on the next GC sweep once 60 minutes have passed since it went pending; GC runs every 5 minutes, so this typically takes up to about 65 minutes).
 - The Shift+Tab that returns to the first tab after a sweep ("paying back the debt") now also requires the background-color attribute check (R2). It used to be allowed ahead of the attribute check whenever a debt was outstanding; now "never send Shift+Tab on a frame whose attributes cannot be confirmed" is an exceptionless invariant. The trade-off is that the wrapper can no longer rewind on a transient confirmation-screen frame whose attributes cannot be read — in that case it falls back to the notice above. Replays of the recorded corpus show every confirmation-screen frame with readable attributes, so this availability cost has not been observed in normal operation.
 - Every HTTP call the wrapper makes (`httpRequestReal`) now has an absolute deadline (default 70s) measured from when the call started. The previous `timeout` option was an inactivity timer that only watched for silence, so a peer that kept responding intermittently could avoid being cut off. This does not affect normal usage.
+- The same function now also caps each response at 1MB of received data. A response exceeding the cap is cut off and that call is treated as failed (legitimate responses are a few tens of KB even for a full queue, so no impact is expected in normal operation).
 - Renamed the internal function `barRowIsCliDrawn` to `barRowHasStyledCells` (no behavior change).
 
 ## v1.20.0+

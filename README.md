@@ -292,7 +292,7 @@ function codex {
 - **設定ファイル**: `approval-config.json` は `.gitignore` 済み + 上記の通り配信もされません
 - **ngrok URL 漏洩対策**: ngrok URL は毎セッション変わります。使用後はトンネルを閉じてください
 
-> ⚠️ **権限拡張の注記**: 上記の防御層により注入経路は厳格にホワイトリスト化されていますが、本ツールの認証トークン(`approval-config.json` 内の値)を保持している人は **`Type something` 経路、および codex の Tab notes(自由記入)経路を通じて対象 CLI に任意テキストを送信できます**。トークンの取り扱い(共有しない / セッション後の `approval-config.json` 削除)に注意してください。送信した本文は同一ブラウザのメモリ内に最大 1 時間残ります(履歴展開で表示可能)。共有端末で使う場合は使用後にタブを閉じてください。
+> ⚠️ **権限拡張の注記**: 上記の防御層により注入経路は厳格にホワイトリスト化されていますが、本ツールの認証トークン(`approval-config.json` 内の値)を保持している人は **`Type something` 経路、および codex の Tab notes(自由記入)経路を通じて対象 CLI に任意テキストを送信できます**。トークンの取り扱い(共有しない / セッション後の `approval-config.json` 削除)に注意してください。送信した本文は同一ブラウザのメモリ内に最大 1 時間残ります(履歴展開で表示可能)。共有端末で使う場合は使用後にタブを閉じてください。また v1.21.0 以降、トークン保有者は情報カード(`kind:'notice'`)も直接 POST できますが、`reason` は許可リスト完全一致のみで、`description` 等クライアント由来の表示文字列は一切受理されません(詳細は「複合質問の転送を諦めたとき…」の節を参照)。
 
 > ⚠️ **残っているリスクの注記**: 上の防御層は「スマホから何が送れるか」を絞るものです。
 > これとは別に、**ラベルの無い承認枠（`WebFetch` 系）では、スマホに出る表示をすり替えられる
@@ -312,6 +312,7 @@ function codex {
 - **テキスト入力モーダル**: `Type something` や codex の Tab notes を選ぶと textarea モーダルが開き、スマホからフリーテキストを送信。単一質問・複合質問の両方で対応(複合質問は各タブの回答揃い次第「すべて送信」で一括反映)
 - **キャンセルボタン**: 「すべて送信」横 / 単一質問のボタン群末尾に表示。押下で wrapper が PC TUI に Esc キーを注入してダイアログを破棄
 - 履歴表示（直近 20 件、承認元が `PC` / `スマホ` / `CLI` で識別可能。フリーテキストはサマリでは長さのみ表示し、複合質問 / フリーテキスト履歴のみ履歴カードをタップで展開して各タブの選択肢 / 入力本文をブラウザメモリから表示可能 = リロード or 1 時間 TTL で消失)
+- **お知らせカード(notice)**: 複合質問の転送を諦めたとき「PC で操作してください」の情報カードを表示(承認ではない = 「確認しました」で消すだけ。詳細は「複合質問の転送を諦めたとき…」の節)
 - プロジェクト識別（`[プロジェクト名][ツール名] 引数 — プロンプト` 形式で表示）
 - 日本語 / 英語 切替
 - ダーク / ライト テーマ切替
@@ -405,7 +406,7 @@ v1.19.0 以降、**巡回はタブバーが出現時から動いていないと�
 
 なお v1.19.0 以降、タブバーは画面下端のフッタを起点に探します。画面にタブバーらしい行が複数見えて本物を特定できないときは、キーを 1 バイトも送らずに転送を諦めます（PC で回答してください）。この状態はラッパーのログに `tab bar ambiguous` として記録されます。
 
-さらに v1.19.0 以降、**巡回は「タブバー行に背景色のセルがある」ときだけ始まります**。会話ログに**背景色を持たない**タブバーらしい行とタブ移動のヒントが流れているだけの状態ではキーを一切送りません（Claude が素のテキストや markdown 装飾で出した文章だけで巡回が始まり、通常の入力欄へ Shift+Tab が送られるのを防ぐため）。**ただし Bash の `printf` で生の ANSI エスケープを通した経路では、この条件が成立することを実測しました**（他のツール・他の出力経路は未確認。下の「この判定の保証範囲」を参照）。判定にはタブバー行のセル属性（選択中タブの背景色）を使うため、**背景色を報告しない端末ではタブ式がスマホへ転送されません**（PC で回答してください）。この状態はログに `タブバーが CLI 描画でない` として記録されます。
+さらに v1.19.0 以降、**巡回は「タブバー行に背景色のセルがある」ときだけ始まります**。会話ログに**背景色を持たない**タブバーらしい行とタブ移動のヒントが流れているだけの状態ではキーを一切送りません（Claude が素のテキストや markdown 装飾で出した文章だけで巡回が始まり、通常の入力欄へ Shift+Tab が送られるのを防ぐため）。**ただし Bash の `printf` で生の ANSI エスケープを通した経路では、この条件が成立することを実測しました**（他のツール・他の出力経路は未確認。下の「この判定の保証範囲」を参照）。判定にはタブバー行のセル属性（選択中タブの背景色）を使うため、**背景色を報告しない端末ではタブ式がスマホへ転送されません**（PC で回答してください）。この状態はログに `タブバーが背景色セルを持たない` として記録されます(v1.20.0 までは `タブバーが CLI 描画でない`)。
 
 > **この判定の保証範囲（2026-08-14 の実測で更新）**
 >
@@ -773,7 +774,7 @@ After the one-time setup:
 - **Config file**: `approval-config.json` is gitignored and is not served over HTTP.
 - **ngrok URL rotation**: the public URL changes each session. Close the tunnel when you're done.
 
-> ⚠️ **Authorization scope notice**: the defense layers above strictly whitelist what reaches the PTY, but anyone holding the auth token (value of `APPROVAL_TOKEN` in `approval-config.json`) **can send arbitrary text to the target CLI via the `Type something` path or the codex Tab-notes free-text path**. Treat the token accordingly: do not share it, and remove `approval-config.json` once your session is over. The typed body stays in the same browser's memory for up to one hour (revealable via history expansion). Close the tab after use on shared devices.
+> ⚠️ **Authorization scope notice**: the defense layers above strictly whitelist what reaches the PTY, but anyone holding the auth token (value of `APPROVAL_TOKEN` in `approval-config.json`) **can send arbitrary text to the target CLI via the `Type something` path or the codex Tab-notes free-text path**. Treat the token accordingly: do not share it, and remove `approval-config.json` once your session is over. The typed body stays in the same browser's memory for up to one hour (revealable via history expansion). Close the tab after use on shared devices. Also, since v1.21.0, a token holder can POST an information card (`kind:'notice'`) directly, but the `reason` must exactly match a whitelist and no client-supplied display strings such as `description` are accepted (see "A notice card telling you to use the PC…" below).
 
 > ⚠️ **Remaining-risk notice**: the layers above restrict *what the phone can send*. Separately from
 > that, **approval boxes without a label (`WebFetch` tools) leave room for the phone-side
@@ -794,6 +795,7 @@ After the one-time setup:
 - **Free-text modal**: selecting `Type something` or codex Tab notes opens a textarea modal. Works for both single and multi-tab questions (in the multi case, all tabs must be filled before "Submit all")
 - **Cancel button**: next to "Submit all" (multi) or at the end of the option list (single). Pressing it asks the wrapper to inject an Esc key into the PC TUI to dismiss the dialog
 - History view (last 20 resolved items, labeled `PC` / `smartphone` / `CLI`; free-text summaries record only the length, while multi-tab / free-text history cards can be tapped to inspect each tab's selection and typed body from in-memory browser state only, cleared on reload or after a 1-hour TTL)
+- **Notice card**: when the wrapper gives up forwarding a multi-tab dialog, an information card asks you to answer on the PC (not an approval — "Acknowledged" just dismisses it; see "A notice card telling you to use the PC…" below)
 - Project identification (requests are rendered as `[projectName][toolName] args — prompt`)
 - Japanese / English toggle
 - Dark / light theme toggle
@@ -879,7 +881,7 @@ Since v1.19.0 **the sweep only starts while the tab bar has not changed since th
 
 Since v1.19.0 the tab bar is located starting from the footer at the bottom of the screen. If several tab-bar-like lines are visible and the real one cannot be identified, the wrapper sends no keys at all and gives up on forwarding (answer on the PC). The wrapper log records this as `tab bar ambiguous`.
 
-Also since v1.19.0, **the sweep only starts while the tab bar row has background-colored cells.** A tab-bar-like line and a navigation hint scrolling by in the conversation **without background color** are not enough — the wrapper sends no keys in that state (this prevents plain text or markdown formatting that Claude itself printed from starting a sweep and sending Shift+Tab into the ordinary input). **However, the condition *was measured to be met* when raw ANSI escapes are passed through via Bash `printf`** (other tools and other output paths are untested; see "What this check does and does not guarantee" below). The check uses cell attributes of the tab bar row (the background color of the selected tab), so **terminals that do not report background colors will not forward tabbed dialogs to the phone** (answer them on the PC). The log records this as `タブバーが CLI 描画でない`.
+Also since v1.19.0, **the sweep only starts while the tab bar row has background-colored cells.** A tab-bar-like line and a navigation hint scrolling by in the conversation **without background color** are not enough — the wrapper sends no keys in that state (this prevents plain text or markdown formatting that Claude itself printed from starting a sweep and sending Shift+Tab into the ordinary input). **However, the condition *was measured to be met* when raw ANSI escapes are passed through via Bash `printf`** (other tools and other output paths are untested; see "What this check does and does not guarantee" below). The check uses cell attributes of the tab bar row (the background color of the selected tab), so **terminals that do not report background colors will not forward tabbed dialogs to the phone** (answer them on the PC). The log records this as `タブバーが背景色セルを持たない` (up to v1.20.0 it read `タブバーが CLI 描画でない`).
 
 > **What this check does and does not guarantee (updated 2026-08-14 after measurement)**
 >
