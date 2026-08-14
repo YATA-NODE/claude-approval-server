@@ -2051,7 +2051,7 @@ const DISMISS_WAIT_MS = DISMISSAL_MS + 1000
     process.env.APPROVAL_PORT = String(port2)
     delete require.cache[require.resolve('./claude-wrapper.js')]
     const fresh2 = require('./claude-wrapper.js')
-    assertEq('テスト内 MAX とproduction 定数が一致', fresh2.__test.getHttpConstants().MAX_RESPONSE_BYTES, 1024 * 1024)
+    assertEq('テスト内 MAX と production 定数が一致', fresh2.__test.getHttpConstants().MAX_RESPONSE_BYTES, 1024 * 1024)
 
     // 統合ケース: 2MB 応答 → 'response too large' で reject → postPcNotice は内部 catch で
     // 吸収し予約解除(= activeNotice null)。resolve 側に流れない(id 保存されない)。
