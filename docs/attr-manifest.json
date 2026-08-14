@@ -1,0 +1,153 @@
+{
+  "schema": "approval-attr-manifest/v1",
+  "purpose": "案C(セル属性チャネル)の実測・採否判定を、別環境で再現・再評価するための版固定表。fixture は manifest_ref でこのファイルのエントリを参照する。",
+  "entries": [
+    {
+      "id": "env-2026-08-10",
+      "recorded_at": "2026-08-10",
+      "fingerprint": {
+        "claude_code": "2.1.226",
+        "codex_cli": "codex-cli 0.146.0",
+        "node": "v20.20.2",
+        "node_major": 20,
+        "xterm_headless": "6.0.0",
+        "node_pty": "1.1.0",
+        "env": {
+          "TERM": "xterm-256color",
+          "COLORTERM": "truecolor",
+          "LANG": "C.UTF-8",
+          "NO_COLOR": null,
+          "FORCE_COLOR": null
+        },
+        "render_affecting_cli_settings": "未確定(Phase 0 で描画への影響を実証した項目のみを列挙する。実証前に推測で埋めない)"
+      },
+      "fingerprint_policy": {
+        "on_mismatch": "fail-close(理由コード付き)",
+        "on_missing_or_unparsable": "fail-close(理由コード付き)",
+        "excluded_from_fingerprint": [
+          "cols / rows(幅非依存のシグナルのみ採用するため認定対象外。実測を複数幅で行う)",
+          "CLI 実行物の hash(版文字列で代表。理由 = 配布物と版の対応は CLI 側が保証し、hash 検証の複雑さが単一運用者の脅威モデルに見合わない)"
+        ],
+        "note": "認定 = fingerprint 一致 AND known-answer 自己試験成功(OR ではない)"
+      },
+      "base_commits": {
+        "precursor_pr_before": "de8a09368a0425fa7f4fb4c4b0b0534eca51642d",
+        "precursor_pr_after": "269473249abc0108e68b3a4099f50985af08629c",
+        "main_pr_base": "269473249abc0108e68b3a4099f50985af08629c",
+        "note": "「旧実装で FAIL」「HEAD 比」の比較元はこの表を参照する。tag v1.19.0 = de8a093。"
+      },
+      "recordings": {
+        "storage": "ローカルのみ(.gitignore の e2e-*.log。個人環境の内容を含むため公開リポに入れない)",
+        "geometry": {
+          "cols": 120,
+          "rows": 40
+        },
+        "replay_chunk": 512,
+        "files": [
+          {
+            "name": "e2e-raw-mcp.log",
+            "bytes": 19298,
+            "sha256": "3680b3c39b0a4617e0e188a96a9b83bc70e8b5dbcd747ff7d7b20526b187c335",
+            "kind": "T3 MCP 承認枠(真正)",
+            "identifiers": {
+              "repo": "claude-approval-server",
+              "branch": "main",
+              "source": "各ログの実バイト列を grep -aoE \"claude-approval-server[^\\x1b]{0,60}\" で走査し、タイトルバーに実際に描画された repo/branch を直接確認した値(git reflog からの推定ではない)。",
+              "verified_at": "2026-08-13"
+            }
+          },
+          {
+            "name": "e2e-raw-webfetch.log",
+            "bytes": 16840,
+            "sha256": "3aff9cbf8358436fd2eea43225a2b4813f13641ef0a52c2005c207e2bf7f774d",
+            "kind": "T2 WebFetch 承認枠(真正)",
+            "identifiers": {
+              "repo": "claude-approval-server",
+              "branch": "main",
+              "source": "各ログの実バイト列を grep -aoE \"claude-approval-server[^\\x1b]{0,60}\" で走査し、タイトルバーに実際に描画された repo/branch を直接確認した値(git reflog からの推定ではない)。",
+              "verified_at": "2026-08-13"
+            }
+          },
+          {
+            "name": "e2e-raw-tabs.log",
+            "bytes": 21546,
+            "sha256": "30c6a901b3165c72cb275bbe145e39e27387e519d2b42c3df11ad13c033b620f",
+            "kind": "T1 claude ツール承認(Bash、3 択)(真正)",
+            "name_is_misleading": true,
+            "note": "ファイル名に反し、実際はタブ式 UI ではない。35 フレーム全てで readTabBarRow が 0 件、frameOf は 2 件検出。inspect-tab-e2e.js は SCENARIO=single-approval でも同じ固定名 e2e-raw-tabs.log へ書くため、単一承認の実行がタブ式録画を上書きしたものと推定する(推定であって未確認)。",
+            "identifiers": {
+              "repo": "claude-approval-server",
+              "branch": "main",
+              "source": "各ログの実バイト列を grep -aoE \"claude-approval-server[^\\x1b]{0,60}\" で走査し、タイトルバーに実際に描画された repo/branch を直接確認した値(git reflog からの推定ではない)。",
+              "verified_at": "2026-08-13"
+            }
+          },
+          {
+            "name": "e2e-raw-t4-tabbed.log",
+            "bytes": 17048,
+            "sha256": "0273f3c4aedb556d4fc2d7a29c3699c54999dfb0acdfb326a443447cf15f801a",
+            "kind": "T4 タブ式(AskUserQuestion 4 問)(真正)",
+            "recorded_by": "tools/record-frames.js --target t4-tabbed --stop-on frame",
+            "note": "タブバー行を 2 フレームで検出、barRowIsCliDrawn()=true。選択中タブは bg=rgb:11647481(#B1B9F9)・背景色セル 12・inverse 0 で、production コメントの実測値(背景色 10〜14 / inverse 不使用)と一致。",
+            "identifiers": {
+              "repo": "claude-approval-server",
+              "branch": "feature/attr-channel",
+              "source": "各ログの実バイト列を grep -aoE \"claude-approval-server[^\\x1b]{0,60}\" で走査し、タイトルバーに実際に描画された repo/branch を直接確認した値(git reflog からの推定ではない)。",
+              "verified_at": "2026-08-13"
+            }
+          },
+          {
+            "name": "e2e-raw-w80-webfetch.log",
+            "bytes": 18252,
+            "sha256": "4c321735f82b1a5dac47e955ce2696056f4a333e4534f6312d947f37fd77fe33",
+            "kind": "T2 WebFetch(真正)cols=80 rows=30 = 幅非依存の確認用",
+            "recorded_by": "tools/record-frames.js --target w80-webfetch --cols 80 --rows 30 --stop-on frame",
+            "note": "罫線行が x=0..79(端末幅いっぱい・x=0 始まり)fg=rgb:11647481、ラベル行 bold=1 で cols=120 と同じ不変条件が成立。sha256 は e2e-meta-w80-webfetch.json の rawSha256 を参照。",
+            "identifiers": {
+              "repo": "claude-approval-server",
+              "branch": "feature/attr-channel",
+              "source": "各ログの実バイト列を grep -aoE \"claude-approval-server[^\\x1b]{0,60}\" で走査し、タイトルバーに実際に描画された repo/branch を直接確認した値(git reflog からの推定ではない)。",
+              "verified_at": "2026-08-13"
+            }
+          },
+          {
+            "name": "e2e-raw-adv-fakeframe.log",
+            "bytes": 43560,
+            "sha256": "eb19e2b3d7f71980b8cd328575e900d91c5f9eac666ac13812b2625d5499efb0",
+            "kind": "敵対サンプル(モデル出力のみで frameOf を満たす偽の承認枠)",
+            "recorded_by": "tools/record-frames.js --target adv-fakeframe --stop-on frame",
+            "note": "tool 呼び出しは無く本物の枠は存在しないが、frameOf が 4 フレームで成立。罫線とラベルの色・bold は本物と一致し、差は列位置のみ(偽 x=2..59 / 本物 x=0..119)。案C の設計根拠となる中核サンプル。",
+            "identifiers": {
+              "repo": "claude-approval-server",
+              "branch": "feature/attr-channel",
+              "source": "各ログの実バイト列を grep -aoE \"claude-approval-server[^\\x1b]{0,60}\" で走査し、タイトルバーに実際に描画された repo/branch を直接確認した値(git reflog からの推定ではない)。",
+              "verified_at": "2026-08-13"
+            }
+          },
+          {
+            "name": "e2e-raw-t5-review.log",
+            "bytes": 47766,
+            "sha256": "b1d69fa3594a476d8cc740e9091c671f13039679ce1cec0e4d064af6d85223f4",
+            "kind": "T5 確認画面(Review your answers)(真正)",
+            "recorded_by": "node inspect-tab-e2e.js(default シナリオ。承認ダイアログにキーを送らず、POST /resolve に応じて production wrapper が 4 問回答注入 → 確認画面 → Submit を進める本番同等パス)",
+            "note": "確認画面は frame #60/#61 に出現。#60 はタブバー行 y=14 が残り barRowIsCliDrawn()=true、#61 はタブバー消失(y=15 空)で readTabBarRow 検出されず。Profile B は #61 で fail-close(送出なし)が正しく作動し、Cancel 選択肢で戻れる。注入途中フレームのため定常放置の完全再現は Phase 2 の実機 E2E ④ で行う。",
+            "identifiers": {
+              "repo": "claude-approval-server",
+              "branch": "feature/attr-channel",
+              "source": "各ログの実バイト列を grep -aoE \"claude-approval-server[^\\x1b]{0,60}\" で走査し、タイトルバーに実際に描画された repo/branch を直接確認した値(git reflog からの推定ではない)。",
+              "verified_at": "2026-08-13"
+            }
+          }
+        ],
+        "gaps": {
+          "T5_confirm_screen": "は既存 inspect-tab-e2e.js 経路で 2026-08-13 に取得済み(e2e-raw-t5-review.log)。record-frames.js の承認キー非送出設計は維持したまま、wrapper が POST /resolve に応じて確認画面まで自力で進む本番同等パスで到達した。",
+          "impact": "件数表 attr-count-table.md の真正側 T5 行は取得済み(2026-08-13)。T4 は 2026-08-10 に回復済み。"
+        }
+      },
+      "reproduction_counts": {
+        "replay_deterministic": 1,
+        "live_capture": 2
+      }
+    }
+  ]
+}
