@@ -29,6 +29,7 @@ const {
   resolveCodexInjection,
   isCodexCommand,
   isCodexCommandApprovalOptions,
+  looksLikeExitConfirm,
   extractCodexCommand,
   findLastToolLine,
   buildDescription,
@@ -3401,6 +3402,87 @@ console.log('\n[65] MCP 承認枠の読み取り / 未知ラベル枠の fail-cl
   const screenOnly = parseDialog(unknownBox, { screenOnly: true })
   assertEq('[65b] screenOnly では読める(タブ巡回への影響ゼロを保つ)', !!screenOnly, true)
   assertEq('[65b] screenOnly でも tool は断定しない', screenOnly && screenOnly.tool, 'Unknown')
+}
+
+// -------------------------------------------------------
+// 66. セッション終了確認ダイアログは転送しない
+// -------------------------------------------------------
+console.log('\n[66] セッション終了確認ダイアログを転送しない')
+{
+  // 実機で転送された画面の再現。ツール承認シグナル(shift+tab / "Do you want to" /
+  // 密着 ●Tool 行 / ラベル)がどれも立たないため AUQ に倒れ、承認すると選択肢 1 =
+  // セッション終了が注入できる状態だった。prompt は直前のダイアログの残存テキストで、
+  // 選択肢と噛み合っていない。
+  const exitConfirm = [
+    '─────',
+    ' ③(token 無し 401)の検証はどのサーバに向けて行いますか?',
+    ' ❯ 1. Exit and stop tasks',
+    '   2. Move to background and exit',
+    '   3. Stay',
+    ' Enter to confirm · Esc to cancel',
+  ].join('\n')
+  assertEq('[66a] 終了確認は転送しない', parseDialog(exitConfirm), null)
+  const screenOnly66 = parseDialog(exitConfirm, { screenOnly: true })
+  assertEq('[66a] screenOnly では読める(タブ巡回への影響ゼロ)', !!screenOnly66, true)
+
+  // 箱で描かれた形(描画の途中で罫線の有無が変わる)。転送可否は [66d] でまとめて固定するので、
+  // ここでは入力を組み立てるだけにする。
+  const boxed = [
+    '╭──────────────╮',
+    '│ 作業を中断しますか?',
+    '│ ❯ 1. Exit and stop tasks',
+    '│   2. Move to background and exit',
+    '│   3. Stay',
+    '╰──────────────╯',
+    ' Esc to cancel',
+  ].join('\n')
+
+  // 過剰阻止の境界: 既知文言の一致が 1 つだけの通常質問は従来どおり転送する
+  const normal = [
+    '─────',
+    ' どの方針で進めますか?',
+    ' ❯ 1. Stay on the current branch',
+    '   2. 新しいブランチを切る',
+    ' Esc to cancel',
+  ].join('\n')
+  const kept = parseDialog(normal)
+  assertEq('[66c] 汎用語だけ一致する通常質問は転送する', !!kept, true)
+  assertEq('[66c] tool は AskUserQuestion のまま', kept && kept.tool, 'AskUserQuestion')
+
+  // 分類分岐の中で判定すると、密着した ●Tool 行があるフレームがツール承認として転送され、
+  // 表示は Bash なのに押すと選択肢 1 = 終了が注入される(判定を転送可否の 1 箇所へ寄せる根拠)。
+  const gluedToolLine = '● Bash(rm -rf /home/user/important)\n' + boxed
+  assertEq('[66d] 箱つき + 密着 ●Tool 行でも終了確認は転送しない', parseDialog(gluedToolLine), null)
+
+  // 過渡フレーム: 選択肢が 1 行しか描かれていない / 本文が未描画。実機で問題が起きたのが
+  // まさにこの形なので、単独一致でも倒せることを固定する。
+  const partial1 = ['─────', ' 作業を中断しますか?', ' ❯ 1. Exit and stop tasks', ' Esc to cancel'].join('\n')
+  assertEq('[66e] 選択肢 1 行だけの過渡フレームも転送しない', parseDialog(partial1), null)
+
+  // 区切りが `1)` の行は extractOptions を通ると先頭にノイズが残り、前方一致が全部外れる。
+  const parenStyle = [
+    '─────',
+    ' 作業を中断しますか?',
+    ' ❯ 1) Exit and stop tasks',
+    '   2) Move to background and exit',
+    '   3) Stay',
+    ' Esc to cancel',
+  ].join('\n')
+  assertEq('[66f] `1)` 区切りでも転送しない', parseDialog(parenStyle), null)
+
+  // 純関数の境界。この群は CLI 側の文言が変わったことに気付くための canary でもある
+  // (判定はリテラルの前方一致なので、文言が変われば無言で転送に戻る)。
+  assertEq('[66g] 対象の文言は 1 つでも真', looksLikeExitConfirm(['Exit and stop tasks']), true)
+  assertEq(
+    '[66g] もう一方の文言も 1 つで真',
+    looksLikeExitConfirm(['Move to background and exit']),
+    true
+  )
+  assertEq('[66g] 汎用語は判定に使わない', looksLikeExitConfirm(['Stay on the current branch']), false)
+  assertEq('[66g] Stay 単独も偽', looksLikeExitConfirm(['Stay']), false)
+  assertEq('[66g] 大小無視', looksLikeExitConfirm(['EXIT AND STOP TASKS']), true)
+  assertEq('[66g] 配列以外は偽', looksLikeExitConfirm(null), false)
+  assertEq('[66g] 空配列は偽', looksLikeExitConfirm([]), false)
 }
 
 // -------------------------------------------------------
