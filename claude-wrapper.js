@@ -1308,6 +1308,13 @@ function parseDialog(buf, opts = {}) {
   // ガード等)のためのモード。転送可否のポリシーを増やしても、そちらの述語が裏返らないように
   // する(裏返ると、描画途中の承認画面が「ダイアログではない」と見なされて Shift+Tab の
   // 送出先になる。実行で再現)。
+  // 承認ではない選択肢画面(セッション終了の確認)は、どの分類に落ちても転送しない。分類分岐の
+  // 中で判定すると、密着した ●Tool 行があるフレームでツール承認として転送され、表示は
+  // `Bash <コマンド>` なのに押すと選択肢 1 = 終了が注入される(実行で再現)。
+  // 既に理由が立っているときは上書きしない。転送しない結論は同じで、先に立った理由のほうが
+  // 原因に近い(描画途中で truncated かつ exit-confirm のとき、切り分けが 1 段遠くなるのを避ける)。
+  if (!unforwardable && looksLikeExitConfirm(options)) unforwardable = 'exit-confirm'
+
   if (unforwardable && !opts.screenOnly) {
     logUnforwardableOnce(unforwardable, args)
     return null
@@ -1923,6 +1930,19 @@ function nextEpoch(state, ev) {
 // 注入直前の最後の関門で再検証)。
 const FREE_TEXT_OPTION_RE = /^Type\s+something\.?$/i
 const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
+// セッション終了の確認画面を承認枠から外す純関数。この画面は「選択肢 1..N + 終端マーカー」という
+// 承認枠と同じ構造を持つため、承認ではないのに転送されていた(実機で転送され、prompt には直前の
+// ダイアログの残存テキストが入っていた)。承認すると選択肢 1 = セッション終了が注入される。
+// この 2 文言は通常の質問の選択肢にはまず現れないので、**どちらか 1 つ読めれば倒す**(選択肢が
+// 1 行しか描かれていない過渡フレームを取り逃さないため。実機の再現がまさにその形だった)。
+// 前方一致にするのは、終端マーカーが同じ行に残る個体(`Stay Enter to confirm ·` 等)があるため。
+// 先頭のノイズを剥がしてから見る: `1)` 区切りの行は extractOptions を通ると `) Exit …` の形で残る
+// (後処理が落とすのはドットと空白だけ)。
+const EXIT_CONFIRM_RE = /^(?:exit and stop tasks|move to background and exit)\b/i
+function looksLikeExitConfirm(options) {
+  if (!Array.isArray(options)) return false
+  return options.some((o) => EXIT_CONFIRM_RE.test(String(o).replace(/^[^\p{L}\p{N}]+/u, '')))
+}
 
 // codex のコマンド承認 option ラベル末尾に内包されるショートカット
 // 文字を抽出する純関数。codex の承認 TUI は claude と異なり「番号 + Enter」型でなく
@@ -1968,6 +1988,7 @@ function isCodexCommandApprovalOptions(options) {
     options.every((o) => extractCodexShortcut(o) !== null)
   )
 }
+
 
 // codex プランモード質問の「自由記入 option」(末尾 (tab))の番号(1-based)を
 // 返す純関数。codex は `None of the above … (tab)` を選び Tab を押すと notes 入力欄が開く。この
@@ -2045,6 +2066,7 @@ const UNFORWARDABLE_REASON = {
   'empty-target': '対象が空のツール承認',
   'codex-unreadable': 'codex コマンド本文を読み切れない',
   'unknown-tool': '未知のツール種別の承認枠',
+  'exit-confirm': 'セッション終了の確認画面(承認ではない)',
 }
 let lastUnforwardableKey = null
 function logUnforwardableOnce(code, args) {
@@ -2205,6 +2227,7 @@ if (typeof module !== 'undefined') {
     resolveCodexInjection,
     isCodexCommand,
     isCodexCommandApprovalOptions,
+    looksLikeExitConfirm,
     extractCodexCommand,
     findLastToolLine,
     buildDescription,

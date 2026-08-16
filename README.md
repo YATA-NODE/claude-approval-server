@@ -466,6 +466,12 @@ v1.19.0 以降、**巡回はタブバーが出現時から動いていないと�
 - **発行上限**: プロセスが生存している wrapper インスタンスごとに 60 秒に 1 回まで(wrapper を再起動すると制限もリセットされます)
 - **権限の残余**: 認証トークンを保持していれば `/request` に直接 `kind:'notice'` を POST すること自体は可能です。ただしサーバーは `reason` を許可リスト完全一致でしか受理せず、`description` 等クライアント由来の可変フィールドは一切受理しません(表示文言は固定の i18n テキストのみ)。トークン保有者が送り込める内容のうち、notice は本文を持たない部分集合にとどまります
 
+### セッション終了の確認画面がスマホに出ていた
+
+v1.21.1 より前は、`Exit and stop tasks` / `Move to background and exit` / `Stay` の選択肢を持つ**セッション終了の確認画面**が承認枠として転送されることがありました。この画面は承認ではありませんが、承認枠と同じ構造(選択肢 1〜N + 終端マーカー)を持ち、ツール承認のシグナル(shift+tab ヒント / 定型句 / 密着した `● Tool(...)` 行 / ラベル)がどれも立たないため `AskUserQuestion` に分類されていました。スマホから承認すると選択肢 1(= セッションの終了)が PC 側に注入されます。
+
+**v1.21.1 からこの画面は転送しません**(PC 側で操作してください)。`Exit and stop tasks` / `Move to background and exit` はこの画面以外にまず現れないため、**どちらか 1 つが読めた時点で止めます**(選択肢が 1 行しか描かれていない途中のフレームでも取り逃さないため)。`Stay` は通常の質問にも出る語なので**判定には使いません**。判定はツール名を決めた後の「転送してよいか」の 1 箇所で行うので、承認枠の上に `● Tool(...)` 行があるフレームでも同じように止まります。止めたことはラッパーのログに `承認可能化しない(exit-confirm: …)` として残ります。
+
 ### 承認の表示内容は「承認枠の中身」から読みます
 
 v1.19.0 以降、ツール名とコマンドは **承認枠の中に描かれたコマンド本文**（`Bash command` / `Run command` ラベルの下）から読み取ります。`● Tool(...)` 行を使うのは、その行が**承認枠の罫線に密着している**ときだけです。枠から離れた行（前のターンの残りや、コマンド本文の中に書かれた `● Read(...)`）を採用すると、スマホの表示と実際に承認される内容がずれるためです。**承認枠の外**（枠の上に流れている会話ログ）は表示の材料にしません。
@@ -962,6 +968,12 @@ When the wrapper cannot rewind back to the first tab after sweeping a tabbed mul
 - **Three ways it disappears on its own**: the tab UI disappearing on the PC side / a 30-minute TTL on the wrapper side / a server-side backstop (removed on the next GC sweep once 60 minutes have passed since it went pending; GC runs every 5 minutes, so in practice it can take up to roughly 65 minutes to clear)
 - **Issuance limit**: at most once per 60 seconds per live wrapper instance (the limit resets if the wrapper restarts)
 - **What the token still allows**: anyone holding the auth token can POST `kind:'notice'` to `/request` directly. The server only accepts a `reason` that exactly matches its whitelist and rejects every client-supplied content field such as `description` (the displayed text is always the fixed i18n string). Of everything a token holder can send, a notice is the subset that carries no body at all.
+
+### The session-exit confirmation screen used to show up on the phone
+
+Before v1.21.1, the **session-exit confirmation screen** (`Exit and stop tasks` / `Move to background and exit` / `Stay`) could be forwarded as an approval. It is not an approval, but it has the same structure as an approval box (options `1..N` plus an end marker) and raises none of the tool-approval signals (shift+tab hint, the known approval phrase, a glued `● Tool(...)` line, a label), so it was classified as an `AskUserQuestion`. Approving it from the phone injects option 1 — ending the session — on the PC.
+
+**Since v1.21.1 this screen is never forwarded** (answer it on the PC). `Exit and stop tasks` and `Move to background and exit` practically never appear outside this screen, so **either one alone is enough to suppress forwarding** — this also covers partially drawn frames where only the first option is on screen. `Stay` is a word ordinary questions use, so it **is not part of the check at all**. The check runs at the single "may this be forwarded" decision point after the tool name is resolved, so the screen is suppressed even when a `● Tool(...)` line sits above the box. When it is suppressed, the wrapper log records `承認可能化しない(exit-confirm: …)`.
 
 ### What the phone shows is read from inside the approval box
 

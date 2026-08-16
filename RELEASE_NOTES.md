@@ -6,6 +6,11 @@ This file keeps version-specific history out of the README. Japanese and English
 
 # リリースノート（日本語）
 
+## v1.21.1+
+
+- **セッション終了の確認画面(`Exit and stop tasks` / `Move to background and exit` / `Stay`)がスマホへ転送されなくなりました**。この画面は承認ではありませんが、「選択肢 1〜N + 終端マーカー」という承認枠と同じ構造を持ち、ツール承認のシグナルがどれも立たないため、これまで `AskUserQuestion` として転送されていました。スマホから承認すると選択肢 1(= セッションの終了)が PC 側に注入されるため、読めても転送しない扱いに変えています。`Exit and stop tasks` / `Move to background and exit` はこの画面以外にまず現れないため、どちらか 1 つが読めた時点で止めます(選択肢が 1 行しか描かれていない途中のフレームでも取り逃さないため)。`Stay` は通常の質問にも出る語なので判定には使いません。判定は「転送してよいか」を決める 1 箇所で行うため、承認枠の上に `● Tool(...)` 行があるフレームでも同じように止まります。**この画面が出たときは PC 側で操作してください**。
+- 転送を止めた理由はラッパーのログに `承認可能化しない(exit-confirm: …)` として記録されます(`APPROVAL_WRAPPER_LOG` 設定時)。
+
 ## v1.21.0+
 
 - タブ式複合質問を巡回した後、確認画面から戻れず転送を諦めたときに、スマホへ「PC で操作してください」という notice カードを表示するようになりました。notice は承認ではなく、選択肢・自由記入・タブを持たない一方向の情報表示で、「確認しました」で消えるだけです（PTY への注入経路には接続しません）。PC 側でタブ UI が消えたとき / wrapper 側の 30 分 TTL / サーバー側の backstop（pending 60 分経過後、次回 GC 走査で削除。GC は 5 分間隔のため通常最大 65 分程度）のいずれかで自動的に消えます。
@@ -114,6 +119,11 @@ This file keeps version-specific history out of the README. Japanese and English
 ---
 
 # Release Notes (English)
+
+## v1.21.1+
+
+- **The session-exit confirmation screen (`Exit and stop tasks` / `Move to background and exit` / `Stay`) is no longer forwarded to the phone.** That screen is not an approval, but it has the same structure as an approval box (options `1..N` plus an end marker) and raises none of the tool-approval signals, so it used to be forwarded as an `AskUserQuestion`. Approving it from the phone would inject option 1 — ending the session — on the PC, so the wrapper now reads it but refuses to forward it. `Exit and stop tasks` and `Move to background and exit` practically never appear outside this screen, so either one alone suppresses forwarding — this also covers partially drawn frames where only the first option is on screen. `Stay` is a word ordinary questions use, so it is not part of the check at all. The check runs at the single "may this be forwarded" decision point, so the screen is suppressed even when a `● Tool(...)` line sits above the box. **Answer this screen on the PC.**
+- The reason is recorded in the wrapper log as `承認可能化しない(exit-confirm: …)` when `APPROVAL_WRAPPER_LOG` is set.
 
 ## v1.21.0+
 
