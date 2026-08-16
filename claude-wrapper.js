@@ -37,6 +37,7 @@ const os = require('os')
 const path = require('path')
 const http = require('http')
 const crypto = require('crypto')
+const { performance } = require('perf_hooks')
 
 // -------------------------------------------------------
 // 設定読み込み
@@ -179,9 +180,21 @@ function httpRequest(method, urlPath, body, timeoutMs) {
   return (httpRequestImpl || httpRequestReal)(method, urlPath, body, timeoutMs)
 }
 
+// 不正な ms(NaN / 0 以下 / 70000 超)は 70000 に丸める。無期限化と即時破棄の
+// 両方向を封じる。本体を export しない代わりに、この純関数だけ __test seam から検証する。
+function clampRequestTimeoutMs(timeoutMs) {
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 && timeoutMs <= 70000 ? timeoutMs : 70000
+}
+
+// 1 応答の受信上限(下の data ハンドラ参照)。
+const MAX_RESPONSE_BYTES = 1024 * 1024
+
 function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
+  const ms = clampRequestTimeoutMs(timeoutMs)
   return new Promise((resolve, reject) => {
     const data = body ? Buffer.from(JSON.stringify(body)) : null
+    let settled = false
+    let destroyed = false
     const req = http.request(
       {
         hostname: '127.0.0.1',
@@ -193,28 +206,79 @@ function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
           'x-secret-token': SECRET_TOKEN,
           ...(data ? { 'Content-Length': data.length } : {}),
         },
-        timeout: timeoutMs,
+        timeout: ms,
       },
       (res) => {
-        let buf = ''
-        res.on('data', (d) => (buf += d))
+        // chunk は Buffer のまま蓄積し、デコードは完了時に 1 回だけ行う。chunk ごとに
+        // 文字列へ暗黙変換すると、UTF-8 のマルチバイト文字が chunk 境界で破損しうる。
+        const chunks = []
+        let receivedBytes = 0
+        res.on('data', (d) => {
+          // 応答サイズの上限(バイト数で判定。文字数だとマルチバイト応答が実バイトで
+          // 上限を超えて積める)。deadline は時間の防壁であってサイズの防壁ではない。
+          // 正当な応答は queue 全件でも数十 KB(全フィールドが登録時に clip 済み)。
+          receivedBytes += d.length
+          if (receivedBytes > MAX_RESPONSE_BYTES) {
+            destroyReq(new Error('response too large'))
+            finalize(() => reject(new Error('response too large')))
+            return
+          }
+          chunks.push(d)
+        })
+        // 解除は応答本文の完全受信後のみ(ヘッダー受信時に解除しない)。
         res.on('end', () => {
+          const buf = Buffer.concat(chunks).toString('utf8')
           if (res.statusCode >= 400) {
             // statusCode を error に持たせ、呼び出し側で 404(登録喪失)等を判別可能にする。
-            const err = new Error(`HTTP ${res.statusCode}: ${buf}`)
+            // message へ載せる応答本文は上限付き抜粋(全文を error に運ぶと、そのまま
+            // ログへ流す呼び出し側で肥大・注入の面になる。無害化は各ログ地点の責務)。
+            const err = new Error(`HTTP ${res.statusCode}: ${String(buf).slice(0, 200)}`)
             err.statusCode = res.statusCode
-            return reject(err)
+            return finalize(() => reject(err))
           }
           try {
-            resolve(JSON.parse(buf))
+            const parsed = JSON.parse(buf)
+            finalize(() => resolve(parsed))
           } catch (_) {
-            resolve(buf)
+            finalize(() => resolve(buf))
           }
         })
+        res.on('error', (e) => finalize(() => reject(e)))
       }
     )
-    req.on('error', reject)
-    req.on('timeout', () => req.destroy(new Error('request timeout')))
+    // 終了処理を 1 箇所に集約する。end / req error / res error / 早期 close / deadline の
+    // どれが先に来ても冪等(settled 後の resolve/reject は無視)。
+    function finalize(action) {
+      if (settled) return
+      settled = true
+      clearTimeout(dl)
+      action()
+    }
+    // destroy も 1 回だけに絞る(inactivity timeout と絶対 deadline の両方から
+    // 呼ばれうるため、二重 destroy を自前のフラグで防ぐ)。
+    function destroyReq(err) {
+      if (destroyed) return
+      destroyed = true
+      req.destroy(err)
+    }
+    // 呼出開始起点の絶対 deadline。既存の timeout オプションは非活動タイマーのため
+    // 断続応答で回避できる。経過時間そのもので打ち切る安全弁を別に持つ。
+    // 打ち切り 2 経路(deadline / 非活動 timeout)はどちらも destroy + 直接 finalize の
+    // 同形にする: destroy → 'error' 発火の cascade に依存しない(destroy 済み stream は
+    // error を emit しない場合がある)。二重呼出は settled / destroyed フラグが吸収する。
+    const dl = setTimeout(() => {
+      destroyReq(new Error('request deadline'))
+      finalize(() => reject(new Error('request deadline')))
+    }, ms)
+    dl.unref?.()
+    req.on('error', (e) => finalize(() => reject(e)))
+    req.on('timeout', () => {
+      destroyReq(new Error('request timeout'))
+      finalize(() => reject(new Error('request timeout')))
+    })
+    // 応答完了(finalize 済み)より前に接続が切れた場合の安全網。正常完了後の
+    // close は finalize が既に settled 済みなので no-op。
+    req.on('close', () => finalize(() => reject(new Error('request closed before response'))))
     if (data) req.write(data)
     req.end()
   })
@@ -1742,7 +1806,7 @@ function logScreenFacts() {
       // 選択タブが **背景色** で描かれているセル数(実機で反転は全セル 0 = 使われていない)。
       // **太字は数えない**: モデルが markdown の太字で書いた行が同じ属性を持つため、数えると
       // 会話ログ 1 行でゲートが通る(実機で太字 28 セル / 背景色 0 セルを観測)。
-      // ゲート(barRowIsCliDrawn)と同じ countStyledCells を共有する = 観測とゲートがずれない。
+      // ゲート(barRowHasStyledCells)と同じ countStyledCells を共有する = 観測とゲートがずれない。
       styled = countStyledCells(buf.getLine(row.y))
     }
     wlog(
@@ -1786,6 +1850,7 @@ function countStyledCells(line) {
   return n
 }
 
+// 旧称 barRowIsCliDrawn(〜v1.20.0)。docs/attr-dump-*.md 等の測定記録は旧称のまま。
 // タブバー候補行に **背景色セルがあるか** を返すだけの述語。名前に反して
 // 「CLI が描いた行か」の判定ではなく、**安全な送信先であることの確認にもならない**
 // (下記の反例 2 経路)。巡回も位置検証も PTY へキーを送るため、テキストだけを
@@ -1818,7 +1883,7 @@ function countStyledCells(line) {
 // @xterm/headless 6.0.0 の 1 つだけ。直接描画は Bash の printf 経由のみを試した。
 // 他の制御列(DCS / C1 / BS 等)・他の tool 経由・他の CLI 版は未測定。
 // **述語名が示唆する保証は無い**(実体は「背景色セルが 1 つ以上ある」でしかない)。
-function barRowIsCliDrawn() {
+function barRowHasStyledCells() {
   if (!headlessTerm) return false
   try {
     const buf = headlessTerm.buffer.active
@@ -1826,7 +1891,7 @@ function barRowIsCliDrawn() {
     if (!row || typeof row.y !== 'number') return false
     return countStyledCells(buf.getLine(row.y)) > 0
   } catch (e) {
-    wlog(`barRowIsCliDrawn error: ${e.message}`)
+    wlog(`barRowHasStyledCells error: ${e.message}`)
     return false
   }
 }
@@ -2152,6 +2217,10 @@ if (typeof module !== 'undefined') {
     codexMultiKeySequence,
     // タブ巡回の 1 回化 / 完全性ゲート / 注入前の位置検証
     findTabBarLine,
+    // read-only export 追加(test-shift-tab-diff.js 用、ロジック変更なし)。
+    // フッタ(終端マーカー最終出現)行 index。shiftTabBlockedReason の footAbsent 判定と
+    // 同じ関数をテスト側からも直接呼べるようにする(手写しして drift させない)。
+    findFooterIndex,
     tabBarScan,
     tabbedScreenState,
     tabbedScreenScan,
@@ -2206,6 +2275,13 @@ if (typeof module !== 'undefined') {
         // 前のケースが張った抑制窓を持ち越すとゲートが素通りし、テストが
         // 「通ったつもり」になる(巡回しなかったのを latch の効果と誤読する)。
         suppressedPrompt = null
+        // notice 状態も前のケースから持ち越さない(cooldown / TTL / 差替時計が
+        // 次のケースへ漏れると「発行できたはずが cooldown で握りつぶされた」等の
+        // 誤判定になる)。
+        if (activeNotice && activeNotice.timer) clearTimeout(activeNotice.timer)
+        activeNotice = null
+        lastNoticeAtMono = null
+        noticeMonoNowImpl = () => performance.now()
       },
       // latch は純関数 nextEpoch だけでは固定できない(欠陥は ev を組み立てる
       // 呼び出し側にあった)。検出 tick そのものを回せるようにする。
@@ -2238,7 +2314,21 @@ if (typeof module !== 'undefined') {
       getViewportText: () => getViewportText(),
       activeTabIndex: () => activeTabIndex(),
       // 偽端末が「CLI が描いた行」を再現できているかをテスト側で前提固定するための口。
-      barRowIsCliDrawn: () => barRowIsCliDrawn(),
+      barRowHasStyledCells: () => barRowHasStyledCells(),
+      // PC 操作誘導 notice のテスト用シーム。
+      postPcNotice: (...a) => postPcNotice(...a),
+      clearNotice: (...a) => clearNotice(...a),
+      getActiveNotice: () => activeNotice,
+      setNoticeMonoNow: (fn) => {
+        noticeMonoNowImpl = fn
+      },
+      getNoticeConstants: () => ({ NOTICE_COOLDOWN_MS, NOTICE_TTL_MS }),
+      // 実 HTTP 層の直接検証用(サイズ上限の境界値・マルチバイトデコードをテストで
+      // 観測可能にする。stub を張らずに実物を呼ぶ)。
+      httpRequestReal: (...a) => httpRequestReal(...a),
+      getHttpConstants: () => ({ MAX_RESPONSE_BYTES }),
+      sanitizeLogMessage: (s) => sanitizeLogMessage(s),
+      clampRequestTimeoutMs: (ms) => clampRequestTimeoutMs(ms),
     },
     // 境界文字定数(test-parse-dialog.js [22] の membership 固定用)
     BOX_CHARS,
@@ -2289,6 +2379,73 @@ const stdinBuffer = []
 let sweepAborted = false
 let abortSettleUntil = 0
 const ABORT_SETTLE_MS = 300
+
+// -------------------------------------------------------
+// PC 操作誘導 notice(rewind 失敗時)
+// -------------------------------------------------------
+// notice は承認ではない = 注入経路に絶対に接続しない。スマホへ「PC で操作して」の
+// 情報カードを出すだけ。
+//   activeNotice: null / 予約オブジェクト(発行ごとに new した一意の参照)
+//                 / { id: 実ID文字列, timer: TTL タイマー(unref 済み) }
+//                 timer を別変数にせず実 ID 状態のフィールドで持つ = 「対で保持する」規約を
+//                 コメントでなく構造で保証する(片方だけ更新する事故を型的に不可能にする)
+//   lastNoticeAtMono: 単調時計値。POST 失敗でも戻さない(失敗連打も抑止する)
+let activeNotice = null
+let lastNoticeAtMono = null
+const NOTICE_COOLDOWN_MS = 60_000
+const NOTICE_TTL_MS = 30 * 60 * 1000
+const NOTICE_HTTP_TIMEOUT_MS = 5000
+// テストから差し替え可能にする(実行時は performance.now() をそのまま使う)。
+let noticeMonoNowImpl = () => performance.now()
+
+// 制御文字・双方向制御文字(LRM/RLM/LRE-PDF/LRI-PDI 等)をログへ流さない無害化。
+// notice 経路の catch でのみ使う(POST 失敗メッセージは相手サーバー由来の任意文字列)。
+function sanitizeLogMessage(s) {
+  return String(s)
+    .replace(/[\x00-\x1f\x7f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .slice(0, 200)
+}
+
+// 同期関数(await なし)。判定と予約を同一同期区間で行うことで、check-then-act 競合を
+// 構造的に不成立にする(async 関数内で await をまたぐと、その間に別呼出が同じ条件を
+// 通り抜けうる)。
+function tryReserveNotice(reservation, nowMono) {
+  if (activeNotice !== null) return false // reservation / 実ID とも発行中扱い
+  if (lastNoticeAtMono !== null && nowMono - lastNoticeAtMono < NOTICE_COOLDOWN_MS) return false
+  lastNoticeAtMono = nowMono // 予約は失敗でも戻さない
+  activeNotice = reservation
+  return true
+}
+
+async function postPcNotice(reason) {
+  const reservation = { kind: 'notice-reservation' } // 参照同一性が鍵(固定 sentinel 禁止 = ABA 対策)
+  if (!tryReserveNotice(reservation, noticeMonoNowImpl())) return
+  try {
+    const resp = await httpRequest('POST', '/request', { kind: 'notice', reason }, NOTICE_HTTP_TIMEOUT_MS)
+    if (!(resp && safeIdPath(resp.id))) throw new Error('invalid notice id') // 保存前検証
+    if (activeNotice === reservation) {
+      const timer = setTimeout(() => clearNotice(resp.id, 'notice ttl'), NOTICE_TTL_MS)
+      timer.unref?.()
+      activeNotice = { id: resp.id, timer }
+    } else {
+      // 発行中にクリアされていた(補償): 孤児 notice を即時回収する。
+      resolveStaleRegistration(resp.id, 'notice cancelled while in flight', NOTICE_HTTP_TIMEOUT_MS)
+    }
+  } catch (e) {
+    wlog(`pc notice post failed: ${sanitizeLogMessage(e && e.message)}`)
+  } finally {
+    if (activeNotice === reservation) activeNotice = null // 自分の予約だけ解除
+  }
+}
+
+// 全クリア経路共通(TTL / タブ UI 消失 / テスト)。捕捉した実 ID とだけ比較する。
+function clearNotice(capturedId, why) {
+  if (activeNotice && activeNotice.id === capturedId) {
+    clearTimeout(activeNotice.timer)
+    activeNotice = null
+  }
+  resolveStaleRegistration(capturedId, why, NOTICE_HTTP_TIMEOUT_MS) // 内部 catch 完備の既存関数
+}
 
 // 巡回中 / 整定窓中の stdin chunk の扱いを決める純関数。
 //   - chunk 全体が単独の Ctrl-C / 単独の Esc → そのまま通す(中断操作であって確定ではない)
@@ -2354,16 +2511,26 @@ function writeKey(bytes) {
 //   逆に開始が緩いと「開始できるのに戻れない」= フォーカスが Submit に残る事故になる。
 function shiftTabBlockedReason(viewport, { debtReturnOk = false } = {}) {
   if (isExitPlanScreen(viewport)) return 'ExitPlanMode (承認確定キーのため送らない)'
-  // **借りを返す戻り一手は属性ゲートより先に見る**。属性ゲートを先に置くと、確認画面で
-  // バー行の背景色が読めないときに戻り道へ到達できず、未回答のままフォーカスが Submit に
-  // 残る(実測の回帰)。借りは wrapper 内部変数で外から作れないうえ、送るのは自分が押した分を
-  // 返す一手だけなので、ここに CLI 描画の証明を要求する必要がない。
+  // **属性ゲートは借り返しにも必須**(R2)。かつては借り返しだけ属性ゲートより先に
+  // 許可していた(「借りは内部変数で外から作れない」を根拠に)が、送出の可否を
+  // 決めるのは借りの真正性ではなく**送出先の画面**で、その識別はテキストだけでは
+  // できない(偽バー行は会話ログに書ける)。属性を確認できないフレームでは
+  // Shift+Tab を送らない、を例外なしの不変条件にする。
+  // 代償: 確認画面でバー行の背景色が読めない過渡フレームに当たると rewind が失敗する。
+  // その場合は転送せず、sweepTabs 側が postPcNotice でスマホへ PC 操作を誘導する。
+  // 注意: 属性ゲートの通過は「CLI が描いた行」の証明ではない(barRowHasStyledCells の
+  // 関数コメントの反例 2 経路)。R2 は無条件許可経路の除去 = リスク縮小であって、
+  // 真正性の保証ではない。barRowHasStyledCells は viewport 引数でなく現在のバッファを
+  // 読む点に注意(テキストには属性が無いため)。
+  if (!barRowHasStyledCells()) return 'タブバーが背景色セルを持たない(会話ログの偽バーと区別できない)'
+  if (hasTabNavFooter(viewport)) return null
+  // 借りを返す一手だけは、タブナビフッタが無い確認画面でも許す(属性ゲート通過後)。
   //
   // **終端マーカー不在の条件を外さないこと**。バー行の有無だけを条件にすると、
   // それは会話ログの 1 行でも成立する(モデル生成テキストで作れる)ので、巡回中に
   // 画面が通常の承認ダイアログへ差し替わったとき、そこへ Shift+Tab が飛ぶ。
   // 通常の承認画面ではその一手が「このセッションの編集をすべて許可」= 承認ゲートを
-  // 無人で外す操作になる(実測: この条件が無いと差替後の画面へ 3 本送出、HEAD は 0 本)。
+  // 無人で外す操作になる(実測: この条件が無いと差替後の画面へ 3 本送出、従来実装は 0 本)。
   // 条件は **終端マーカーが 1 つも見えないこと**。「`parseDialog` で読めない」を条件にすると
   // 弁別にならない: 実在する承認画面でも、5b 完全性ガードに掛かるフレーム(重畳描画で同じ
   // 番号が二重に出る等)は読めないので偽になる(実行で再現)= そこへ Shift+Tab が飛ぶ。
@@ -2377,12 +2544,6 @@ function shiftTabBlockedReason(viewport, { debtReturnOk = false } = {}) {
   ) {
     return null
   }
-  // フッタも終端マーカーも画面テキストなので、実ダイアログが 1 つも出ていない場面では
-  // モデルが会話ログに書いた行がそのまま「フッタ」になる(実行で確認)。テキストで
-  // 相手を確かめられない以上、**CLI が描いた行かどうか**を要求する。
-  // viewport 引数だけでなく現在のバッファを読む点に注意(テキストには属性が無いため)。
-  if (!barRowIsCliDrawn()) return 'タブバーが CLI 描画でない(会話ログの偽バーと区別できない)'
-  if (hasTabNavFooter(viewport)) return null
   return 'タブ式のフッタが無い(送ってよい画面か確認できない)'
 }
 
@@ -2597,7 +2758,7 @@ async function sweepTabs() {
     const reviewVp = getViewportText()
     const endedAtReview =
       isReviewScreenText(reviewVp) &&
-      barRowIsCliDrawn() &&
+      barRowHasStyledCells() &&
       !hasTabNavFooter(reviewVp) &&
       !screenHasDialog(reviewVp)
     if (endedAtReview) wlog('tab sweep: Submit の確認画面に出た(復帰を試みる)')
@@ -2609,6 +2770,8 @@ async function sweepTabs() {
     // 未回答のまま Submit が確定する画面」に置き去りになる。その組み合わせは作らない。
     if (!sentAllBack) {
       wlog('tab sweep: 巡回後に先頭へ戻せなかった(転送しない)')
+      // await しない: sweep の finally を遅らせない(detect 抑止時間を HTTP と無関係にする)。
+      postPcNotice('rewind-failed').catch((e) => wlog(`pc notice unexpected: ${sanitizeLogMessage(e && e.message)}`))
       return null
     }
     // 正常終了は「Submit に着いて読めなくなった」場合だけ。形状衝突による打ち切りも、
@@ -2969,7 +3132,7 @@ async function registerMultiDialog(tabs, projectName, barSig = null, reRegisterC
 }
 
 // 世代交代で行き場を失った登録を明示的に解決する(サーバー側の孤児 request を残さない)。
-async function resolveStaleRegistration(id, reason) {
+async function resolveStaleRegistration(id, reason, timeoutMs) {
   if (!id) return
   const path = safeIdPath(id)
   if (!path) {
@@ -2977,13 +3140,20 @@ async function resolveStaleRegistration(id, reason) {
     return
   }
   try {
-    await httpRequest('POST', `/resolve/${path}`, {
-      answer: 'resolved-by-cli',
-      resolvedBy: 'cli',
-    })
+    await httpRequest(
+      'POST',
+      `/resolve/${path}`,
+      {
+        answer: 'resolved-by-cli',
+        resolvedBy: 'cli',
+      },
+      timeoutMs
+    )
     wlog(`stale registration ${id} resolved (${reason})`)
   } catch (e) {
-    wlog(`stale registration ${id} resolve failed: ${e.message}`)
+    // e.message には HTTP エラー時の応答本文抜粋が含まれる(= サーバー由来の任意文字列)。
+    // notice の TTL / 補償回収もこの経路を通るため、制御・双方向制御文字を除去してから記録する。
+    wlog(`stale registration ${id} resolve failed: ${sanitizeLogMessage(e && e.message)}`)
   }
 }
 
@@ -3131,6 +3301,11 @@ async function detectDialogInner() {
     identityBroken,
     dialogEnded: endedNow,
   })
+  // タブ UI が連続して見えなくなったら notice も片付ける(id を持つ実 ID 状態のみ、
+  // reservation 段階では触らない)。
+  if (activeNotice && activeNotice.id && !tabbedNow && tabbedEpoch.absent >= EPOCH_ABSENT_TICKS) {
+    clearNotice(activeNotice.id, 'tab ui gone')
+  }
 
   // タブ式の判定: parseDialog が non-null かつ実タブバーが一意に決まるなら sweep に進む。
   // 「1 回の出現につき 1 回だけ」= latch。回数制限が無いと条件が揃うたびに巡回し直す
@@ -3150,8 +3325,9 @@ async function detectDialogInner() {
     // また、戻る手段が使えない画面で前送りだけを始めると、右へ押した分を戻せず
     // フォーカスが Submit 側に残り、Enter 一発で未回答のまま確定しうる。
     // どちらも **送出側と同じ関数** で判断する。ただし開始側は `debtReturnOk` を渡さない =
-    // 送出側より **厳しい**(借りを返す一手だけは属性ゲートより先に通す)。非対称の向きが
-    // 重要で、開始が緩いと「開始できるのに戻れない」= 実機で観測した事故になる。
+    // 送出側より **厳しい**(借り返しはフッタ無しの確認画面でも送れる分だけ送出側が広い。
+    // ただし属性ゲートは両者とも必須 = R2)。非対称の向きが重要で、開始が緩いと
+    // 「開始できるのに戻れない」= 実機で観測した事故になる。
     const blocked = shiftTabBlockedReason(viewport)
     if (blocked) {
       logSweepSkip(`Shift+Tab を送れない: ${blocked}`, viewport)

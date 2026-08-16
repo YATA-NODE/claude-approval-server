@@ -7,11 +7,11 @@
  * 移せるか」を判断するための事実収集。ここでは属性を観測するだけで、採否は判定しない。
  *
  * production コード(claude-wrapper.js 等)は一切変更しない。承認枠の同定(frameOf)と
- * タブバー行の同定(readTabBarRow)・CLI 描画ゲート(barRowIsCliDrawn)は production の
+ * タブバー行の同定(readTabBarRow)・CLI 描画ゲート(barRowHasStyledCells)は production の
  * export をそのまま呼ぶ(手写ししない)。countStyledCells / isHighlightedCell は
  * production では export されていないため、同等の生観測(背景色が既定でないセル数 /
  * inverse セル数)をここで数える。**これは観測であってゲートではない**
- * (production 側の判定値は __test.barRowIsCliDrawn() を別途併記して比較できるようにする)。
+ * (production 側の判定値は __test.barRowHasStyledCells() を別途併記して比較できるようにする)。
  *
  * 選択肢行の走査は、承認枠の外の chrome である Claude Code statusline(モデル名 +
  * rate limit 使用率 + リセット時刻)/ タイトルバー(リポ名 + ブランチ名 + effort +
@@ -129,7 +129,7 @@ function firstBlankOrStatuslineFrom(lines, start) {
 }
 
 const term = new Terminal({ cols: args.cols, rows: args.rows, scrollback: 1000, allowProposedApi: true })
-// barRowIsCliDrawn() は headlessTerm(module 内 closure 変数)を読むため、seam 経由で張る。
+// barRowHasStyledCells() は headlessTerm(module 内 closure 変数)を読むため、seam 経由で張る。
 claudeWrapper.__test.setHeadlessTerm(term)
 
 let framesWithFrameCount = 0
@@ -155,7 +155,7 @@ async function onFrame(frameIdx) {
   } catch (_) {}
   let cliDrawn = false
   try {
-    cliDrawn = claudeWrapper.__test.barRowIsCliDrawn()
+    cliDrawn = claudeWrapper.__test.barRowHasStyledCells()
   } catch (_) {}
   if (cliDrawn) barCliDrawnTrueCount++
   if (barRow && typeof barRow.y === 'number') {
@@ -181,7 +181,7 @@ async function onFrame(frameIdx) {
       frame: frameIdx,
       y: barRow.y,
       text: maskTitlebarRunsInText(barRow.text, barRuns),
-      gateBarRowIsCliDrawn: cliDrawn,
+      gateBarRowHasStyledCells: cliDrawn,
       observedBgStyled,
       observedInverse,
       runs: barRuns,
@@ -276,7 +276,7 @@ function printLineSection(title, sec) {
   say(`- 総フレーム数: ${totalFrames}`)
   say(`- 承認枠(frameOf)検出回数: ${framesWithFrameCount}`)
   say(`- タブバー行(readTabBarRow)検出回数: ${framesWithBarCount}`)
-  say(`- production ゲート barRowIsCliDrawn()=true だったフレーム数: ${barCliDrawnTrueCount}`)
+  say(`- production ゲート barRowHasStyledCells()=true だったフレーム数: ${barCliDrawnTrueCount}`)
   say('')
 
   if (framesWithFrameCount === 0) {
@@ -357,7 +357,7 @@ function printLineSection(title, sec) {
     for (const b of barRecords) {
       say(`- frame #${b.frame}  y=${b.y}  text=${JSON.stringify(b.text)}`)
       say(
-        `  production ゲート barRowIsCliDrawn()=${b.gateBarRowIsCliDrawn}` +
+        `  production ゲート barRowHasStyledCells()=${b.gateBarRowHasStyledCells}` +
           `  観測(生カウント、ゲートではない): 背景色が既定でないセル数=${b.observedBgStyled}` +
           `  inverse セル数=${b.observedInverse}`
       )

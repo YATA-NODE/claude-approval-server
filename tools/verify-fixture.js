@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * tools/verify-fixture.js — `approval-attr-fixture/v1` fixture が「fixture だけでセキュリティ
+ * tools/verify-fixture.js — `approval-attr-fixture/v2` fixture が「fixture だけでセキュリティ
  * 判定を再現できる」ことを検証する再現器。
  *
  * fixture の redaction 済み生 PTY(base64)を復号 → @xterm/headless に再生 →
- * production の関数(parseDialog / readTabBarRow / __test.barRowIsCliDrawn /
+ * production の関数(parseDialog / readTabBarRow / __test.barRowHasStyledCells /
  * __test.getScreenText)をそのまま呼んで判定 → fixture の expected_cells / expected_verdict と
  * 一致するかを比較する。判定ロジックはここで手写ししない(tools/extract-fixture.js と同じ
  * production 呼び出しを使う。2 箇所で別々の判定ロジックを持つと drift する)。
@@ -30,12 +30,22 @@ function runsEqual(a, b) {
  * fixture オブジェクトを再生・判定し、{ok, diffs, actual} を返す。ファイル I/O を含まない
  * 純粋寄りの検証関数(テスト側から fixture を直接渡して呼べるようにするため)。
  *
- * @param {object} fixture approval-attr-fixture/v1 の JSON
+ * @param {object} fixture approval-attr-fixture/v2 の JSON
  * @returns {Promise<{ok: boolean, diffs: string[], actual: object}>}
  */
 async function verifyFixture(fixture) {
   const diffs = []
-  if (fixture.schema !== 'approval-attr-fixture/v1') {
+  if (fixture.schema !== 'approval-attr-fixture/v2') {
+    if (fixture.schema === 'approval-attr-fixture/v1') {
+      return {
+        ok: false,
+        diffs: [
+          'schema が v1(キー名が旧称 barRowIsCliDrawn)。tools/extract-fixture.js で再生成するか、' +
+            'expected_verdict キーと schema を v2 へ手動改名すること',
+        ],
+        actual: null,
+      }
+    }
     return { ok: false, diffs: [`schema 不一致: ${fixture.schema}`], actual: null }
   }
 
@@ -81,8 +91,8 @@ async function verifyFixture(fixture) {
   if (captured.frameOfFound !== ev.frameOf) diffs.push(`frameOf 不一致: expected=${ev.frameOf} actual=${captured.frameOfFound}`)
   if (captured.barRowFound !== ev.readTabBarRow)
     diffs.push(`readTabBarRow 不一致: expected=${ev.readTabBarRow} actual=${captured.barRowFound}`)
-  if (captured.cliDrawn !== ev.barRowIsCliDrawn)
-    diffs.push(`barRowIsCliDrawn 不一致: expected=${ev.barRowIsCliDrawn} actual=${captured.cliDrawn}`)
+  if (captured.cliDrawn !== ev.barRowHasStyledCells)
+    diffs.push(`barRowHasStyledCells 不一致: expected=${ev.barRowHasStyledCells} actual=${captured.cliDrawn}`)
   if (canonicalStringify(captured.parseDialogFull) !== canonicalStringify(ev.parseDialog)) {
     diffs.push(
       `parseDialog 不一致: expected=${JSON.stringify(ev.parseDialog)} actual=${JSON.stringify(captured.parseDialogFull)}`

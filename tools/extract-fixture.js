@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
  * tools/extract-fixture.js — 実機録画の生ログ(PTY raw stream)から、セキュリティ判定を
- * fixture 単独で再現できる `approval-attr-fixture/v1` JSON を生成する。
+ * fixture 単独で再現できる `approval-attr-fixture/v2` JSON を生成する。
  *
  * 目的: 録画本体(gitignore・非公開)を必要とせず、
  * redaction 済みの生 PTY + 期待セル属性 + 期待判定だけで `tools/verify-fixture.js` が
  * 判定を再現できるようにする。判定の算出は **production の関数をそのまま呼ぶ**
- * (parseDialog / __test.barRowIsCliDrawn / __test.getScreenText / readTabBarRow)。
+ * (parseDialog / __test.barRowHasStyledCells / __test.getScreenText / readTabBarRow)。
  * ここで判定ロジックを手写ししない(手写しは drift の温床)。
  *
  * 枠の同定(どのフレームを fixture にするか)は tools/lib-cellattrs.js の makeFrameOf
@@ -610,7 +610,7 @@ async function main() {
 
   const redactedBuf = Buffer.from(rawRedacted, 'utf8')
   const fixture = {
-    schema: 'approval-attr-fixture/v1',
+    schema: 'approval-attr-fixture/v2',
     id: args.id,
     kind: args.kind,
     label: args.label,
@@ -654,7 +654,7 @@ async function main() {
     expected_verdict: {
       frameOf: before.frameOfFound,
       readTabBarRow: before.barRowFound,
-      barRowIsCliDrawn: before.cliDrawn,
+      barRowHasStyledCells: before.cliDrawn,
       parseDialog: before.parseDialogFull,
       parseDialogScreenOnly: before.parseDialogScreenOnly,
     },

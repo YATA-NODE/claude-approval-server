@@ -1,5 +1,5 @@
 {
-  "schema": "approval-attr-fixture/v1",
+  "schema": "approval-attr-fixture/v2",
   "id": "t2-webfetch-w80-authentic",
   "kind": "webfetch",
   "label": "authentic",
@@ -51,7 +51,7 @@
   "expected_verdict": {
     "frameOf": true,
     "readTabBarRow": false,
-    "barRowIsCliDrawn": false,
+    "barRowHasStyledCells": false,
     "parseDialog": {
       "forwardable": false,
       "tool": null,

@@ -24,7 +24,10 @@ const path = require('path')
 // PORT は env 優先（ポート衝突時に一時的に切り替えたい場面が多いため）。
 // TOKEN は config 優先（長期固定したい値であり、無関係な env で上書きされると困るため）。
 function loadConfig() {
-  const configPath = path.join(__dirname, 'approval-config.json')
+  // APPROVAL_CONFIG_PATH は運用者(サーバー起動者)制御の env。テストが実 config を
+  // 一時上書きせずに済むようにするための差し替え口で、攻撃面ではない(リクエスト経由で
+  // 変更できる値ではない)。未設定時は従来どおり同ディレクトリ固定。
+  const configPath = process.env.APPROVAL_CONFIG_PATH || path.join(__dirname, 'approval-config.json')
   try {
     return JSON.parse(fs.readFileSync(configPath, 'utf8'))
   } catch (_) {
@@ -64,19 +67,34 @@ const queue = []
 // long-poll の取りこぼし対策として短時間だけ保持すれば十分。
 const RESOLVED_TTL_MS = 60 * 60 * 1000 // 1 時間
 const RESOLVED_GC_INTERVAL_MS = 5 * 60 * 1000 // 5 分ごとに走査
+// notice(kind:'notice')限定の pending TTL。wrapper 死亡時の backstop。生きている
+// wrapper は 30 分 TTL で先に自分の notice を resolve する(claude-wrapper.js 側)。
+// approval の pending には絶対に触れない(it.kind === 'notice' で限定するため)。
+const NOTICE_PENDING_TTL_MS = 60 * 60 * 1000 // 60 分
 function gcResolved() {
   const now = Date.now()
   let removed = 0
+  let removedNotices = 0
   for (let i = queue.length - 1; i >= 0; i--) {
     const it = queue[i]
-    if (it.status !== 'resolved' || !it.resolvedAt) continue
-    const age = now - new Date(it.resolvedAt).getTime()
-    if (age >= RESOLVED_TTL_MS) {
-      queue.splice(i, 1)
-      removed++
+    if (it.status === 'resolved' && it.resolvedAt) {
+      const age = now - new Date(it.resolvedAt).getTime()
+      if (age >= RESOLVED_TTL_MS) {
+        queue.splice(i, 1)
+        removed++
+        continue
+      }
+    }
+    if (it.kind === 'notice' && it.status === 'pending') {
+      const pendingAge = now - new Date(it.createdAt).getTime()
+      if (pendingAge >= NOTICE_PENDING_TTL_MS) {
+        queue.splice(i, 1)
+        removedNotices++
+      }
     }
   }
   if (removed > 0) console.log(`[GC] removed ${removed} resolved entries`)
+  if (removedNotices > 0) console.log(`[GC] removed ${removedNotices} stale pending notices`)
 }
 const gcTimer = setInterval(gcResolved, RESOLVED_GC_INTERVAL_MS)
 gcTimer.unref?.()
@@ -256,8 +274,47 @@ function isSingleTextAllowed(item, answer) {
   return isTypeSomething || isCodexFreeText
 }
 
+// notice(kind:'notice')で許可される reason コードの許可リスト(完全一致のみ)。
+const NOTICE_REASONS = ['rewind-failed']
+
 app.post('/request', authenticate, (req, res) => {
-  const { description, options, tabs, freeTextOptions } = req.body
+  const { kind, description, options, tabs, freeTextOptions, reason } = req.body
+
+  // kind 一致は文字列 'notice' の完全一致のみ。それ以外(未指定・配列・オブジェクト等の
+  // 型混乱を含む)は従来どおり description 必須の承認依頼として処理する(後方互換)。
+  if (kind === 'notice') {
+    // notice は承認ではない = PTY 注入経路へ絶対に接続しない(スマホへの
+    // 一方向情報カード)。reason は許可リスト完全一致のみ受理する。
+    if (typeof reason !== 'string' || !NOTICE_REASONS.includes(reason)) {
+      return res.status(400).json({ error: 'unknown notice reason' })
+    }
+    // 受理フィールドは {kind, reason} だけ = 許可リスト方式で未知キーごと拒否する。
+    // 拒否リスト(description 等の列挙)にすると、将来 /request にフィールドを足したとき
+    // 列挙の更新漏れで「notice はクライアント由来文字列ゼロ」の保証が静かに弱まる。
+    if (Object.keys(req.body).some((k) => k !== 'kind' && k !== 'reason')) {
+      return res.status(400).json({ error: 'notice accepts only {kind, reason}' })
+    }
+    const noticeItem = {
+      id: crypto.randomUUID(),
+      kind: 'notice',
+      reason,
+      options: ['OK'],
+      tabs: null,
+      freeTextOptions: null,
+      // description は持たせない(クライアント由来文字列ゼロ)
+      status: 'pending',
+      answer: null,
+      answers: null,
+      text: null,
+      resolvedBy: null,
+      createdAt: new Date().toISOString(),
+      resolvedAt: null,
+    }
+    queue.push(noticeItem)
+    console.log(`[NEW NOTICE] ${noticeItem.id}: reason=${reason}`)
+    return res.json({ id: noticeItem.id, status: noticeItem.status })
+  }
+
   if (!description || typeof description !== 'string') {
     return res.status(400).json({ error: 'description is required' })
   }
@@ -307,6 +364,7 @@ app.post('/request', authenticate, (req, res) => {
 
   const item = {
     id: crypto.randomUUID(),
+    kind: 'approval',
     description: safeDesc,
     options: safeOptions,
     tabs: safeTabs, // null または [{label?, prompt, options}]
@@ -410,6 +468,13 @@ app.post('/resolve/:id', authenticate, (req, res) => {
   if (!item) return res.status(404).json({ error: 'Not found' })
   if (item.status !== 'pending') {
     return res.status(409).json({ error: 'Already resolved' })
+  }
+
+  // notice は承認ではない = 確認(OK)以外は受理しない。answer は下の単一検証へ
+  // そのまま流す(options=['OK'] なので 'OK' か、wrapper 内部通知 'resolved-by-cli'
+  // しか通らない = 既存検証がそのまま防壁になる)。
+  if (item.kind === 'notice' && (isCancel || hasAnswers || hasText)) {
+    return res.status(400).json({ error: 'notice accepts only acknowledgement' })
   }
 
   // resolvedBy 不正値は null 丸めではなく 400 reject。
@@ -707,6 +772,11 @@ async function requestApproval(description, options = ['Yes', 'No']) {
 }
 
 module.exports = {
+  // test seam。require.main ガード済みのため require 時に listen 副作用なし
+  app,
+  queue,
+  gcResolved,
+  NOTICE_PENDING_TTL_MS,
   requestApproval,
   // text 添付ゲート純関数の test seam(server 側受理/拒否境界の回帰保護)
   resolveOption,

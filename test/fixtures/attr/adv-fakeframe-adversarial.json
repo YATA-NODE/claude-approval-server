@@ -1,5 +1,5 @@
 {
-  "schema": "approval-attr-fixture/v1",
+  "schema": "approval-attr-fixture/v2",
   "id": "adv-fakeframe-adversarial",
   "kind": "claude-tool",
   "label": "adversarial",
@@ -51,7 +51,7 @@
   "expected_verdict": {
     "frameOf": true,
     "readTabBarRow": false,
-    "barRowIsCliDrawn": false,
+    "barRowHasStyledCells": false,
     "parseDialog": {
       "forwardable": false,
       "tool": null,

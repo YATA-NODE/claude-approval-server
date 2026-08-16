@@ -1,5 +1,5 @@
 /**
- * test-attr-fixtures.js — test/fixtures/attr/*.json(approval-attr-fixture/v1)の
+ * test-attr-fixtures.js — test/fixtures/attr/*.json(approval-attr-fixture/v2)の
  * スモークテスト。セル属性 fixture が「fixture だけでセキュリティ判定を再現できる」
  * ことを npm test の一部として固定する(tools/verify-fixture.js を呼ぶだけで、判定ロジック
  * 自体はここに書かない = drift 防止)。
@@ -16,7 +16,7 @@
 
 const fs = require('fs')
 const path = require('path')
-const { verifyFixtureFile } = require('./tools/verify-fixture.js')
+const { verifyFixture, verifyFixtureFile } = require('./tools/verify-fixture.js')
 
 let passed = 0
 let failed = 0
@@ -48,6 +48,19 @@ function assertEq(label, actual, expected) {
     if (!r.ok) {
       for (const d of r.diffs) console.log(`      - ${d}`)
     }
+  }
+
+  // schema ゲートの反証(このゲートは通常経路で一度も走らないため、ここで実行して固定する):
+  // v1(旧称キー)は旧称を名指しした案内で拒否され、未知 schema も拒否されること。
+  if (files.length > 0) {
+    const base = JSON.parse(fs.readFileSync(path.join(dir, files[0]), 'utf8'))
+    const asV1 = { ...base, schema: 'approval-attr-fixture/v1' }
+    const r1 = await verifyFixture(asV1)
+    assertEq('v1 schema は拒否される', r1.ok, false)
+    assertEq('v1 拒否メッセージが旧称と移行手順を案内する', /旧称 barRowIsCliDrawn/.test(r1.diffs[0] || ''), true)
+    const asUnknown = { ...base, schema: 'approval-attr-fixture/v999' }
+    const r2 = await verifyFixture(asUnknown)
+    assertEq('未知 schema は拒否される', r2.ok, false)
   }
 
   console.log('\n────────────────────────────────────────')

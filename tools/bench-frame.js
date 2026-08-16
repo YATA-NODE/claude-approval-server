@@ -5,7 +5,7 @@
  * 「dialog 判定」= production がフレームごとに行う 3 関数の 1 サイクル:
  *   frameOf(viewportText)(lib-cellattrs.makeFrameOf、production の RULE_CHARS/CURSOR_CHARS
  *   から組み立てた構造判定)+ readTabBarRow(buf, rows)(production export)+
- *   __test.barRowIsCliDrawn()(production ゲートそのもの、__test seam 経由)。
+ *   __test.barRowHasStyledCells()(production ゲートそのもの、__test seam 経由)。
  * 3 つとも production の実体をそのまま呼ぶ(手写ししない = 他ツールと同じ方針)。
  *
  * 測定方法: 固定録画 1 本を warm-up 1 回(計測しない)
@@ -87,7 +87,7 @@ async function runOnce(data, { cols, rows, chunk }) {
     try {
       claudeWrapper.readTabBarRow(buf, rows)
     } catch (_) {}
-    claudeWrapper.__test.barRowIsCliDrawn()
+    claudeWrapper.__test.barRowHasStyledCells()
     const t1 = process.hrtime.bigint()
     totalNs += t1 - t0
     frameCount++
@@ -154,7 +154,7 @@ function median(nums) {
   const md = `# 性能基準(案C Phase 0、暫定確定)
 
 **位置づけ**: production は本 Phase で未変更(HEAD = ${commit})。ここで測るのは
-「1 フレームあたりの dialog 判定(frameOf + readTabBarRow + barRowIsCliDrawn の 1 サイクル)」の
+「1 フレームあたりの dialog 判定(frameOf + readTabBarRow + barRowHasStyledCells の 1 サイクル)」の
 **現行の絶対時間**であり、Phase 2 で案C を実装したあと同一条件で再測して比較する基準値にする
 (master plan: 「Phase 2 は同一基準の再検証に限定〔基準の後決めをしない〕」)。
 
