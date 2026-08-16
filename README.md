@@ -317,6 +317,28 @@ function codex {
 - 日本語 / 英語 切替
 - ダーク / ライト テーマ切替
 
+## 環境変数
+
+設定は `approval-config.json` が基本ですが、次の環境変数でも指定できます。**項目ごとに優先順位が違う**点に注意してください。
+
+| 環境変数 | 使うプロセス | 内容 | 優先順位 | 未設定時 |
+|---|---|---|---|---|
+| `APPROVAL_CONFIG` | ラッパー | 設定ファイルのパス | この env のみ | `<リポジトリ>/approval-config.json` |
+| `APPROVAL_CONFIG_PATH` | サーバー | 設定ファイルのパス | この env のみ | 同上 |
+| `APPROVAL_PORT` | 両方 | サーバーの待受ポート / ラッパーの接続先ポート | env → `config.port` → 既定 | `3000` |
+| `APPROVAL_TOKEN` | 両方 | 認証トークン | **`config.token` → env**(設定ファイルが優先) | サーバーは 32 バイトのランダム値を自動生成 / ラッパーはエラー終了 |
+| `APPROVAL_TARGET_CMD` | ラッパー | ラップして起動する CLI | env → `config.target.command` → 既定 | `claude` |
+| `APPROVAL_WRAPPER_LOG` | ラッパー | 動作ログ(`dialog posted` / `tab sweep` 等)の追記先ファイル | env → `config.wrapperLog` → 無効 | 無効(完全サイレント) |
+| `APPROVAL_PTY_LOG` | ラッパー | PTY の生出力をそのまま追記するファイル(開発用) | この env のみ | 無効 |
+
+補足:
+
+- **設定ファイルのパスだけ env 名がプロセスごとに違います**(ラッパー = `APPROVAL_CONFIG` / サーバー = `APPROVAL_CONFIG_PATH`)。両方を同じファイルに向けたいときは 2 つとも指定してください
+- **`APPROVAL_TOKEN` だけは設定ファイルが優先**です。`approval-config.json` に `token` があるとき、環境変数の値は使われません。ラッパーはトークンを解決できないと**起動しません**(空のトークンのまま接続を試みることはありません)
+- `APPROVAL_WRAPPER_LOG` は Claude Code の TUI と表示が衝突しないよう、stderr ではなくファイルにだけ書きます。別端末から `tail -f` で見る想定です
+- ⚠️ **`APPROVAL_PTY_LOG` は画面に描画された内容をそのまま残します**(承認枠の中身や入力欄に表示された文字列を含む)。一方 `APPROVAL_WRAPPER_LOG` に残るのは動作の記録(依頼 ID / タブ巡回 / 注入結果 / 拒否した回答値の先頭)で、フリーテキストの本文は長さのみです(「セキュリティ」の「ログ非露出」参照)。どちらも共有マシンや外部に渡る場所へは出力しないでください
+- ⚠️ **サーバーの標準出力にはトークンと承認内容が出ます**。起動時に `SECRET_TOKEN` を表示し、以後も承認 1 件ごとに `[NEW REQUEST] <id>: [プロジェクト名][ツール名] 引数 — プロンプト` を出力します(フリーテキストの本文は出しません)。標準出力をファイルへリダイレクトすると、その両方が残ります
+
 ## 複数プロジェクト同時利用
 
 サーバーと ngrok は 1 組だけ起動し、各プロジェクト用ターミナルで `cd` してからラッパーを起動します。
@@ -799,6 +821,28 @@ After the one-time setup:
 - Project identification (requests are rendered as `[projectName][toolName] args — prompt`)
 - Japanese / English toggle
 - Dark / light theme toggle
+
+## Environment variables
+
+`approval-config.json` is the primary way to configure this tool, but the variables below are read as well. Note that **the precedence differs per item**.
+
+| Variable | Process | What it sets | Precedence | When unset |
+|---|---|---|---|---|
+| `APPROVAL_CONFIG` | wrapper | Path to the config file | this env only | `<repo>/approval-config.json` |
+| `APPROVAL_CONFIG_PATH` | server | Path to the config file | this env only | same as above |
+| `APPROVAL_PORT` | both | Server listen port / wrapper target port | env → `config.port` → default | `3000` |
+| `APPROVAL_TOKEN` | both | Auth token | **`config.token` → env** (the config file wins) | the server generates a random 32-byte value; the wrapper exits with an error |
+| `APPROVAL_TARGET_CMD` | wrapper | CLI to launch under the wrapper | env → `config.target.command` → default | `claude` |
+| `APPROVAL_WRAPPER_LOG` | wrapper | File to append the runtime log to (`dialog posted`, `tab sweep`, …) | env → `config.wrapperLog` → disabled | disabled (fully silent) |
+| `APPROVAL_PTY_LOG` | wrapper | File to append raw PTY output to (development only) | this env only | disabled |
+
+Notes:
+
+- **Only the config path uses a different variable name per process** (wrapper = `APPROVAL_CONFIG`, server = `APPROVAL_CONFIG_PATH`). Set both if you want them to read the same file
+- **`APPROVAL_TOKEN` is the one item where the config file takes precedence.** If `approval-config.json` has a `token`, the environment variable is ignored. The wrapper **refuses to start** when no token can be resolved — it never connects with an empty token
+- `APPROVAL_WRAPPER_LOG` is written only to that file, not to stderr, so the runtime log does not collide with the Claude Code TUI. It is meant to be watched with `tail -f` from another terminal (startup errors are still printed to stderr)
+- ⚠️ **`APPROVAL_PTY_LOG` records whatever was drawn on screen, as-is** (including the contents of approval boxes and text shown in the input box). `APPROVAL_WRAPPER_LOG`, by contrast, records only runtime events (request ids, tab sweeps, injection results, the head of rejected answer values); free-text bodies are recorded as length only (see "Log non-exposure" under Security). Do not write either to a shared machine or anywhere they may leave your host
+- ⚠️ **The server's stdout carries both the token and approval content.** It prints `SECRET_TOKEN` at startup and then one `[NEW REQUEST] <id>: [project][Tool] args — prompt` line per approval (free-text bodies are never printed). Redirecting stdout to a file leaves both in that file
 
 ## Running multiple projects simultaneously
 
