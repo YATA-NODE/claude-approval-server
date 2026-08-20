@@ -287,6 +287,51 @@ function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
 // -------------------------------------------------------
 // 起動時チェック
 // -------------------------------------------------------
+// ダイアログ判定(終了確認の除外・承認定型句・箱ラベル等)は CLI の画面文言に依存し、
+// 文言が変わると検出は例外を出さずに外れる(転送に戻る側 = fail-open)。ここに書くのは
+// 「この版の実機画面で判定を検証した」という事実で、実機確認したリリースで更新する。
+// 検証済みより minor/major が進んだ CLI で起動したら、TUI 開始前に stderr で 1 回警告する
+// (patch 先行と取得失敗は wlog のみ = 警告疲れで無視される劣化を避ける)。
+const VERIFIED_CLI_VERSIONS = { claude: '2.1.237', codex: '0.147.0' }
+function parseCliVersion(s) {
+  const m = /\d+\.\d+\.\d+/.exec(String(s == null ? '' : s))
+  return m ? m[0] : null
+}
+function cliVersionAhead(current, verified) {
+  const c = parseCliVersion(current)
+  const v = parseCliVersion(verified)
+  if (!c || !v) return null
+  const [cMaj, cMin, cPat] = c.split('.').map(Number)
+  const [vMaj, vMin, vPat] = v.split('.').map(Number)
+  if (cMaj !== vMaj) return cMaj > vMaj ? 'major' : null
+  if (cMin !== vMin) return cMin > vMin ? 'minor' : null
+  return cPat > vPat ? 'patch' : null
+}
+function checkCliVersionCanary() {
+  return new Promise((resolve) => {
+    const { execFile } = require('child_process')
+    execFile(TARGET_CMD, ['--version'], { timeout: 3000 }, (err, stdout) => {
+      if (err) {
+        wlog(`CLI バージョン取得失敗(canary skip): ${err.code || err.message}`)
+        return resolve()
+      }
+      const current = parseCliVersion(stdout)
+      const verified = IS_CODEX ? VERIFIED_CLI_VERSIONS.codex : VERIFIED_CLI_VERSIONS.claude
+      const ahead = cliVersionAhead(current, verified)
+      if (ahead === 'minor' || ahead === 'major') {
+        console.error(
+          `⚠ ${TARGET_CMD} v${current} は検証済み v${verified} より新しい(${ahead} 先行)。\n` +
+            `  ダイアログ文言の変更で検出(終了確認の除外・承認判定)が無言で外れる可能性があります。\n` +
+            `  実機で動作確認のうえ、wrapper の VERIFIED_CLI_VERSIONS の更新を検討してください。`
+        )
+        wlog(`CLI version canary: ${current} > verified ${verified} (${ahead})`)
+      } else if (ahead === 'patch') {
+        wlog(`CLI version canary: ${current} > verified ${verified} (patch)`)
+      }
+      resolve()
+    })
+  })
+}
 async function preflight() {
   if (!SECRET_TOKEN) {
     console.error('\n❌ APPROVAL_TOKEN が未設定です。')
@@ -301,6 +346,7 @@ async function preflight() {
     console.error(`     node approval-server.js\n`)
     process.exit(1)
   }
+  await checkCliVersionCanary()
 }
 
 // -------------------------------------------------------
@@ -1940,9 +1986,29 @@ const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
 // この 2 文言は通常の質問の選択肢にはまず現れないので、**どちらか 1 つ読めれば倒す**(選択肢が
 // 1 行しか描かれていない過渡フレームを取り逃さないため。実機の再現がまさにその形だった)。
 // 前方一致にするのは、終端マーカーが同じ行に残る個体(`Stay Enter to confirm ·` 等)があるため。
-// 先頭のノイズを剥がしてから見る: `1)` 区切りの行は extractOptions を通ると `) Exit …` の形で残る
-// (後処理が落とすのはドットと空白だけ)。
-const EXIT_CONFIRM_RE = /^(?:exit and stop tasks|move to background and exit)\b/i
+// 先頭のノイズを剥がしてから見る: 生成点(extractOptions)も区切り残渣を落とすが、比較専用の
+// ここは全記号を剥がして守りを重ねる(表示・同一性に使わないから全剥がしが許される)。
+// 既定 2 文言は設定で無効化できない(composeEndMarkerPattern と同じ常時 OR-in)。CLI の文言
+// 変更・多言語化には dialogDetection.exitConfirmPhrases への「追記」だけで追従する。追加文言は
+// リテラル扱い(エスケープ)にする: これは CLI の画面文言であって regex ではなく、構文エラーが
+// load 時の例外で wrapper を巻き込むのを避ける。\b は末尾が ASCII 単語文字のときだけ付ける
+// (日本語文言の末尾に \b は一致しないため)。
+const EXIT_CONFIRM_DEFAULT_PHRASES = ['exit and stop tasks', 'move to background and exit']
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+function composeExitConfirmPattern(dialogDetection) {
+  const dd = dialogDetection || {}
+  const wordEnd = (s, lit) => (/[A-Za-z0-9_]$/.test(s) ? `${lit}\\b` : lit)
+  const parts = EXIT_CONFIRM_DEFAULT_PHRASES.map((p) => wordEnd(p, escapeRegExp(p)))
+  const extra = Array.isArray(dd.exitConfirmPhrases) ? dd.exitConfirmPhrases : []
+  for (const raw of extra) {
+    const s = String(raw).trim()
+    if (s) parts.push(wordEnd(s, escapeRegExp(s)))
+  }
+  return `^(?:${parts.join('|')})`
+}
+const EXIT_CONFIRM_RE = new RegExp(composeExitConfirmPattern(_dialogDetection), 'i')
 function looksLikeExitConfirm(options) {
   if (!Array.isArray(options)) return false
   return options.some((o) => EXIT_CONFIRM_RE.test(String(o).replace(/^[^\p{L}\p{N}]+/u, '')))
@@ -2071,6 +2137,7 @@ const UNFORWARDABLE_REASON = {
   'codex-unreadable': 'codex コマンド本文を読み切れない',
   'unknown-tool': '未知のツール種別の承認枠',
   'exit-confirm': 'セッション終了の確認画面(承認ではない)',
+  'ambiguous-box': '承認枠を同定できない(ラベル行が複数)',
 }
 let lastUnforwardableKey = null
 function logUnforwardableOnce(code, args) {
@@ -2226,6 +2293,9 @@ if (typeof module !== 'undefined') {
     validateFreeText,
     extractOptions,
     composeEndMarkerPattern,
+    composeExitConfirmPattern,
+    parseCliVersion,
+    cliVersionAhead,
     isLostRegistration,
     extractCodexShortcut,
     resolveCodexInjection,

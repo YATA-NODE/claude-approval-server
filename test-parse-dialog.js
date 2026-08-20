@@ -24,6 +24,9 @@ const {
   validateFreeText,
   extractOptions,
   composeEndMarkerPattern,
+  composeExitConfirmPattern,
+  parseCliVersion,
+  cliVersionAhead,
   isLostRegistration,
   extractCodexShortcut,
   resolveCodexInjection,
@@ -3506,6 +3509,69 @@ console.log('\n[67] `1)` 区切り option の先頭ノイズ除去')
   // fail-close 側の可用性も pin: Type something への text 添付は通る
   const ft = validateMultiAnswer([{ num: '2', text: 'hello' }], tabs)
   assertEq('[67b] Type something への text 添付は通る', !!ft, true)
+}
+
+// -------------------------------------------------------
+// 68. 終了確認文言の合成(追記専用)と CLI バージョン canary
+// -------------------------------------------------------
+console.log('\n[68] composeExitConfirmPattern / cliVersionAhead')
+{
+  // 追記専用の pin: 設定が何であれ既定 2 文言は常に含まれる(無効化の口を作らない)
+  const bare = new RegExp(composeExitConfirmPattern(null), 'i')
+  assertEq('[68a] 設定なしで既定文言に一致', bare.test('Exit and stop tasks'), true)
+  assertEq('[68a] もう一方も一致', bare.test('Move to background and exit'), true)
+  const withExtra = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['End session now'] }),
+    'i'
+  )
+  assertEq('[68a] 追記しても既定文言が残る', withExtra.test('Exit and stop tasks'), true)
+  assertEq('[68a] 追記文言も一致', withExtra.test('End session now'), true)
+  assertEq(
+    '[68a] 前方一致(末尾に続きが残る個体)',
+    withExtra.test('End session now Enter to confirm'),
+    true
+  )
+  assertEq('[68a] 部分語では一致しない(\\b)', withExtra.test('End session nowhere'), false)
+
+  // 追加文言はリテラル扱い: regex メタ文字が構文として効かない
+  const meta = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['exit (all?)'] }),
+    'i'
+  )
+  assertEq('[68b] メタ文字はリテラル一致', meta.test('exit (all?) を選ぶ'), true)
+  assertEq('[68b] regex として解釈されない', meta.test('exit all'), false)
+
+  // 日本語文言(末尾に \b が効かない形)も一致する
+  const jp = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['セッションを終了'] }),
+    'i'
+  )
+  assertEq('[68b] 日本語文言に一致', jp.test('セッションを終了しますか'), true)
+
+  // 不正型・空要素は無視して既定に倒す
+  const junk = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: 'not-array' }),
+    'i'
+  )
+  assertEq('[68b] 配列以外は無視(既定は維持)', junk.test('Exit and stop tasks'), true)
+  assertEq('[68b] 無視した値は文言にならない', junk.test('not-array'), false)
+  const empties = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['', '   '] }),
+    'i'
+  )
+  assertEq('[68b] 空要素は無視', empties.test('Exit and stop tasks'), true)
+
+  // cliVersionAhead の境界
+  assertEq('[68c] minor 先行', cliVersionAhead('2.2.0', '2.1.237'), 'minor')
+  assertEq('[68c] major 先行', cliVersionAhead('3.0.0', '2.1.237'), 'major')
+  assertEq('[68c] patch 先行', cliVersionAhead('2.1.238', '2.1.237'), 'patch')
+  assertEq('[68c] 同版', cliVersionAhead('2.1.237', '2.1.237'), null)
+  assertEq('[68c] 旧版', cliVersionAhead('2.0.9', '2.1.237'), null)
+  assertEq('[68c] major が古ければ minor 先行でも null', cliVersionAhead('1.9.0', '2.1.237'), null)
+  assertEq('[68c] パース不能は null', cliVersionAhead('dev', '2.1.237'), null)
+  assertEq('[68c] 前置きつき出力から抽出', parseCliVersion('2.1.237 (Claude Code)'), '2.1.237')
+  assertEq('[68c] codex 形式から抽出', parseCliVersion('codex-cli 0.147.0'), '0.147.0')
+  assertEq('[68c] null 入力', parseCliVersion(null), null)
 }
 
 // -------------------------------------------------------

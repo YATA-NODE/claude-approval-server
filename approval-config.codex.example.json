@@ -5,6 +5,7 @@
     "command": "codex"
   },
   "dialogDetection": {
-    "tabSweep": true
+    "tabSweep": true,
+    "exitConfirmPhrases": []
   }
 }

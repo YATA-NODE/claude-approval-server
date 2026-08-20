@@ -420,6 +420,18 @@ Claude Code 本体のダイアログ書式が変わって検出が壊れた場�
 
 旧形式の `dialogDetection.endMarker`（文字列）も動作しますが非推奨で、起動時に警告が出ます。ExitPlanMode や codex 質問型のマーカーは自動で OR されるため、通常は `default` だけを上書きすれば足ります。
 
+セッション終了の確認画面（v1.21.1 で転送除外）の判定文言が CLI の更新で変わった・多言語化された場合は、`dialogDetection.exitConfirmPhrases` に新しい文言を**追記**できます（配列、リテラル扱い = 正規表現ではありません。選択肢ラベルの先頭に前方一致します）:
+
+```json
+{
+  "dialogDetection": { "exitConfirmPhrases": ["新しい終了確認の選択肢文言"] }
+}
+```
+
+この口は**追記専用**です。既定の 2 文言（`Exit and stop tasks` / `Move to background and exit`）は設定では無効化できません（誤設定で危険な画面の転送が再開する口を作らないため）。また `exit` のような広すぎる文言を足すと通常の質問まで転送されなくなるので、画面に出た選択肢の文言をそのまま書いてください。
+
+v1.22.0 以降、wrapper は起動時に対象 CLI の `--version` を検証済みバージョンと照合し、minor / major が進んでいる場合は「文言変更で検出が外れる可能性がある」旨を stderr に 1 行警告します（起動は止めません。patch 先行と取得失敗はラッパーログのみ）。
+
 ### タブ式の複合質問でタブが動くのが気になる
 
 複数質問をまとめたタブ式ダイアログは、各タブの中身を読む手段が「実際に Tab キーを送ってそのタブへ移動する」しかないため、検出時に一度だけタブを巡回します（v1.19.0 以降、1 回の出現につき 1 回だけ・巡回中に PC で操作すると即中断）。巡回そのものを止めたい場合は `dialogDetection.tabSweep` に `false` を設定します。タブ式ダイアログはスマホへ転送されなくなり、PC で回答することになります（単一質問の転送は従来どおり）。この設定は codex CLI の複数質問（`Question N/M`）の巡回にも同じように効くため、`false` にすると codex の複数質問もスマホへ転送されなくなります。
@@ -922,6 +934,18 @@ If a Claude Code update changes the dialog rendering and detection breaks, you c
 ```
 
 The legacy `dialogDetection.endMarker` (a plain string) still works but is deprecated and prints a warning at startup. The ExitPlanMode and codex question markers are OR-ed in automatically, so overriding `default` alone is usually enough.
+
+If a CLI update changes (or localizes) the wording of the session-exit confirmation screen (excluded from forwarding since v1.21.1), you can **append** new phrases via `dialogDetection.exitConfirmPhrases` (an array; treated as literals, not regexes; matched as a prefix of the option label):
+
+```json
+{
+  "dialogDetection": { "exitConfirmPhrases": ["new exit-confirmation option label"] }
+}
+```
+
+This knob is **append-only**: the two built-in phrases (`Exit and stop tasks` / `Move to background and exit`) cannot be disabled by configuration (no misconfiguration can silently re-enable forwarding of that screen). Avoid overly broad phrases such as `exit` — they would suppress ordinary questions too; copy the option label exactly as it appears on screen.
+
+Since v1.22.0 the wrapper also runs `--version` on the target CLI at startup and compares it with the version its dialog detection was verified against; when the CLI is ahead by a minor/major version it prints a one-line stderr warning that wording changes may silently break detection (startup is not blocked; patch-level drift and probe failures go to the wrapper log only).
 
 ### The tabs move on their own in multi-question dialogs
 
