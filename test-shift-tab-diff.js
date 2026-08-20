@@ -142,7 +142,7 @@ function evalProduction(s, viewport) {
     ? fs.readdirSync(fixtureDir).filter((f) => f.endsWith('.json')).sort()
     : []
   // 列挙が空だと以降のループが空回りして無検証のまま緑になる(test-attr-fixtures.js と同型の防止策)。
-  assertEq('fixture が7件見つかる(現行 test/fixtures/attr/*.json の構成)', fixtureFiles.length, 7)
+  assertEq('fixture が8件見つかる(現行 test/fixtures/attr/*.json の構成)', fixtureFiles.length, 8)
 
   const CHUNK_SIZES = [64, 128, 512]
 

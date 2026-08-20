@@ -287,12 +287,66 @@ function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
 // -------------------------------------------------------
 // 起動時チェック
 // -------------------------------------------------------
+// ダイアログ判定(終了確認の除外・承認定型句・箱ラベル等)は CLI の画面文言に依存し、
+// 文言が変わると検出は例外を出さずに外れる(転送に戻る側 = fail-open)。ここに書くのは
+// 「この版の実機画面で判定を検証した」という事実で、実機確認したリリースで更新する。
+// 検証済みより minor/major が進んだ CLI で起動したら、TUI 開始前に stderr で 1 回警告する
+// (patch 先行と取得失敗は wlog のみ = 警告疲れで無視される劣化を避ける)。
+const VERIFIED_CLI_VERSIONS = { claude: '2.1.237', codex: '0.147.0' }
+function parseCliVersion(s) {
+  const m = /\d+\.\d+\.\d+/.exec(String(s ?? ''))
+  return m ? m[0] : null
+}
+function cliVersionAhead(current, verified) {
+  const c = parseCliVersion(current)
+  const v = parseCliVersion(verified)
+  if (!c || !v) return null
+  const [cMaj, cMin, cPat] = c.split('.').map(Number)
+  const [vMaj, vMin, vPat] = v.split('.').map(Number)
+  if (cMaj !== vMaj) return cMaj > vMaj ? 'major' : null
+  if (cMin !== vMin) return cMin > vMin ? 'minor' : null
+  return cPat > vPat ? 'patch' : null
+}
+function checkCliVersionCanary() {
+  return new Promise((resolve) => {
+    const { execFile } = require('child_process')
+    // timeout は 10s = 上限であって通常の待ちではない。claude --version は実測 0.5〜2.2s
+    // (負荷で変動)で返るため通常は上限に達しない。旧 3s は実測幅の上端と近すぎ、
+    // canary が最も要る「遅い環境」ほど kill されて skip に倒れていた(実観測)。
+    // この待ちは起動の critical path に乗る(server 疎通はローカル ms 級)= canary の
+    // 代価として受け入れる(fail-open を無言にしないほうが重い)。
+    execFile(TARGET_CMD, ['--version'], { timeout: 10000 }, (err, stdout) => {
+      if (err) {
+        wlog(`CLI バージョン取得失敗(canary skip): ${err.killed ? 'timeout' : err.code || err.message}`)
+        return resolve()
+      }
+      const current = parseCliVersion(stdout)
+      const verified = IS_CODEX ? VERIFIED_CLI_VERSIONS.codex : VERIFIED_CLI_VERSIONS.claude
+      const ahead = cliVersionAhead(current, verified)
+      if (ahead === 'minor' || ahead === 'major') {
+        console.error(
+          `⚠ ${TARGET_CMD} v${current} は検証済み v${verified} より新しい(${ahead} 先行)。\n` +
+            `  ダイアログ文言の変更で検出(終了確認の除外・承認判定)が無言で外れる可能性があります。\n` +
+            `  実機で動作確認のうえ、wrapper の VERIFIED_CLI_VERSIONS の更新を検討してください。`
+        )
+        wlog(`CLI version canary: ${current} > verified ${verified} (${ahead})`)
+      } else if (ahead === 'patch') {
+        wlog(`CLI version canary: ${current} > verified ${verified} (patch)`)
+      }
+      resolve()
+    })
+  })
+}
 async function preflight() {
   if (!SECRET_TOKEN) {
     console.error('\n❌ APPROVAL_TOKEN が未設定です。')
     console.error('   approval-config.json に token を設定するか、環境変数 APPROVAL_TOKEN を設定してください。\n')
     process.exit(1)
   }
+  // server 疎通と CLI バージョン取得(execFile、実測 0.5〜2.2s = 負荷で変動)は独立なので
+  // 並行させる(直列でその合計を起動に乗せない)。critical path は canary 側。
+  // canary は resolve-only なので、疎通失敗で exit(1) する経路に pending が残っても害はない。
+  const canary = checkCliVersionCanary()
   try {
     await httpRequest('GET', '/queue', null, 3000)
   } catch (e) {
@@ -301,6 +355,7 @@ async function preflight() {
     console.error(`     node approval-server.js\n`)
     process.exit(1)
   }
+  await canary
 }
 
 // -------------------------------------------------------
@@ -557,6 +612,7 @@ const DEDUP_WINDOW_MS = 15000
 // -------------------------------------------------------
 const BOX_CHARS = '│╭╮╰╯─╌' // ボックス枠 + 罫線(7文字)
 const RULE_CHARS = '─╌' // 横罫線のみ
+const BOX_CORNER_CHARS = '╭╮╰╯' // 箱の角(枠の上端 / 下端の同定用。描画途中で右角だけ見える行も拾う)
 const PROMPT_BOX_ANCHOR_CHARS = '│─╌' // prompt 行頭アンカー探索用の意図的サブセット(╭╮╰╯ を含まない)
 // タブバーのチェック印。U+2610 ☐ / U+2714 ✔ と、フォントフォールバックの □ / ✓。
 // 「回答済み」を示す印(☒ U+2612 / ⊠ U+22A0)を追加。実機での実文字は未確認だが、
@@ -580,6 +636,12 @@ const BOX_OR_NEWLINE_G = new RegExp(`[${BOX_CHARS}\\r\\n]`, 'g')
 const BOX_EDGE_G = new RegExp(`^[\\s${BOX_CHARS}]+|[\\s${BOX_CHARS}]+$`, 'g')
 const PROMPT_NORMALIZE_STRIP_RE = new RegExp(`[\\s　${BOX_CHARS}\\r\\n]+`, 'g')
 const RULE_LINE_RE = new RegExp(`^[${RULE_CHARS}\\s]+$`)
+// 罫線行の判定。RULE_LINE_RE 単体は空白だけの行にも一致するため、実運用の判定は必ず
+// 非空白 3 文字以上と AND する。この関数を単一の出所にする(条件が 2 箇所に複製されて
+// 片方だけ直る drift を防ぐ)。
+function isRuleLine(line) {
+  return RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
+}
 const TAB_BAR_RE = new RegExp(`[${TAB_MARK_CHARS}${TAB_ARROW_CHAR}]`)
 const CURSOR_G = new RegExp(`[${CURSOR_CHARS}]`, 'g')
 const CURSOR_NUM_RE = new RegExp(`[${CURSOR_CHARS}]\\s*[1-9]`)
@@ -672,9 +734,8 @@ function boxBodyLines(segment, qIdx, wideText) {
   // 端末の折り返しでも同じ形を作れるため、行頭や桁では弁別できない。曖昧なら PC で答える。
   const labelCount = countLines.filter((l) => BOX_LABEL_LINE_RE.test(l)).length
   if (labelCount > 1) return none(true, true)
-  const isRule = (l) => RULE_LINE_RE.test(l) && l.replace(/\s/g, '').length >= 3
   let ruleIdx = -1
-  for (let i = lines.length - 1; i >= 0 && ruleIdx === -1; i--) if (isRule(lines[i])) ruleIdx = i
+  for (let i = lines.length - 1; i >= 0 && ruleIdx === -1; i--) if (isRuleLine(lines[i])) ruleIdx = i
   if (ruleIdx === -1) return none(labelCount > 0, false)
   // **1 本上の罫線へ遡らない**。遡りは「罫線 → ラベル → 本文 → 区切り線 → prompt」という
   // 形の箱を通すために入れていたが、実機の箱(実録画で確認)は下端の区切り線を持たず、
@@ -993,7 +1054,11 @@ function extractOptions(optionSegment) {
       .replace(CURSOR_G, '')
       .replace(/[\r\n]/g, ' ')
       .replace(BOX_CHARS_G, '')
-      .replace(/^[.\s]+/, '')
+      // `.` は `1.` 区切り、`)` は `1)` 区切りの構造残渣(番号の直後から slice するため
+      // 区切り記号がラベル側に残る)。意味のある先頭記号(`--` / `(` 等)まで剥がすと
+      // 表示と validateAnswer / dedup の同一性がずれるので、区切り残渣の 2 種に限定する。
+      // フル幅 `)` は CLI が描かないため対象外。
+      .replace(/^[.)\s]+/, '')
       .replace(/\s+/g, ' ')
       .replace(TUI_TAIL_HINT_RE, '')
       .trim()
@@ -1022,7 +1087,7 @@ function expandPromptStart(beforeQ, startNl) {
     // 併せ持つ ●Tool 行(hard-wrap した args エコー等)でも turn 境界を優先する(順序が重要 =
     // 先に box 境界判定すると args 続き行が prompt に混入する)。
     if (line.includes(BULLET_CHAR) || ACTION_LABEL_RE.test(line)) return startNl
-    const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
+    const isRule = isRuleLine(line)
     const isTabBar = TAB_BAR_RE.test(line)
     const isOption = CURSOR_ANY_RE.test(line)
     // codex 質問ヘッダ "Question N/N (..)" も段落境界 = prompt 本文に
@@ -1314,6 +1379,19 @@ function parseDialog(buf, opts = {}) {
   // 既に理由が立っているときは上書きしない。転送しない結論は同じで、先に立った理由のほうが
   // 原因に近い(描画途中で truncated かつ exit-confirm のとき、切り分けが 1 段遠くなるのを避ける)。
   if (!unforwardable && looksLikeExitConfirm(options)) unforwardable = 'exit-confirm'
+
+  // shadow 観測(挙動不変): prompt と選択肢の枠所属を測って記録だけする。enforce は
+  // 実測(disagree の頻度と形)を見てから別リリースで判断する。screenOnly(タブ巡回の
+  // 80ms ポーリング等)はホットパスなので観測しない。
+  if (!opts.screenOnly && sortedMarks.length > 0) {
+    logFrameShadowOnce(
+      analyzeFrameCoherence(segment, qIdx, qIdx + 1 + sortedMarks[0].at),
+      !unforwardable,
+      tool,
+      options.length,
+      prompt
+    )
+  }
 
   if (unforwardable && !opts.screenOnly) {
     logUnforwardableOnce(unforwardable, args)
@@ -1936,12 +2014,120 @@ const CHAT_ABOUT_RE = /^Chat\s+about\s+this\.?$/i
 // この 2 文言は通常の質問の選択肢にはまず現れないので、**どちらか 1 つ読めれば倒す**(選択肢が
 // 1 行しか描かれていない過渡フレームを取り逃さないため。実機の再現がまさにその形だった)。
 // 前方一致にするのは、終端マーカーが同じ行に残る個体(`Stay Enter to confirm ·` 等)があるため。
-// 先頭のノイズを剥がしてから見る: `1)` 区切りの行は extractOptions を通ると `) Exit …` の形で残る
-// (後処理が落とすのはドットと空白だけ)。
-const EXIT_CONFIRM_RE = /^(?:exit and stop tasks|move to background and exit)\b/i
+// 先頭のノイズを剥がしてから見る: 生成点(extractOptions)も区切り残渣を落とすが、比較専用の
+// ここは全記号を剥がして守りを重ねる(表示・同一性に使わないから全剥がしが許される)。
+// 既定 2 文言は設定で無効化できない(composeEndMarkerPattern と同じ常時 OR-in)。CLI の文言
+// 変更・多言語化には dialogDetection.exitConfirmPhrases への「追記」だけで追従する。追加文言は
+// リテラル扱い(エスケープ)にする: これは CLI の画面文言であって regex ではなく、構文エラーが
+// load 時の例外で wrapper を巻き込むのを避ける。\b は末尾が ASCII 単語文字のときだけ付ける
+// (日本語文言の末尾に \b は一致しないため)。
+const EXIT_CONFIRM_DEFAULT_PHRASES = ['exit and stop tasks', 'move to background and exit']
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+// 追加文言の受理条件(外部レビュー指摘 = 無制限だと誤設定の影響が黙示的):
+// 短すぎる文言は通常の質問まで止める(前方一致ゆえ影響が広い)、長大・大量は合成 regex を
+// 無用に太らせる。範囲外は「無視 + 起動時 warn」— 転送しない側の機能の設定不備で起動を
+// 止めない(loadConfig がパース失敗を {} に倒すのと同じ寛容方針)。
+// 照合対象(option ラベル)は先頭の記号・番号を剥がした形なので、文言側にも同じ正規化を
+// かける(画面のラベルをそのままコピーしても一致するように)。
+const EXIT_CONFIRM_PHRASE_MIN = 4
+const EXIT_CONFIRM_PHRASE_MAX = 200
+const EXIT_CONFIRM_PHRASES_MAX_COUNT = 16
+function sanitizeExitConfirmPhrases(dialogDetection) {
+  const dd = dialogDetection || {}
+  const raw = Array.isArray(dd.exitConfirmPhrases) ? dd.exitConfirmPhrases : []
+  const accepted = []
+  const rejected = []
+  for (const r of raw) {
+    // 画面からのコピーを想定し、先頭の記号(❯ 等)→ 番号マーカー(`1.` / `1)`)→ 記号 の順に剥がす
+    const s = String(r)
+      .replace(/^[^\p{L}\p{N}]+/u, '')
+      .replace(/^[1-9][.)]\s*/, '')
+      .replace(/^[^\p{L}\p{N}]+/u, '')
+      .trim()
+    if (
+      s.length >= EXIT_CONFIRM_PHRASE_MIN &&
+      s.length <= EXIT_CONFIRM_PHRASE_MAX &&
+      accepted.length < EXIT_CONFIRM_PHRASES_MAX_COUNT
+    ) {
+      accepted.push(s)
+    } else {
+      rejected.push(s)
+    }
+  }
+  return { accepted, rejected }
+}
+function composeExitConfirmPattern(dialogDetection) {
+  const wordEnd = (s) => escapeRegExp(s) + (/[A-Za-z0-9_]$/.test(s) ? '\\b' : '')
+  const { accepted } = sanitizeExitConfirmPhrases(dialogDetection)
+  return `^(?:${[...EXIT_CONFIRM_DEFAULT_PHRASES, ...accepted].map(wordEnd).join('|')})`
+}
+const EXIT_CONFIRM_RE = new RegExp(composeExitConfirmPattern(_dialogDetection), 'i')
+{
+  const rejectedPhrases = sanitizeExitConfirmPhrases(_dialogDetection).rejected
+  if (rejectedPhrases.length) {
+    console.warn(
+      `[claude-wrapper] dialogDetection.exitConfirmPhrases: ${rejectedPhrases.length} 件を無視しました` +
+        `(${EXIT_CONFIRM_PHRASE_MIN} 字未満 / ${EXIT_CONFIRM_PHRASE_MAX} 字超 / ` +
+        `${EXIT_CONFIRM_PHRASES_MAX_COUNT} 件超のいずれか)。短い文言は前方一致ゆえ通常の質問まで` +
+        '転送されなくなるため受け付けません。'
+    )
+  }
+}
 function looksLikeExitConfirm(options) {
   if (!Array.isArray(options)) return false
   return options.some((o) => EXIT_CONFIRM_RE.test(String(o).replace(/^[^\p{L}\p{N}]+/u, '')))
+}
+
+// prompt と選択肢の「枠所属」を測る純関数(shadow 観測用 = 判定には使わない)。
+// prompt は「窓内の最後の ?」でさかのぼって取るため、別の枠に属する残存テキストが
+// prompt に採用されうる(終了確認画面の実害の真因)。prompt 行と最初の選択肢行の
+// **間**に構造境界(罫線 / 箱の角 / ● のターン行 / 前ダイアログの終端マーカー行)が
+// あれば「同じ枠ではない疑い」= coherent:false を返す。
+// 境界に数えないもの: 空行(箱を描かない AUQ では prompt と選択肢の間に普通に入る)/
+// `│` だけの行(箱内の余白)/ codex の `$` コマンド行(prompt と選択肢の間に正当に挟まる)。
+// enforce するときの過剰阻止をここで作らないため、疑いの列挙は保守的に保つ。
+// expandPromptStart の境界集合と違うのは問いが違うから(あちらは「段落の開始」= 空行も境界、
+// こちらは「同じ枠か」= 空行は枠を切らない)。片方に合わせる「統一」をしないこと。
+const BOX_CORNER_RE = new RegExp(`[${BOX_CORNER_CHARS}]`)
+function analyzeFrameCoherence(segment, qIdx, firstOptAt) {
+  const between = String(segment).slice(qIdx + 1, firstOptAt).split('\n')
+  // 先頭要素 = prompt 行の残り、末尾要素 = 選択肢行の前置き(どちらも「間の行」ではない)
+  const inner = between.slice(1, -1)
+  const boundaries = []
+  for (const raw of inner) {
+    const line = raw.trim()
+    if (/^[\s│]*$/.test(raw)) continue
+    if (CODEX_CMD_LINE_RE.test(raw)) continue
+    if (END_MARKER_LINE_RE.test(line)) boundaries.push('end-marker')
+    else if (line.includes(BULLET_CHAR)) boundaries.push('turn')
+    else if (BOX_CORNER_RE.test(line)) boundaries.push('box-corner')
+    else if (isRuleLine(line)) boundaries.push('rule')
+  }
+  return { coherent: boundaries.length === 0, boundaries, gapLines: inner.length }
+}
+
+// shadow 観測の記録。agree(現行判定と一致 = 境界なし)も出す: enforce の判断には
+// 「disagree / 全体」の比率が要る(分子だけでは誤検知率を測れない)。同一画面の
+// 連打(PTY チャンク / 400ms tick)は logUnforwardableOnce と同型の latch で 1 行に潰す。
+let lastFrameShadowKey = null
+function logFrameShadowOnce(coh, forwarded, tool, optN, prompt) {
+  const verdict = coh.coherent ? 'agree' : 'disagree'
+  // prompt の断片は disagree の診断(どの画面で不一致が出たか)にだけ要る。agree は大多数 =
+  // 画面テキストを常時ログへ写す面を作らないため、件数系のみ記録する(外部レビュー指摘)。
+  const p30 = coh.coherent ? '' : String(prompt || '').slice(0, 30)
+  const key = `${verdict}:${coh.boundaries.join(',')}:${p30}:${optN}`
+  if (key === lastFrameShadowKey) return
+  lastFrameShadowKey = key
+  wlog(
+    sanitizeLogMessage(
+      `frame-shadow verdict=${verdict} forwarded=${forwarded ? 1 : 0} ` +
+        `between=[${coh.boundaries.join(',')}] gap=${coh.gapLines} ` +
+        `optN=${optN} tool=${tool}` +
+        (p30 ? ` prompt30="${p30}"` : '')
+    )
+  )
 }
 
 // codex のコマンド承認 option ラベル末尾に内包されるショートカット
@@ -2067,6 +2253,7 @@ const UNFORWARDABLE_REASON = {
   'codex-unreadable': 'codex コマンド本文を読み切れない',
   'unknown-tool': '未知のツール種別の承認枠',
   'exit-confirm': 'セッション終了の確認画面(承認ではない)',
+  'ambiguous-box': '承認枠を同定できない(ラベル行が複数)',
 }
 let lastUnforwardableKey = null
 function logUnforwardableOnce(code, args) {
@@ -2222,12 +2409,17 @@ if (typeof module !== 'undefined') {
     validateFreeText,
     extractOptions,
     composeEndMarkerPattern,
+    composeExitConfirmPattern,
+    sanitizeExitConfirmPhrases,
+    parseCliVersion,
+    cliVersionAhead,
     isLostRegistration,
     extractCodexShortcut,
     resolveCodexInjection,
     isCodexCommand,
     isCodexCommandApprovalOptions,
     looksLikeExitConfirm,
+    analyzeFrameCoherence,
     extractCodexCommand,
     findLastToolLine,
     buildDescription,

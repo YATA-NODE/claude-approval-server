@@ -149,7 +149,9 @@ function parseArgs(argv) {
   return out
 }
 
-const KIND_ENUM = ['claude-tool', 'webfetch', 'mcp', 'tabbed', 'confirm']
+// confirm = タブ式の Review your answers 確認画面 / exit-confirm = セッション終了の確認画面
+// (意味の違う画面を同じ kind に相乗りさせない)
+const KIND_ENUM = ['claude-tool', 'webfetch', 'mcp', 'tabbed', 'confirm', 'exit-confirm']
 const LABEL_ENUM = ['authentic', 'adversarial']
 const ORIGIN_VIA_ENUM = ['cli-render', 'model-output', 'tool-output']
 

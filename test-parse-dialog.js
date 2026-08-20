@@ -24,12 +24,17 @@ const {
   validateFreeText,
   extractOptions,
   composeEndMarkerPattern,
+  composeExitConfirmPattern,
+  sanitizeExitConfirmPhrases,
+  parseCliVersion,
+  cliVersionAhead,
   isLostRegistration,
   extractCodexShortcut,
   resolveCodexInjection,
   isCodexCommand,
   isCodexCommandApprovalOptions,
   looksLikeExitConfirm,
+  analyzeFrameCoherence,
   extractCodexCommand,
   findLastToolLine,
   buildDescription,
@@ -3470,6 +3475,28 @@ console.log('\n[66] セッション終了確認ダイアログを転送しない
   ].join('\n')
   assertEq('[66f] `1)` 区切りでも転送しない', parseDialog(parenStyle), null)
 
+  // 実機文言(claude 2.1.237、e2e-raw-exit-confirm.log frame 45 より)。選択肢は 2 つで
+  // v1.21.1 実装時の 3 択から文言セットが変わっている = 片方一致で倒す設計の実証。
+  // 見出しに `?` が無いため、実画面単体では qIdx の段階で読めない(= 転送されない)。
+  const real2137 = [
+    '──────────',
+    '  Background work is running',
+    '  The following will stop when you exit:',
+    '',
+    '  shell · sleep 600',
+    '',
+    '  ❯ 1. Exit and stop tasks',
+    '    2. Stay',
+    '',
+    '  Enter to confirm · Esc to cancel',
+  ].join('\n')
+  assertEq('[66h] 実機形(? なし)は読めない = 転送しない', parseDialog(real2137), null)
+  // 残存 `?` が窓内にあると構造的には読めるが、exit-confirm 判定で転送だけが止まる
+  const withStale = ' 前の質問はこれでしたか?\n' + real2137
+  assertEq('[66h] 残存 ? があっても転送しない', parseDialog(withStale), null)
+  const staleScreenOnly = parseDialog(withStale, { screenOnly: true })
+  assertEq('[66h] screenOnly では読める(転送だけを止めている)', !!staleScreenOnly, true)
+
   // 純関数の境界。この群は CLI 側の文言が変わったことに気付くための canary でもある
   // (判定はリテラルの前方一致なので、文言が変われば無言で転送に戻る)。
   assertEq('[66g] 対象の文言は 1 つでも真', looksLikeExitConfirm(['Exit and stop tasks']), true)
@@ -3483,6 +3510,165 @@ console.log('\n[66] セッション終了確認ダイアログを転送しない
   assertEq('[66g] 大小無視', looksLikeExitConfirm(['EXIT AND STOP TASKS']), true)
   assertEq('[66g] 配列以外は偽', looksLikeExitConfirm(null), false)
   assertEq('[66g] 空配列は偽', looksLikeExitConfirm([]), false)
+}
+
+// -------------------------------------------------------
+// 67. `1)` 区切りの option ラベルに先頭ノイズを残さない
+// -------------------------------------------------------
+console.log('\n[67] `1)` 区切り option の先頭ノイズ除去')
+{
+  // `1)` 区切りでは option ラベル先頭に `)` が残り、完全一致の CHAT_ABOUT_RE /
+  // FREE_TEXT_OPTION_RE が外れる。Chat about this の遠隔拒否ガードが無言で
+  // 無効化される(fail-open)ため、ラベルの生成点で区切り残渣を落とす。
+  const { options } = extractOptions(
+    ' ❯ 1) Chat about this.\n   2) Type something.\n   3) Proceed'
+  )
+  assertEq('[67a] `)` 残渣を残さない', options[0], 'Chat about this.')
+  assertEq('[67a] 2 つ目も同様', options[1], 'Type something.')
+  assertEq('[67a] 通常ラベルは不変', options[2], 'Proceed')
+
+  // fail-open の pin: `1)` 区切り由来の tabs でも Chat about this 指名は拒否される
+  const tabs = [{ options }]
+  assertEq('[67b] Chat about this 指名は拒否', validateMultiAnswer(['1'], tabs), null)
+  // fail-close 側の可用性も pin: Type something への text 添付は通る
+  const ft = validateMultiAnswer([{ num: '2', text: 'hello' }], tabs)
+  assertEq('[67b] Type something への text 添付は通る', !!ft, true)
+}
+
+// -------------------------------------------------------
+// 68. 終了確認文言の合成(追記専用)と CLI バージョン canary
+// -------------------------------------------------------
+console.log('\n[68] composeExitConfirmPattern / cliVersionAhead')
+{
+  // 追記専用の pin: 設定が何であれ既定 2 文言は常に含まれる(無効化の口を作らない)
+  const bare = new RegExp(composeExitConfirmPattern(null), 'i')
+  assertEq('[68a] 設定なしで既定文言に一致', bare.test('Exit and stop tasks'), true)
+  assertEq('[68a] もう一方も一致', bare.test('Move to background and exit'), true)
+  const withExtra = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['End session now'] }),
+    'i'
+  )
+  assertEq('[68a] 追記しても既定文言が残る', withExtra.test('Exit and stop tasks'), true)
+  assertEq('[68a] 追記文言も一致', withExtra.test('End session now'), true)
+  assertEq(
+    '[68a] 前方一致(末尾に続きが残る個体)',
+    withExtra.test('End session now Enter to confirm'),
+    true
+  )
+  assertEq('[68a] 部分語では一致しない(\\b)', withExtra.test('End session nowhere'), false)
+
+  // 追加文言はリテラル扱い: regex メタ文字が構文として効かない
+  const meta = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['exit (all?)'] }),
+    'i'
+  )
+  assertEq('[68b] メタ文字はリテラル一致', meta.test('exit (all?) を選ぶ'), true)
+  assertEq('[68b] regex として解釈されない', meta.test('exit all'), false)
+
+  // 日本語文言(末尾に \b が効かない形)も一致する
+  const jp = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['セッションを終了'] }),
+    'i'
+  )
+  assertEq('[68b] 日本語文言に一致', jp.test('セッションを終了しますか'), true)
+
+  // 不正型・空要素は無視して既定に倒す
+  const junk = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: 'not-array' }),
+    'i'
+  )
+  assertEq('[68b] 配列以外は無視(既定は維持)', junk.test('Exit and stop tasks'), true)
+  assertEq('[68b] 無視した値は文言にならない', junk.test('not-array'), false)
+  const empties = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['', '   '] }),
+    'i'
+  )
+  assertEq('[68b] 空要素は無視', empties.test('Exit and stop tasks'), true)
+
+  // cliVersionAhead の境界
+  assertEq('[68c] minor 先行', cliVersionAhead('2.2.0', '2.1.237'), 'minor')
+  assertEq('[68c] major 先行', cliVersionAhead('3.0.0', '2.1.237'), 'major')
+  assertEq('[68c] patch 先行', cliVersionAhead('2.1.238', '2.1.237'), 'patch')
+  assertEq('[68c] 同版', cliVersionAhead('2.1.237', '2.1.237'), null)
+  assertEq('[68c] 旧版', cliVersionAhead('2.0.9', '2.1.237'), null)
+  assertEq('[68c] major が古ければ minor 先行でも null', cliVersionAhead('1.9.0', '2.1.237'), null)
+  assertEq('[68c] パース不能は null', cliVersionAhead('dev', '2.1.237'), null)
+  assertEq('[68c] 前置きつき出力から抽出', parseCliVersion('2.1.237 (Claude Code)'), '2.1.237')
+  assertEq('[68c] codex 形式から抽出', parseCliVersion('codex-cli 0.147.0'), '0.147.0')
+  assertEq('[68c] null 入力', parseCliVersion(null), null)
+
+  // 追加文言の受理制限(範囲外は無視、既定は常に維持)
+  const lim = sanitizeExitConfirmPhrases({
+    exitConfirmPhrases: ['abc', 'x'.repeat(201), ' ❯ 1. End this session now ', 'End session too'],
+  })
+  assertEq('[68d] 4 字未満は無視', lim.rejected.includes('abc'), true)
+  assertEq('[68d] 200 字超は無視', lim.rejected.some((s) => s.length > 200), true)
+  assertEq(
+    '[68d] 先頭の記号・番号マーカーは剥がして受理',
+    lim.accepted.includes('End this session now'),
+    true
+  )
+  assertEq('[68d] 通常の文言は受理', lim.accepted.includes('End session too'), true)
+  const many = sanitizeExitConfirmPhrases({
+    exitConfirmPhrases: Array.from({ length: 20 }, (_, i) => `custom exit phrase ${i}`),
+  })
+  assertEq('[68d] 件数上限で打ち切り', many.accepted.length, 16)
+  assertEq('[68d] 超過分は rejected', many.rejected.length, 4)
+  const limPattern = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['ab'] }),
+    'i'
+  )
+  assertEq('[68d] 却下されても既定文言は維持', limPattern.test('Exit and stop tasks'), true)
+  assertEq('[68d] 却下文言は合成されない', limPattern.test('ab something'), false)
+}
+
+// -------------------------------------------------------
+// 69. 枠所属の shadow 観測(analyzeFrameCoherence、判定には未使用)
+// -------------------------------------------------------
+console.log('\n[69] analyzeFrameCoherence(枠所属の shadow 観測)')
+{
+  const coh = (seg) => {
+    const qIdx = seg.indexOf('?')
+    const firstOptAt = seg.search(/[1-9][.)]/)
+    return analyzeFrameCoherence(seg, qIdx, firstOptAt)
+  }
+
+  // 非一貫: prompt(前ダイアログの残存)と選択肢の間に、前ダイアログの終端マーカー行 /
+  // ● のターン行 / 次の枠の上端が挟まる形(終了確認画面の実害と同じ構図)
+  const stale = [
+    ' Did you mean this one?',
+    ' Enter to confirm · Esc to cancel',
+    ' ● Bash(sleep 600)',
+    ' ╭──────────────╮',
+    ' │ ❯ 1. Exit and stop tasks',
+  ].join('\n')
+  const r1 = coh(stale)
+  assertEq('[69a] 残存 prompt の形は非一貫', r1.coherent, false)
+  assertEq(
+    '[69a] 境界の種別を列挙する',
+    r1.boundaries.join(','),
+    'end-marker,turn,box-corner'
+  )
+
+  // 非一貫: 罫線だけが挟まる形
+  const ruled = [' Old question?', ' ─────', ' ❯ 1. Exit and stop tasks'].join('\n')
+  assertEq('[69b] 罫線が挟まれば非一貫', coh(ruled).coherent, false)
+
+  // 一貫: 空行を挟む通常の AUQ
+  const normal = [' Which way should we go?', '', ' ❯ 1. Stay on this branch'].join('\n')
+  assertEq('[69c] 空行だけなら一貫', coh(normal).coherent, true)
+
+  // 一貫: 箱内の余白行(`│` のみ)
+  const boxed = [' │ Which way should we go?', ' │', ' │ ❯ 1. A 案'].join('\n')
+  assertEq('[69c] 箱内の余白行は境界に数えない', coh(boxed).coherent, true)
+
+  // 一貫: codex のコマンド行が prompt と選択肢の間に挟まる正当な形
+  const codex = [' Run this command?', ' $ ls -la', ' ❯ 1. Yes'].join('\n')
+  assertEq('[69c] codex の $ 行は境界に数えない', coh(codex).coherent, true)
+
+  // 隣接(間に行がない)は一貫
+  const adjacent = [' Proceed?', ' ❯ 1. Yes'].join('\n')
+  assertEq('[69c] 隣接は一貫', coh(adjacent).coherent, true)
 }
 
 // -------------------------------------------------------

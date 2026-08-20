@@ -35,6 +35,7 @@ const path = require('path')
 //   - dialogDetection.endMarker     … claude-wrapper.js:136-137,144-145 (legacy, 非推奨だが読まれる)
 //   - dialogDetection.endMarkers.default   … claude-wrapper.js:132
 //   - dialogDetection.endMarkers.exitPlan  … claude-wrapper.js:133
+//   - dialogDetection.exitConfirmPhrases   … claude-wrapper.js (composeExitConfirmPattern)
 const ALLOWED_CONFIG_KEYS = new Set([
   'port',
   'token',
@@ -44,6 +45,7 @@ const ALLOWED_CONFIG_KEYS = new Set([
   'dialogDetection.endMarker',
   'dialogDetection.endMarkers.default',
   'dialogDetection.endMarkers.exitPlan',
+  'dialogDetection.exitConfirmPhrases',
 ])
 
 // -------------------------------------------------------
