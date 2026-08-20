@@ -3486,6 +3486,29 @@ console.log('\n[66] セッション終了確認ダイアログを転送しない
 }
 
 // -------------------------------------------------------
+// 67. `1)` 区切りの option ラベルに先頭ノイズを残さない
+// -------------------------------------------------------
+console.log('\n[67] `1)` 区切り option の先頭ノイズ除去')
+{
+  // `1)` 区切りでは option ラベル先頭に `)` が残り、完全一致の CHAT_ABOUT_RE /
+  // FREE_TEXT_OPTION_RE が外れる。Chat about this の遠隔拒否ガードが無言で
+  // 無効化される(fail-open)ため、ラベルの生成点で区切り残渣を落とす。
+  const { options } = extractOptions(
+    ' ❯ 1) Chat about this.\n   2) Type something.\n   3) Proceed'
+  )
+  assertEq('[67a] `)` 残渣を残さない', options[0], 'Chat about this.')
+  assertEq('[67a] 2 つ目も同様', options[1], 'Type something.')
+  assertEq('[67a] 通常ラベルは不変', options[2], 'Proceed')
+
+  // fail-open の pin: `1)` 区切り由来の tabs でも Chat about this 指名は拒否される
+  const tabs = [{ options }]
+  assertEq('[67b] Chat about this 指名は拒否', validateMultiAnswer(['1'], tabs), null)
+  // fail-close 側の可用性も pin: Type something への text 添付は通る
+  const ft = validateMultiAnswer([{ num: '2', text: 'hello' }], tabs)
+  assertEq('[67b] Type something への text 添付は通る', !!ft, true)
+}
+
+// -------------------------------------------------------
 // 結果サマリ
 // -------------------------------------------------------
 console.log('\n────────────────────────────────────────')

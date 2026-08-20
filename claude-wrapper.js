@@ -993,7 +993,11 @@ function extractOptions(optionSegment) {
       .replace(CURSOR_G, '')
       .replace(/[\r\n]/g, ' ')
       .replace(BOX_CHARS_G, '')
-      .replace(/^[.\s]+/, '')
+      // `.` は `1.` 区切り、`)` は `1)` 区切りの構造残渣(番号の直後から slice するため
+      // 区切り記号がラベル側に残る)。意味のある先頭記号(`--` / `(` 等)まで剥がすと
+      // 表示と validateAnswer / dedup の同一性がずれるので、区切り残渣の 2 種に限定する。
+      // フル幅 `)` は CLI が描かないため対象外。
+      .replace(/^[.)\s]+/, '')
       .replace(/\s+/g, ' ')
       .replace(TUI_TAIL_HINT_RE, '')
       .trim()
