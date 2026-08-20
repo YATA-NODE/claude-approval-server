@@ -336,7 +336,7 @@ function codex {
 - **設定ファイルのパスだけ env 名がプロセスごとに違います**(ラッパー = `APPROVAL_CONFIG` / サーバー = `APPROVAL_CONFIG_PATH`)。両方を同じファイルに向けたいときは 2 つとも指定してください
 - **`APPROVAL_TOKEN` だけは設定ファイルが優先**です。`approval-config.json` に `token` があるとき、環境変数の値は使われません。ラッパーはトークンを解決できないと**起動しません**(空のトークンのまま接続を試みることはありません)
 - `APPROVAL_WRAPPER_LOG` は Claude Code の TUI と表示が衝突しないよう、stderr ではなくファイルにだけ書きます。別端末から `tail -f` で見る想定です
-- ⚠️ **`APPROVAL_PTY_LOG` は画面に描画された内容をそのまま残します**(承認枠の中身や入力欄に表示された文字列を含む)。一方 `APPROVAL_WRAPPER_LOG` に残るのは動作の記録(依頼 ID / タブ巡回 / 注入結果 / 拒否した回答値の先頭)で、フリーテキストの本文は長さのみです(「セキュリティ」の「ログ非露出」参照)。どちらも共有マシンや外部に渡る場所へは出力しないでください
+- ⚠️ **`APPROVAL_PTY_LOG` は画面に描画された内容をそのまま残します**(承認枠の中身や入力欄に表示された文字列を含む)。一方 `APPROVAL_WRAPPER_LOG` に残るのは動作の記録(依頼 ID / タブ巡回 / 注入結果 / 拒否した回答値の先頭 / v1.22.0 以降は枠所属 shadow 観測が**不一致のときだけ**質問文の先頭 30 字)で、フリーテキストの本文は長さのみです(「セキュリティ」の「ログ非露出」参照)。どちらも共有マシンや外部に渡る場所へは出力しないでください
 - ⚠️ **サーバーの標準出力にはトークンと承認内容が出ます**。起動時に `SECRET_TOKEN` を表示し、以後も承認 1 件ごとに `[NEW REQUEST] <id>: [プロジェクト名][ツール名] 引数 — プロンプト` を出力します(フリーテキストの本文は出しません)。標準出力をファイルへリダイレクトすると、その両方が残ります
 
 ## 複数プロジェクト同時利用
@@ -428,9 +428,9 @@ Claude Code 本体のダイアログ書式が変わって検出が壊れた場�
 }
 ```
 
-この口は**追記専用**です。既定の 2 文言（`Exit and stop tasks` / `Move to background and exit`）は設定では無効化できません（誤設定で危険な画面の転送が再開する口を作らないため）。また `exit` のような広すぎる文言を足すと通常の質問まで転送されなくなるので、画面に出た選択肢の文言をそのまま書いてください。
+この口は**追記専用**です。既定の 2 文言（`Exit and stop tasks` / `Move to background and exit`）は設定では無効化できません（誤設定で危険な画面の転送が再開する口を作らないため）。文言は画面に出た選択肢からコピーしてください（先頭の番号・記号は自動で無視され、大文字小文字は区別されません）。`exit` のような広すぎる文言を足すと通常の質問まで転送されなくなるため、**4 文字未満・200 文字超・17 件目以降は無視され、起動時に警告が出ます**。
 
-v1.22.0 以降、wrapper は起動時に対象 CLI の `--version` を検証済みバージョンと照合し、minor / major が進んでいる場合は「文言変更で検出が外れる可能性がある」旨を stderr に 1 行警告します（起動は止めません。patch 先行と取得失敗はラッパーログのみ）。
+v1.22.0 以降、wrapper は起動時に対象 CLI の `--version` を検証済みバージョンと照合し、minor / major が進んでいる場合は「文言変更で検出が外れる可能性がある」旨を stderr に 1 行警告します（起動は止めません。patch 先行と取得失敗はラッパーログのみ。取得のため起動に 1〜2 秒程度が加わります）。この照合は**補助的な警告であってセキュリティ境界ではありません**（文言変更そのものを検出するのではなく、変更されうる前提条件 = CLI が検証版より新しいことだけを知らせます）。警告が出たら、終了確認画面が転送されないことを実機で確認し、文言が変わっていた場合は `exitConfirmPhrases` に新しい文言を追記してください。
 
 ### タブ式の複合質問でタブが動くのが気になる
 
@@ -482,7 +482,7 @@ v1.19.0 以降、**巡回はタブバーが出現時から動いていないと�
 
 v1.21.1 より前は、`Exit and stop tasks` / `Move to background and exit` / `Stay` の選択肢を持つ**セッション終了の確認画面**が承認枠として転送されることがありました。この画面は承認ではありませんが、承認枠と同じ構造(選択肢 1〜N + 終端マーカー)を持ち、ツール承認のシグナル(shift+tab ヒント / 定型句 / 密着した `● Tool(...)` 行 / ラベル)がどれも立たないため `AskUserQuestion` に分類されていました。スマホから承認すると選択肢 1(= セッションの終了)が PC 側に注入されます。
 
-**v1.21.1 からこの画面は転送しません**(PC 側で操作してください)。`Exit and stop tasks` / `Move to background and exit` はこの画面以外にまず現れないため、**どちらか 1 つが読めた時点で止めます**(選択肢が 1 行しか描かれていない途中のフレームでも取り逃さないため)。`Stay` は通常の質問にも出る語なので**判定には使いません**。判定はツール名を決めた後の「転送してよいか」の 1 箇所で行うので、承認枠の上に `● Tool(...)` 行があるフレームでも同じように止まります。止めたことはラッパーのログに `承認可能化しない(exit-confirm: …)` として残ります。
+**v1.21.1 からこの画面は転送しません**(PC 側で操作してください)。`Exit and stop tasks` / `Move to background and exit` はこの画面以外にまず現れないため、**どちらか 1 つが読めた時点で止めます**(選択肢が 1 行しか描かれていない途中のフレームでも取り逃さないため)。`Stay` は通常の質問にも出る語なので**判定には使いません**。判定はツール名を決めた後の「転送してよいか」の 1 箇所で行うので、承認枠の上に `● Tool(...)` 行があるフレームでも同じように止まります。止めたことはラッパーのログに `承認可能化しない(exit-confirm: …)` として残ります。CLI の更新でこの画面の文言が変わった場合は、トラブルシューティングの `dialogDetection.exitConfirmPhrases` で追記できます。
 
 ### 承認の表示内容は「承認枠の中身」から読みます
 
@@ -859,7 +859,7 @@ Notes:
 - **Only the config path uses a different variable name per process** (wrapper = `APPROVAL_CONFIG`, server = `APPROVAL_CONFIG_PATH`). Set both if you want them to read the same file
 - **`APPROVAL_TOKEN` is the one item where the config file takes precedence.** If `approval-config.json` has a `token`, the environment variable is ignored. The wrapper **refuses to start** when no token can be resolved — it never connects with an empty token
 - `APPROVAL_WRAPPER_LOG` is written only to that file, not to stderr, so the runtime log does not collide with the Claude Code TUI. It is meant to be watched with `tail -f` from another terminal (startup errors are still printed to stderr)
-- ⚠️ **`APPROVAL_PTY_LOG` records whatever was drawn on screen, as-is** (including the contents of approval boxes and text shown in the input box). `APPROVAL_WRAPPER_LOG`, by contrast, records only runtime events (request ids, tab sweeps, injection results, the head of rejected answer values); free-text bodies are recorded as length only (see "Log non-exposure" under Security). Do not write either to a shared machine or anywhere they may leave your host
+- ⚠️ **`APPROVAL_PTY_LOG` records whatever was drawn on screen, as-is** (including the contents of approval boxes and text shown in the input box). `APPROVAL_WRAPPER_LOG`, by contrast, records only runtime events (request ids, tab sweeps, injection results, the head of rejected answer values, and — since v1.22.0 — the first 30 characters of the prompt **only when** the frame-coherence shadow check disagrees); free-text bodies are recorded as length only (see "Log non-exposure" under Security). Do not write either to a shared machine or anywhere they may leave your host
 - ⚠️ **The server's stdout carries both the token and approval content.** It prints `SECRET_TOKEN` at startup and then one `[NEW REQUEST] <id>: [project][Tool] args — prompt` line per approval (free-text bodies are never printed). Redirecting stdout to a file leaves both in that file
 
 ## Running multiple projects simultaneously
@@ -943,9 +943,9 @@ If a CLI update changes (or localizes) the wording of the session-exit confirmat
 }
 ```
 
-This knob is **append-only**: the two built-in phrases (`Exit and stop tasks` / `Move to background and exit`) cannot be disabled by configuration (no misconfiguration can silently re-enable forwarding of that screen). Avoid overly broad phrases such as `exit` — they would suppress ordinary questions too; copy the option label exactly as it appears on screen.
+This knob is **append-only**: the two built-in phrases (`Exit and stop tasks` / `Move to background and exit`) cannot be disabled by configuration (no misconfiguration can silently re-enable forwarding of that screen). Copy the phrase from the option label as it appears on screen (leading numbers and symbols are stripped automatically; matching is case-insensitive). Overly broad phrases such as `exit` would suppress ordinary questions too, so **phrases shorter than 4 characters, longer than 200 characters, or beyond the 16th entry are ignored, with a startup warning**.
 
-Since v1.22.0 the wrapper also runs `--version` on the target CLI at startup and compares it with the version its dialog detection was verified against; when the CLI is ahead by a minor/major version it prints a one-line stderr warning that wording changes may silently break detection (startup is not blocked; patch-level drift and probe failures go to the wrapper log only).
+Since v1.22.0 the wrapper also runs `--version` on the target CLI at startup and compares it with the version its dialog detection was verified against; when the CLI is ahead by a minor/major version it prints a one-line stderr warning that wording changes may silently break detection (startup is not blocked; patch-level drift and probe failures go to the wrapper log only; the probe adds roughly 1–2 seconds to startup). This check is **an auxiliary warning, not a security boundary** — it does not detect wording changes themselves, only the precondition that the CLI is newer than the verified version. When it fires, verify on the PC that the exit-confirmation screen is still not forwarded, and append the new wording to `exitConfirmPhrases` if it changed.
 
 ### The tabs move on their own in multi-question dialogs
 
@@ -997,7 +997,7 @@ When the wrapper cannot rewind back to the first tab after sweeping a tabbed mul
 
 Before v1.21.1, the **session-exit confirmation screen** (`Exit and stop tasks` / `Move to background and exit` / `Stay`) could be forwarded as an approval. It is not an approval, but it has the same structure as an approval box (options `1..N` plus an end marker) and raises none of the tool-approval signals (shift+tab hint, the known approval phrase, a glued `● Tool(...)` line, a label), so it was classified as an `AskUserQuestion`. Approving it from the phone injects option 1 — ending the session — on the PC.
 
-**Since v1.21.1 this screen is never forwarded** (answer it on the PC). `Exit and stop tasks` and `Move to background and exit` practically never appear outside this screen, so **either one alone is enough to suppress forwarding** — this also covers partially drawn frames where only the first option is on screen. `Stay` is a word ordinary questions use, so it **is not part of the check at all**. The check runs at the single "may this be forwarded" decision point after the tool name is resolved, so the screen is suppressed even when a `● Tool(...)` line sits above the box. When it is suppressed, the wrapper log records `承認可能化しない(exit-confirm: …)`.
+**Since v1.21.1 this screen is never forwarded** (answer it on the PC). `Exit and stop tasks` and `Move to background and exit` practically never appear outside this screen, so **either one alone is enough to suppress forwarding** — this also covers partially drawn frames where only the first option is on screen. `Stay` is a word ordinary questions use, so it **is not part of the check at all**. The check runs at the single "may this be forwarded" decision point after the tool name is resolved, so the screen is suppressed even when a `● Tool(...)` line sits above the box. When it is suppressed, the wrapper log records `承認可能化しない(exit-confirm: …)`. If a CLI update changes the wording of this screen, you can append the new phrases via `dialogDetection.exitConfirmPhrases` (see Troubleshooting).
 
 ### What the phone shows is read from inside the approval box
 

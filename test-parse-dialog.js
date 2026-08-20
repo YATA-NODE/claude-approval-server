@@ -25,6 +25,7 @@ const {
   extractOptions,
   composeEndMarkerPattern,
   composeExitConfirmPattern,
+  sanitizeExitConfirmPhrases,
   parseCliVersion,
   cliVersionAhead,
   isLostRegistration,
@@ -3595,6 +3596,30 @@ console.log('\n[68] composeExitConfirmPattern / cliVersionAhead')
   assertEq('[68c] 前置きつき出力から抽出', parseCliVersion('2.1.237 (Claude Code)'), '2.1.237')
   assertEq('[68c] codex 形式から抽出', parseCliVersion('codex-cli 0.147.0'), '0.147.0')
   assertEq('[68c] null 入力', parseCliVersion(null), null)
+
+  // 追加文言の受理制限(範囲外は無視、既定は常に維持)
+  const lim = sanitizeExitConfirmPhrases({
+    exitConfirmPhrases: ['abc', 'x'.repeat(201), ' ❯ 1. End this session now ', 'End session too'],
+  })
+  assertEq('[68d] 4 字未満は無視', lim.rejected.includes('abc'), true)
+  assertEq('[68d] 200 字超は無視', lim.rejected.some((s) => s.length > 200), true)
+  assertEq(
+    '[68d] 先頭の記号・番号マーカーは剥がして受理',
+    lim.accepted.includes('End this session now'),
+    true
+  )
+  assertEq('[68d] 通常の文言は受理', lim.accepted.includes('End session too'), true)
+  const many = sanitizeExitConfirmPhrases({
+    exitConfirmPhrases: Array.from({ length: 20 }, (_, i) => `custom exit phrase ${i}`),
+  })
+  assertEq('[68d] 件数上限で打ち切り', many.accepted.length, 16)
+  assertEq('[68d] 超過分は rejected', many.rejected.length, 4)
+  const limPattern = new RegExp(
+    composeExitConfirmPattern({ exitConfirmPhrases: ['ab'] }),
+    'i'
+  )
+  assertEq('[68d] 却下されても既定文言は維持', limPattern.test('Exit and stop tasks'), true)
+  assertEq('[68d] 却下文言は合成されない', limPattern.test('ab something'), false)
 }
 
 // -------------------------------------------------------

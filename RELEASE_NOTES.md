@@ -9,11 +9,11 @@ This file keeps version-specific history out of the README. Japanese and English
 ## v1.22.0+
 
 - **`1)` 区切りのダイアログで選択肢ラベルの先頭に `)` が残る不具合を修正しました**。先頭ノイズ除去がドットと空白しか落とさなかったため、`1)` 区切りでは全ラベルが `) …` の形になり、完全一致で判定する 2 つの防御(「Chat about this」を指す回答の拒否 / 自由記入の添付を「Type something」に限定)が無言で外れていました(前者は安全側の判定が効かなくなる方向)。ラベルの生成点で区切り残渣を落とす最小修正です。
-- **終了確認画面の判定文言を設定で追記できるようになりました**(`dialogDetection.exitConfirmPhrases`、配列・リテラル扱い)。**追記専用**で、既定の 2 文言は設定では無効化できません(誤設定で危険な画面の転送が再開する口を作らないため)。CLI の文言変更・多言語化への追従用です。
+- **終了確認画面の判定文言を設定で追記できるようになりました**(`dialogDetection.exitConfirmPhrases`、配列・リテラル扱い)。**追記専用**で、既定の 2 文言は設定では無効化できません(誤設定で危険な画面の転送が再開する口を作らないため)。4 文字未満・200 文字超・17 件目以降は無視され起動時に警告が出ます(短い文言は前方一致ゆえ通常の質問まで止めるため)。CLI の文言変更・多言語化への追従用です。
 - **起動時に対象 CLI のバージョンを検証済みバージョンと照合し、minor / major が進んでいる場合は stderr に 1 行警告します**(CLI バージョン canary)。ダイアログ判定は CLI の画面文言に依存し、文言が変わると検出が例外なく外れるため、その前提条件(CLI が検証版より進んだ)を起動時に知らせます。起動は止めません。patch 先行と取得失敗はラッパーログのみです。
 - **prompt と選択肢の「枠所属」を観測する shadow モードを追加しました**(挙動不変)。終了確認画面が転送された真因 = prompt を「窓内の最後の `?`」でさかのぼるため別の枠の残存テキストを prompt に採用しうる、の構造的対策の準備として、非一貫なフレームをラッパーログに `frame-shadow` 行で記録だけします。実測を見てから将来のリリースで enforce を判断します。
 - 実機フレームの回帰テストを追加しました(claude 2.1.237 の終了確認画面の録画 fixture)。この録画で、**2.1.237 の終了確認は選択肢 2 つ(`Exit and stop tasks` / `Stay`)に変わっており**(v1.21.1 実装時は 3 択)、既知 2 文言のどちらか 1 つで転送を止める v1.21.1 の設計が実際の文言変更に耐えたことを確認しています。
-- そのほか: 転送しない理由の一覧に `ambiguous-box` の説明文言を追加(ログの表示のみ)。なお canary の追加により、起動時に対象 CLI の `--version` 取得(実測 0.5〜2.2 秒、環境負荷で変動)が加わります(サーバー疎通確認とは並行実行)。
+- そのほか: 転送しない理由の一覧に `ambiguous-box` の説明文言を追加(ログの表示のみ)。なお canary の追加により、起動時に対象 CLI の `--version` 取得(実測 0.5〜2.2 秒、環境負荷で変動、待ちの上限 10 秒)が加わります(サーバー疎通確認とは並行実行)。
 
 ## v1.21.1+
 
@@ -132,11 +132,11 @@ This file keeps version-specific history out of the README. Japanese and English
 ## v1.22.0+
 
 - **Fixed option labels keeping a leading `)` in dialogs numbered `1)`.** The leading-noise stripper only removed dots and whitespace, so `1)`-style dialogs left every label as `) …`, which silently disabled two exact-match defenses (rejecting answers that select "Chat about this", and restricting free-text attachments to "Type something") — the former in the fail-open direction. Minimal fix at the label-producing site: the separator residue is now stripped.
-- **The exit-confirmation wording can now be extended via configuration** (`dialogDetection.exitConfirmPhrases`, an array treated as literals). The knob is **append-only**: the two built-in phrases cannot be disabled by configuration (no misconfiguration can silently re-enable forwarding of that screen). Intended for tracking CLI wording changes and localization.
+- **The exit-confirmation wording can now be extended via configuration** (`dialogDetection.exitConfirmPhrases`, an array treated as literals). The knob is **append-only**: the two built-in phrases cannot be disabled by configuration (no misconfiguration can silently re-enable forwarding of that screen). Phrases shorter than 4 characters, longer than 200, or beyond the 16th entry are ignored with a startup warning (short phrases are prefix-matched and would suppress ordinary questions). Intended for tracking CLI wording changes and localization.
 - **At startup the wrapper now compares the target CLI's version against the version its dialog detection was verified on, and prints a one-line stderr warning when the CLI is ahead by a minor/major version** (CLI version canary). Dialog detection depends on on-screen wording and breaks without an exception when wording changes, so the wrapper surfaces the precondition (CLI newer than verified) at startup. Startup is never blocked; patch-level drift and probe failures go to the wrapper log only.
 - **Added a shadow mode observing whether the prompt and the options belong to the same frame** (no behavior change). The root cause of the exit-confirmation incident is that the prompt is found by scanning back to the last `?` in the window, which can adopt leftover text from a different frame. As preparation for a structural fix, incoherent frames are only recorded to the wrapper log as `frame-shadow` lines; enforcement will be decided in a future release based on the measurements.
 - Added a real-machine regression fixture (a recording of the claude 2.1.237 session-exit confirmation screen). The recording shows that **2.1.237 renders only two options (`Exit and stop tasks` / `Stay`)** — the wording set already changed from the three-option screen v1.21.1 was built against — confirming that suppressing on either single known phrase survived a real wording change.
-- Misc: added the missing `ambiguous-box` description to the non-forwarding reason table (log display only). Note that the canary adds a `--version` probe of the target CLI to startup (0.5–2.2 s in practice, varying with system load; it runs in parallel with the server reachability check).
+- Misc: added the missing `ambiguous-box` description to the non-forwarding reason table (log display only). Note that the canary adds a `--version` probe of the target CLI to startup (0.5–2.2 s in practice, varying with system load, capped at 10 s; it runs in parallel with the server reachability check).
 
 ## v1.21.1+
 

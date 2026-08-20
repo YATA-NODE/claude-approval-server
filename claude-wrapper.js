@@ -2025,15 +2025,56 @@ const EXIT_CONFIRM_DEFAULT_PHRASES = ['exit and stop tasks', 'move to background
 function escapeRegExp(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
-function composeExitConfirmPattern(dialogDetection) {
+// 追加文言の受理条件(外部レビュー指摘 = 無制限だと誤設定の影響が黙示的):
+// 短すぎる文言は通常の質問まで止める(前方一致ゆえ影響が広い)、長大・大量は合成 regex を
+// 無用に太らせる。範囲外は「無視 + 起動時 warn」— 転送しない側の機能の設定不備で起動を
+// 止めない(loadConfig がパース失敗を {} に倒すのと同じ寛容方針)。
+// 照合対象(option ラベル)は先頭の記号・番号を剥がした形なので、文言側にも同じ正規化を
+// かける(画面のラベルをそのままコピーしても一致するように)。
+const EXIT_CONFIRM_PHRASE_MIN = 4
+const EXIT_CONFIRM_PHRASE_MAX = 200
+const EXIT_CONFIRM_PHRASES_MAX_COUNT = 16
+function sanitizeExitConfirmPhrases(dialogDetection) {
   const dd = dialogDetection || {}
+  const raw = Array.isArray(dd.exitConfirmPhrases) ? dd.exitConfirmPhrases : []
+  const accepted = []
+  const rejected = []
+  for (const r of raw) {
+    // 画面からのコピーを想定し、先頭の記号(❯ 等)→ 番号マーカー(`1.` / `1)`)→ 記号 の順に剥がす
+    const s = String(r)
+      .replace(/^[^\p{L}\p{N}]+/u, '')
+      .replace(/^[1-9][.)]\s*/, '')
+      .replace(/^[^\p{L}\p{N}]+/u, '')
+      .trim()
+    if (
+      s.length >= EXIT_CONFIRM_PHRASE_MIN &&
+      s.length <= EXIT_CONFIRM_PHRASE_MAX &&
+      accepted.length < EXIT_CONFIRM_PHRASES_MAX_COUNT
+    ) {
+      accepted.push(s)
+    } else {
+      rejected.push(s)
+    }
+  }
+  return { accepted, rejected }
+}
+function composeExitConfirmPattern(dialogDetection) {
   const wordEnd = (s) => escapeRegExp(s) + (/[A-Za-z0-9_]$/.test(s) ? '\\b' : '')
-  const extras = (Array.isArray(dd.exitConfirmPhrases) ? dd.exitConfirmPhrases : [])
-    .map((raw) => String(raw).trim())
-    .filter(Boolean)
-  return `^(?:${[...EXIT_CONFIRM_DEFAULT_PHRASES, ...extras].map(wordEnd).join('|')})`
+  const { accepted } = sanitizeExitConfirmPhrases(dialogDetection)
+  return `^(?:${[...EXIT_CONFIRM_DEFAULT_PHRASES, ...accepted].map(wordEnd).join('|')})`
 }
 const EXIT_CONFIRM_RE = new RegExp(composeExitConfirmPattern(_dialogDetection), 'i')
+{
+  const rejectedPhrases = sanitizeExitConfirmPhrases(_dialogDetection).rejected
+  if (rejectedPhrases.length) {
+    console.warn(
+      `[claude-wrapper] dialogDetection.exitConfirmPhrases: ${rejectedPhrases.length} 件を無視しました` +
+        `(${EXIT_CONFIRM_PHRASE_MIN} 字未満 / ${EXIT_CONFIRM_PHRASE_MAX} 字超 / ` +
+        `${EXIT_CONFIRM_PHRASES_MAX_COUNT} 件超のいずれか)。短い文言は前方一致ゆえ通常の質問まで` +
+        '転送されなくなるため受け付けません。'
+    )
+  }
+}
 function looksLikeExitConfirm(options) {
   if (!Array.isArray(options)) return false
   return options.some((o) => EXIT_CONFIRM_RE.test(String(o).replace(/^[^\p{L}\p{N}]+/u, '')))
@@ -2073,7 +2114,9 @@ function analyzeFrameCoherence(segment, qIdx, firstOptAt) {
 let lastFrameShadowKey = null
 function logFrameShadowOnce(coh, forwarded, tool, optN, prompt) {
   const verdict = coh.coherent ? 'agree' : 'disagree'
-  const p30 = String(prompt || '').slice(0, 30)
+  // prompt の断片は disagree の診断(どの画面で不一致が出たか)にだけ要る。agree は大多数 =
+  // 画面テキストを常時ログへ写す面を作らないため、件数系のみ記録する(外部レビュー指摘)。
+  const p30 = coh.coherent ? '' : String(prompt || '').slice(0, 30)
   const key = `${verdict}:${coh.boundaries.join(',')}:${p30}:${optN}`
   if (key === lastFrameShadowKey) return
   lastFrameShadowKey = key
@@ -2081,7 +2124,8 @@ function logFrameShadowOnce(coh, forwarded, tool, optN, prompt) {
     sanitizeLogMessage(
       `frame-shadow verdict=${verdict} forwarded=${forwarded ? 1 : 0} ` +
         `between=[${coh.boundaries.join(',')}] gap=${coh.gapLines} ` +
-        `optN=${optN} tool=${tool} prompt30="${p30}"`
+        `optN=${optN} tool=${tool}` +
+        (p30 ? ` prompt30="${p30}"` : '')
     )
   )
 }
@@ -2366,6 +2410,7 @@ if (typeof module !== 'undefined') {
     extractOptions,
     composeEndMarkerPattern,
     composeExitConfirmPattern,
+    sanitizeExitConfirmPhrases,
     parseCliVersion,
     cliVersionAhead,
     isLostRegistration,
