@@ -3474,6 +3474,28 @@ console.log('\n[66] セッション終了確認ダイアログを転送しない
   ].join('\n')
   assertEq('[66f] `1)` 区切りでも転送しない', parseDialog(parenStyle), null)
 
+  // 実機文言(claude 2.1.237、e2e-raw-exit-confirm.log frame 45 より)。選択肢は 2 つで
+  // v1.21.1 実装時の 3 択から文言セットが変わっている = 片方一致で倒す設計の実証。
+  // 見出しに `?` が無いため、実画面単体では qIdx の段階で読めない(= 転送されない)。
+  const real2137 = [
+    '──────────',
+    '  Background work is running',
+    '  The following will stop when you exit:',
+    '',
+    '  shell · sleep 600',
+    '',
+    '  ❯ 1. Exit and stop tasks',
+    '    2. Stay',
+    '',
+    '  Enter to confirm · Esc to cancel',
+  ].join('\n')
+  assertEq('[66h] 実機形(? なし)は読めない = 転送しない', parseDialog(real2137), null)
+  // 残存 `?` が窓内にあると構造的には読めるが、exit-confirm 判定で転送だけが止まる
+  const withStale = ' 前の質問はこれでしたか?\n' + real2137
+  assertEq('[66h] 残存 ? があっても転送しない', parseDialog(withStale), null)
+  const staleScreenOnly = parseDialog(withStale, { screenOnly: true })
+  assertEq('[66h] screenOnly では読める(転送だけを止めている)', !!staleScreenOnly, true)
+
   // 純関数の境界。この群は CLI 側の文言が変わったことに気付くための canary でもある
   // (判定はリテラルの前方一致なので、文言が変われば無言で転送に戻る)。
   assertEq('[66g] 対象の文言は 1 つでも真', looksLikeExitConfirm(['Exit and stop tasks']), true)
