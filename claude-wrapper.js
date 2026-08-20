@@ -310,9 +310,14 @@ function cliVersionAhead(current, verified) {
 function checkCliVersionCanary() {
   return new Promise((resolve) => {
     const { execFile } = require('child_process')
-    execFile(TARGET_CMD, ['--version'], { timeout: 3000 }, (err, stdout) => {
+    // timeout は 10s = 上限であって通常の待ちではない。claude --version は実測 0.5〜2.2s
+    // (負荷で変動)で返るため通常は上限に達しない。旧 3s は実測幅の上端と近すぎ、
+    // canary が最も要る「遅い環境」ほど kill されて skip に倒れていた(実観測)。
+    // この待ちは起動の critical path に乗る(server 疎通はローカル ms 級)= canary の
+    // 代価として受け入れる(fail-open を無言にしないほうが重い)。
+    execFile(TARGET_CMD, ['--version'], { timeout: 10000 }, (err, stdout) => {
       if (err) {
-        wlog(`CLI バージョン取得失敗(canary skip): ${err.code || err.message}`)
+        wlog(`CLI バージョン取得失敗(canary skip): ${err.killed ? 'timeout' : err.code || err.message}`)
         return resolve()
       }
       const current = parseCliVersion(stdout)
@@ -338,9 +343,9 @@ async function preflight() {
     console.error('   approval-config.json に token を設定するか、環境変数 APPROVAL_TOKEN を設定してください。\n')
     process.exit(1)
   }
-  // server 疎通と CLI バージョン取得(execFile、実測 0.5〜1.2s)は独立なので並行させる
-  // (直列だと両者の合計が毎回の起動に乗る)。canary は resolve-only なので、疎通失敗で
-  // exit(1) する経路に pending が残っても害はない。
+  // server 疎通と CLI バージョン取得(execFile、実測 0.5〜2.2s = 負荷で変動)は独立なので
+  // 並行させる(直列でその合計を起動に乗せない)。critical path は canary 側。
+  // canary は resolve-only なので、疎通失敗で exit(1) する経路に pending が残っても害はない。
   const canary = checkCliVersionCanary()
   try {
     await httpRequest('GET', '/queue', null, 3000)
