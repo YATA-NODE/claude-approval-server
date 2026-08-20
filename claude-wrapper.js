@@ -294,7 +294,7 @@ function httpRequestReal(method, urlPath, body, timeoutMs = 70000) {
 // (patch 先行と取得失敗は wlog のみ = 警告疲れで無視される劣化を避ける)。
 const VERIFIED_CLI_VERSIONS = { claude: '2.1.237', codex: '0.147.0' }
 function parseCliVersion(s) {
-  const m = /\d+\.\d+\.\d+/.exec(String(s == null ? '' : s))
+  const m = /\d+\.\d+\.\d+/.exec(String(s ?? ''))
   return m ? m[0] : null
 }
 function cliVersionAhead(current, verified) {
@@ -338,6 +338,10 @@ async function preflight() {
     console.error('   approval-config.json に token を設定するか、環境変数 APPROVAL_TOKEN を設定してください。\n')
     process.exit(1)
   }
+  // server 疎通と CLI バージョン取得(execFile、実測 0.5〜1.2s)は独立なので並行させる
+  // (直列だと両者の合計が毎回の起動に乗る)。canary は resolve-only なので、疎通失敗で
+  // exit(1) する経路に pending が残っても害はない。
+  const canary = checkCliVersionCanary()
   try {
     await httpRequest('GET', '/queue', null, 3000)
   } catch (e) {
@@ -346,7 +350,7 @@ async function preflight() {
     console.error(`     node approval-server.js\n`)
     process.exit(1)
   }
-  await checkCliVersionCanary()
+  await canary
 }
 
 // -------------------------------------------------------
@@ -603,6 +607,7 @@ const DEDUP_WINDOW_MS = 15000
 // -------------------------------------------------------
 const BOX_CHARS = '│╭╮╰╯─╌' // ボックス枠 + 罫線(7文字)
 const RULE_CHARS = '─╌' // 横罫線のみ
+const BOX_CORNER_CHARS = '╭╮╰╯' // 箱の角(枠の上端 / 下端の同定用。描画途中で右角だけ見える行も拾う)
 const PROMPT_BOX_ANCHOR_CHARS = '│─╌' // prompt 行頭アンカー探索用の意図的サブセット(╭╮╰╯ を含まない)
 // タブバーのチェック印。U+2610 ☐ / U+2714 ✔ と、フォントフォールバックの □ / ✓。
 // 「回答済み」を示す印(☒ U+2612 / ⊠ U+22A0)を追加。実機での実文字は未確認だが、
@@ -724,9 +729,8 @@ function boxBodyLines(segment, qIdx, wideText) {
   // 端末の折り返しでも同じ形を作れるため、行頭や桁では弁別できない。曖昧なら PC で答える。
   const labelCount = countLines.filter((l) => BOX_LABEL_LINE_RE.test(l)).length
   if (labelCount > 1) return none(true, true)
-  const isRule = isRuleLine
   let ruleIdx = -1
-  for (let i = lines.length - 1; i >= 0 && ruleIdx === -1; i--) if (isRule(lines[i])) ruleIdx = i
+  for (let i = lines.length - 1; i >= 0 && ruleIdx === -1; i--) if (isRuleLine(lines[i])) ruleIdx = i
   if (ruleIdx === -1) return none(labelCount > 0, false)
   // **1 本上の罫線へ遡らない**。遡りは「罫線 → ラベル → 本文 → 区切り線 → prompt」という
   // 形の箱を通すために入れていたが、実機の箱(実録画で確認)は下端の区切り線を持たず、
@@ -1379,7 +1383,7 @@ function parseDialog(buf, opts = {}) {
       analyzeFrameCoherence(segment, qIdx, qIdx + 1 + sortedMarks[0].at),
       !unforwardable,
       tool,
-      options,
+      options.length,
       prompt
     )
   }
@@ -2018,14 +2022,11 @@ function escapeRegExp(s) {
 }
 function composeExitConfirmPattern(dialogDetection) {
   const dd = dialogDetection || {}
-  const wordEnd = (s, lit) => (/[A-Za-z0-9_]$/.test(s) ? `${lit}\\b` : lit)
-  const parts = EXIT_CONFIRM_DEFAULT_PHRASES.map((p) => wordEnd(p, escapeRegExp(p)))
-  const extra = Array.isArray(dd.exitConfirmPhrases) ? dd.exitConfirmPhrases : []
-  for (const raw of extra) {
-    const s = String(raw).trim()
-    if (s) parts.push(wordEnd(s, escapeRegExp(s)))
-  }
-  return `^(?:${parts.join('|')})`
+  const wordEnd = (s) => escapeRegExp(s) + (/[A-Za-z0-9_]$/.test(s) ? '\\b' : '')
+  const extras = (Array.isArray(dd.exitConfirmPhrases) ? dd.exitConfirmPhrases : [])
+    .map((raw) => String(raw).trim())
+    .filter(Boolean)
+  return `^(?:${[...EXIT_CONFIRM_DEFAULT_PHRASES, ...extras].map(wordEnd).join('|')})`
 }
 const EXIT_CONFIRM_RE = new RegExp(composeExitConfirmPattern(_dialogDetection), 'i')
 function looksLikeExitConfirm(options) {
@@ -2041,6 +2042,9 @@ function looksLikeExitConfirm(options) {
 // 境界に数えないもの: 空行(箱を描かない AUQ では prompt と選択肢の間に普通に入る)/
 // `│` だけの行(箱内の余白)/ codex の `$` コマンド行(prompt と選択肢の間に正当に挟まる)。
 // enforce するときの過剰阻止をここで作らないため、疑いの列挙は保守的に保つ。
+// expandPromptStart の境界集合と違うのは問いが違うから(あちらは「段落の開始」= 空行も境界、
+// こちらは「同じ枠か」= 空行は枠を切らない)。片方に合わせる「統一」をしないこと。
+const BOX_CORNER_RE = new RegExp(`[${BOX_CORNER_CHARS}]`)
 function analyzeFrameCoherence(segment, qIdx, firstOptAt) {
   const between = String(segment).slice(qIdx + 1, firstOptAt).split('\n')
   // 先頭要素 = prompt 行の残り、末尾要素 = 選択肢行の前置き(どちらも「間の行」ではない)
@@ -2048,12 +2052,11 @@ function analyzeFrameCoherence(segment, qIdx, firstOptAt) {
   const boundaries = []
   for (const raw of inner) {
     const line = raw.trim()
-    if (line === '') continue
     if (/^[\s│]*$/.test(raw)) continue
     if (CODEX_CMD_LINE_RE.test(raw)) continue
     if (END_MARKER_LINE_RE.test(line)) boundaries.push('end-marker')
     else if (line.includes(BULLET_CHAR)) boundaries.push('turn')
-    else if (/[╭╰]/.test(line)) boundaries.push('box-corner')
+    else if (BOX_CORNER_RE.test(line)) boundaries.push('box-corner')
     else if (isRuleLine(line)) boundaries.push('rule')
   }
   return { coherent: boundaries.length === 0, boundaries, gapLines: inner.length }
@@ -2063,17 +2066,17 @@ function analyzeFrameCoherence(segment, qIdx, firstOptAt) {
 // 「disagree / 全体」の比率が要る(分子だけでは誤検知率を測れない)。同一画面の
 // 連打(PTY チャンク / 400ms tick)は logUnforwardableOnce と同型の latch で 1 行に潰す。
 let lastFrameShadowKey = null
-function logFrameShadowOnce(coh, forwarded, tool, options, prompt) {
+function logFrameShadowOnce(coh, forwarded, tool, optN, prompt) {
   const verdict = coh.coherent ? 'agree' : 'disagree'
   const p30 = String(prompt || '').slice(0, 30)
-  const key = `${verdict}:${coh.boundaries.join(',')}:${p30}:${options.length}`
+  const key = `${verdict}:${coh.boundaries.join(',')}:${p30}:${optN}`
   if (key === lastFrameShadowKey) return
   lastFrameShadowKey = key
   wlog(
     sanitizeLogMessage(
       `frame-shadow verdict=${verdict} forwarded=${forwarded ? 1 : 0} ` +
         `between=[${coh.boundaries.join(',')}] gap=${coh.gapLines} ` +
-        `optN=${options.length} tool=${tool} prompt30="${p30}"`
+        `optN=${optN} tool=${tool} prompt30="${p30}"`
     )
   )
 }
