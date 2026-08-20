@@ -626,6 +626,12 @@ const BOX_OR_NEWLINE_G = new RegExp(`[${BOX_CHARS}\\r\\n]`, 'g')
 const BOX_EDGE_G = new RegExp(`^[\\s${BOX_CHARS}]+|[\\s${BOX_CHARS}]+$`, 'g')
 const PROMPT_NORMALIZE_STRIP_RE = new RegExp(`[\\s　${BOX_CHARS}\\r\\n]+`, 'g')
 const RULE_LINE_RE = new RegExp(`^[${RULE_CHARS}\\s]+$`)
+// 罫線行の判定。RULE_LINE_RE 単体は空白だけの行にも一致するため、実運用の判定は必ず
+// 非空白 3 文字以上と AND する。この関数を単一の出所にする(条件が 2 箇所に複製されて
+// 片方だけ直る drift を防ぐ)。
+function isRuleLine(line) {
+  return RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
+}
 const TAB_BAR_RE = new RegExp(`[${TAB_MARK_CHARS}${TAB_ARROW_CHAR}]`)
 const CURSOR_G = new RegExp(`[${CURSOR_CHARS}]`, 'g')
 const CURSOR_NUM_RE = new RegExp(`[${CURSOR_CHARS}]\\s*[1-9]`)
@@ -718,7 +724,7 @@ function boxBodyLines(segment, qIdx, wideText) {
   // 端末の折り返しでも同じ形を作れるため、行頭や桁では弁別できない。曖昧なら PC で答える。
   const labelCount = countLines.filter((l) => BOX_LABEL_LINE_RE.test(l)).length
   if (labelCount > 1) return none(true, true)
-  const isRule = (l) => RULE_LINE_RE.test(l) && l.replace(/\s/g, '').length >= 3
+  const isRule = isRuleLine
   let ruleIdx = -1
   for (let i = lines.length - 1; i >= 0 && ruleIdx === -1; i--) if (isRule(lines[i])) ruleIdx = i
   if (ruleIdx === -1) return none(labelCount > 0, false)
@@ -1072,7 +1078,7 @@ function expandPromptStart(beforeQ, startNl) {
     // 併せ持つ ●Tool 行(hard-wrap した args エコー等)でも turn 境界を優先する(順序が重要 =
     // 先に box 境界判定すると args 続き行が prompt に混入する)。
     if (line.includes(BULLET_CHAR) || ACTION_LABEL_RE.test(line)) return startNl
-    const isRule = RULE_LINE_RE.test(line) && line.replace(/\s/g, '').length >= 3
+    const isRule = isRuleLine(line)
     const isTabBar = TAB_BAR_RE.test(line)
     const isOption = CURSOR_ANY_RE.test(line)
     // codex 質問ヘッダ "Question N/N (..)" も段落境界 = prompt 本文に
@@ -1364,6 +1370,19 @@ function parseDialog(buf, opts = {}) {
   // 既に理由が立っているときは上書きしない。転送しない結論は同じで、先に立った理由のほうが
   // 原因に近い(描画途中で truncated かつ exit-confirm のとき、切り分けが 1 段遠くなるのを避ける)。
   if (!unforwardable && looksLikeExitConfirm(options)) unforwardable = 'exit-confirm'
+
+  // shadow 観測(挙動不変): prompt と選択肢の枠所属を測って記録だけする。enforce は
+  // 実測(disagree の頻度と形)を見てから別リリースで判断する。screenOnly(タブ巡回の
+  // 80ms ポーリング等)はホットパスなので観測しない。
+  if (!opts.screenOnly && sortedMarks.length > 0) {
+    logFrameShadowOnce(
+      analyzeFrameCoherence(segment, qIdx, qIdx + 1 + sortedMarks[0].at),
+      !unforwardable,
+      tool,
+      options,
+      prompt
+    )
+  }
 
   if (unforwardable && !opts.screenOnly) {
     logUnforwardableOnce(unforwardable, args)
@@ -2014,6 +2033,51 @@ function looksLikeExitConfirm(options) {
   return options.some((o) => EXIT_CONFIRM_RE.test(String(o).replace(/^[^\p{L}\p{N}]+/u, '')))
 }
 
+// prompt と選択肢の「枠所属」を測る純関数(shadow 観測用 = 判定には使わない)。
+// prompt は「窓内の最後の ?」でさかのぼって取るため、別の枠に属する残存テキストが
+// prompt に採用されうる(終了確認画面の実害の真因)。prompt 行と最初の選択肢行の
+// **間**に構造境界(罫線 / 箱の角 / ● のターン行 / 前ダイアログの終端マーカー行)が
+// あれば「同じ枠ではない疑い」= coherent:false を返す。
+// 境界に数えないもの: 空行(箱を描かない AUQ では prompt と選択肢の間に普通に入る)/
+// `│` だけの行(箱内の余白)/ codex の `$` コマンド行(prompt と選択肢の間に正当に挟まる)。
+// enforce するときの過剰阻止をここで作らないため、疑いの列挙は保守的に保つ。
+function analyzeFrameCoherence(segment, qIdx, firstOptAt) {
+  const between = String(segment).slice(qIdx + 1, firstOptAt).split('\n')
+  // 先頭要素 = prompt 行の残り、末尾要素 = 選択肢行の前置き(どちらも「間の行」ではない)
+  const inner = between.slice(1, -1)
+  const boundaries = []
+  for (const raw of inner) {
+    const line = raw.trim()
+    if (line === '') continue
+    if (/^[\s│]*$/.test(raw)) continue
+    if (CODEX_CMD_LINE_RE.test(raw)) continue
+    if (END_MARKER_LINE_RE.test(line)) boundaries.push('end-marker')
+    else if (line.includes(BULLET_CHAR)) boundaries.push('turn')
+    else if (/[╭╰]/.test(line)) boundaries.push('box-corner')
+    else if (isRuleLine(line)) boundaries.push('rule')
+  }
+  return { coherent: boundaries.length === 0, boundaries, gapLines: inner.length }
+}
+
+// shadow 観測の記録。agree(現行判定と一致 = 境界なし)も出す: enforce の判断には
+// 「disagree / 全体」の比率が要る(分子だけでは誤検知率を測れない)。同一画面の
+// 連打(PTY チャンク / 400ms tick)は logUnforwardableOnce と同型の latch で 1 行に潰す。
+let lastFrameShadowKey = null
+function logFrameShadowOnce(coh, forwarded, tool, options, prompt) {
+  const verdict = coh.coherent ? 'agree' : 'disagree'
+  const p30 = String(prompt || '').slice(0, 30)
+  const key = `${verdict}:${coh.boundaries.join(',')}:${p30}:${options.length}`
+  if (key === lastFrameShadowKey) return
+  lastFrameShadowKey = key
+  wlog(
+    sanitizeLogMessage(
+      `frame-shadow verdict=${verdict} forwarded=${forwarded ? 1 : 0} ` +
+        `between=[${coh.boundaries.join(',')}] gap=${coh.gapLines} ` +
+        `optN=${options.length} tool=${tool} prompt30="${p30}"`
+    )
+  )
+}
+
 // codex のコマンド承認 option ラベル末尾に内包されるショートカット
 // 文字を抽出する純関数。codex の承認 TUI は claude と異なり「番号 + Enter」型でなく
 // カーソル(›)+ Enter / ショートカットキー(y/p/esc)型のため、番号を送ると末尾 Enter が
@@ -2302,6 +2366,7 @@ if (typeof module !== 'undefined') {
     isCodexCommand,
     isCodexCommandApprovalOptions,
     looksLikeExitConfirm,
+    analyzeFrameCoherence,
     extractCodexCommand,
     findLastToolLine,
     buildDescription,

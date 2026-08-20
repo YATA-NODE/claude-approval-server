@@ -33,6 +33,7 @@ const {
   isCodexCommand,
   isCodexCommandApprovalOptions,
   looksLikeExitConfirm,
+  analyzeFrameCoherence,
   extractCodexCommand,
   findLastToolLine,
   buildDescription,
@@ -3572,6 +3573,55 @@ console.log('\n[68] composeExitConfirmPattern / cliVersionAhead')
   assertEq('[68c] 前置きつき出力から抽出', parseCliVersion('2.1.237 (Claude Code)'), '2.1.237')
   assertEq('[68c] codex 形式から抽出', parseCliVersion('codex-cli 0.147.0'), '0.147.0')
   assertEq('[68c] null 入力', parseCliVersion(null), null)
+}
+
+// -------------------------------------------------------
+// 69. 枠所属の shadow 観測(analyzeFrameCoherence、判定には未使用)
+// -------------------------------------------------------
+console.log('\n[69] analyzeFrameCoherence(枠所属の shadow 観測)')
+{
+  const coh = (seg) => {
+    const qIdx = seg.indexOf('?')
+    const firstOptAt = seg.search(/[1-9][.)]/)
+    return analyzeFrameCoherence(seg, qIdx, firstOptAt)
+  }
+
+  // 非一貫: prompt(前ダイアログの残存)と選択肢の間に、前ダイアログの終端マーカー行 /
+  // ● のターン行 / 次の枠の上端が挟まる形(終了確認画面の実害と同じ構図)
+  const stale = [
+    ' Did you mean this one?',
+    ' Enter to confirm · Esc to cancel',
+    ' ● Bash(sleep 600)',
+    ' ╭──────────────╮',
+    ' │ ❯ 1. Exit and stop tasks',
+  ].join('\n')
+  const r1 = coh(stale)
+  assertEq('[69a] 残存 prompt の形は非一貫', r1.coherent, false)
+  assertEq(
+    '[69a] 境界の種別を列挙する',
+    r1.boundaries.join(','),
+    'end-marker,turn,box-corner'
+  )
+
+  // 非一貫: 罫線だけが挟まる形
+  const ruled = [' Old question?', ' ─────', ' ❯ 1. Exit and stop tasks'].join('\n')
+  assertEq('[69b] 罫線が挟まれば非一貫', coh(ruled).coherent, false)
+
+  // 一貫: 空行を挟む通常の AUQ
+  const normal = [' Which way should we go?', '', ' ❯ 1. Stay on this branch'].join('\n')
+  assertEq('[69c] 空行だけなら一貫', coh(normal).coherent, true)
+
+  // 一貫: 箱内の余白行(`│` のみ)
+  const boxed = [' │ Which way should we go?', ' │', ' │ ❯ 1. A 案'].join('\n')
+  assertEq('[69c] 箱内の余白行は境界に数えない', coh(boxed).coherent, true)
+
+  // 一貫: codex のコマンド行が prompt と選択肢の間に挟まる正当な形
+  const codex = [' Run this command?', ' $ ls -la', ' ❯ 1. Yes'].join('\n')
+  assertEq('[69c] codex の $ 行は境界に数えない', coh(codex).coherent, true)
+
+  // 隣接(間に行がない)は一貫
+  const adjacent = [' Proceed?', ' ❯ 1. Yes'].join('\n')
+  assertEq('[69c] 隣接は一貫', coh(adjacent).coherent, true)
 }
 
 // -------------------------------------------------------
